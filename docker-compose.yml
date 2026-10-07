@@ -1,0 +1,26 @@
+# Portainer stack (Deploy → Stacks → Create stack → "Dockerfile / docker-compose.yml")
+
+version: "3.9"
+
+services:
+  scanner:
+    image: ghcr.io/pixelartist/pokemon-card-scanner:latest
+    container_name: pokemon-card-scanner
+    restart: unless-stopped
+    ports:
+      - "5005:5005"
+    environment:
+      # Required: your PTCG API key (card data source)
+      - PTCG_API_KEY=***
+      # Optional overrides
+      - HOST=0.0.0.0
+      - PORT=5005
+    volumes:
+      # Persistent data: SQLite DB, card images, CLIP index, scan uploads
+      - /opt/data/pokemon-card-scanner/data:/opt/data/pokemon-card-scanner/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s

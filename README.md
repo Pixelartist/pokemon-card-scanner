@@ -141,3 +141,36 @@ MIT License - Feel free to use and modify for personal or commercial purposes.
 - Pokemon TCG API: https://pokemontcgapi.com/
 - FastAPI: https://fastapi.tiangolo.com/
 - PokeCardEx: https://www.pokecardex.com/ (inspiration)
+
+## Docker & Portainer
+
+The repo ships a `Dockerfile` and `docker-compose.yml`. Pushing to `main` triggers
+`.github/workflows/build.yml`, which builds a CPU-only image and publishes it to
+**GitHub Container Registry** (`ghcr.io/pixelartist/pokemon-card-scanner:latest`).
+
+### Deploy in Portainer
+
+1. **Deploy → Stacks → Create stack** → choose **"Dockerfile / docker-compose.yml"**
+   (or paste `docker-compose.yml` from this repo).
+2. Bind-mount the data volume so your collection, DB, and scans persist:
+   ```yaml
+   volumes:
+     scanner:
+       driver: local
+       driver_opts:
+         type: none
+         o: bind
+         device: /opt/data/pokemon-card-scanner/data
+   ```
+   or simply `- /opt/data/pokemon-card-scanner/data:/opt/data/pokemon-card-scanner/data`.
+3. Set `PTCG_API_KEY` in the stack environment.
+4. Deploy. The container auto-seeds the SQLite schema on first boot.
+
+> The data volume must be writable by uid `1000` (the container's `appuser`).
+> On the NAS: `chown -R 1000:1000 /opt/data/pokemon-card-scanner/data`.
+
+## Auth
+
+Sessions use short-lived JWT access tokens (in memory / `sessionStorage`) plus a
+30-day refresh token stored in an `httpOnly; Secure; SameSite=None` cookie,
+hashed in SQLite and rotated on every use. Survives server restarts.
