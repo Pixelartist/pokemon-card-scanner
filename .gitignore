@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Environment & secrets — never commit
+.env
+.env.*
+*.key
+demo_token.txt
+
+# Runtime data (mounted as volume in Docker)
+data/
+database.db
+*.db
+server.log
+server_*.log
+server.pid
+logs/
+
+# Model weights (downloaded/mounted, not stored in git)
+*.pt
+*.onnx
+weights/
+# Exception: the 5MB card-detection model the app loads at runtime
+!src/models/pokemon_card_yolo.pt
+src/models/.cache/
+src/models/best.pt
+src/models/events.out.tfevents.*
+src/models/thumbnail.jpg
+src/models/.gitattributes
+
+# Scratch / test leftovers
+test_*.py
+debug_*.py
+kanban/
+*.tgz
+cache/
+.DS_Store
+*.log

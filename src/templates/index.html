@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pokémon Card Scanner</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/main.css">
+    <!-- StPageFlip for realistic book binding effect -->
+    <script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1 class="logo">
+                    <span class="logo-icon">⚡</span>
+                    Pokémon Card Scanner
+                </h1>
+                <p class="subtitle">Scan, collect, and browse your card binder</p>
+            </div>
+            <div class="user-status" id="user-status">
+                <span class="status-dot"></span>
+                <span class="username">Guest</span>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="tabs">
+            <button class="tab active" data-tab="scan">
+                <span class="tab-icon">📷</span>
+                Scanner
+            </button>
+            <button class="tab" data-tab="binder">
+                <span class="tab-icon">📖</span>
+                Binder
+            </button>
+            <button class="tab" data-tab="gallery">
+                <span class="tab-icon">🖼️</span>
+                Gallery
+            </button>
+            <button class="tab" data-tab="stats">
+                <span class="tab-icon">📊</span>
+                Stats
+            </button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="content">
+            <div class="container">
+            <!-- Scanner Tab -->
+            <section id="scan-tab" class="tab-content active">
+                <div class="scan-layout">
+                    <div class="scan-main">
+                        <div class="scan-header">
+                            <div class="mode-switcher">
+                                <button id="mode-upload" class="mode-btn active">
+                                    <span class="mode-icon">📁</span> Upload
+                                </button>
+                                <button id="mode-camera" class="mode-btn">
+                                    <span class="mode-icon">📷</span> Camera
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Upload Zone -->
+                        <div id="drop-zone" class="drop-zone">
+                            <div class="drop-icon">
+                                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                    <polyline points="17 8 12 3 7 8"/>
+                                    <line x1="12" y1="3" x2="12" y2="15"/>
+                                </svg>
+                            </div>
+                            <h3>Drop your card here</h3>
+                            <p>or click to browse files</p>
+                            <input type="file" id="image-input" accept="image/*" hidden>
+                            <div class="supported-formats">
+                                Supports JPG, PNG, WebP
+                            </div>
+                        </div>
+
+                        <!-- Camera Section -->
+                        <div id="camera-section" class="camera-section hidden">
+                            <div class="camera-wrapper">
+                                <video id="camera-preview" autoplay playsinline></video>
+                                <canvas id="detection-overlay"></canvas>
+                                <!-- Card alignment frame -->
+                                <div id="card-frame" class="card-frame">
+                                    <div class="frame-corner top-left"></div>
+                                    <div class="frame-corner top-right"></div>
+                                    <div class="frame-corner bottom-left"></div>
+                                    <div class="frame-corner bottom-right"></div>
+                                    <div class="frame-hint">Align card here</div>
+                                </div>
+                            </div>
+                            <div class="camera-controls">
+                                <button id="capture-btn" class="btn btn-primary btn-lg">
+                                    <span class="btn-icon">📸</span> Capture
+                                </button>
+                                <button id="stop-camera-btn" class="btn btn-secondary">Stop</button>
+                            </div>
+                            <div class="auto-detect-toggle">
+                                <label class="toggle-label">
+                                    <input type="checkbox" id="auto-detect-toggle" checked>
+                                    <span class="toggle-text">Auto-capture when card detected</span>
+                                </label>
+                                <div id="detection-status" class="detection-status">Point camera at a card</div>
+                            </div>
+                            <canvas id="camera-canvas" hidden></canvas>
+                        </div>
+
+                        <!-- Preview -->
+                        <div id="preview" class="preview hidden">
+                            <img id="preview-img" alt="Preview">
+                            <div class="preview-actions">
+                                <button id="clear-btn" class="btn btn-secondary">Retake</button>
+                                <button id="identify-btn" class="btn btn-primary">Identify Card</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Scan Options Sidebar -->
+                    <div class="scan-sidebar">
+                        <div class="scan-options">
+                            <h3>Scan Options</h3>
+                            <div class="form-group">
+                                <label for="set-hint">Set Hint (optional)</label>
+                                <input type="text" id="set-hint" placeholder="e.g. sv1, base1, swsh1">
+                            </div>
+                            <div class="form-group">
+                                <label for="region">Region</label>
+                                <select id="region">
+                                    <option value="">Any Region</option>
+                                    <option value="WEST">West</option>
+                                    <option value="JP">Japan</option>
+                                    <option value="CN">China</option>
+                                </select>
+                            </div>
+                            <button id="scan-btn" class="btn btn-primary btn-full">
+                                🔍 Identify Card
+                            </button>
+                        </div>
+
+                        <!-- Scan Result -->
+                        <div id="scan-result" class="scan-result"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Binder Tab (Page Flip Book) -->
+            <section id="binder-tab" class="tab-content">
+                <div class="binder-container">
+                    <div class="binder-header">
+                        <h2>My Card Binder</h2>
+                        <div class="binder-controls">
+                            <span class="page-info" id="page-info">Page 1 of 1</span>
+                            <button id="prev-page" class="btn btn-icon" title="Previous Page">◀</button>
+                            <button id="next-page" class="btn btn-icon" title="Next Page">▶</button>
+                        </div>
+                    </div>
+                    <div id="book-container" class="book-container">
+                        <div id="flipbook" class="flipbook">
+                            <!-- Pages will be generated dynamically -->
+                            <div class="page" data-density="hard">
+                                <div class="page-content cover">
+                                    <div class="cover-inner">
+                                        <h2>My Collection</h2>
+                                        <p>Scan cards to build your binder</p>
+                                        <button id="start-scanning" class="btn btn-primary">Start Scanning</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="binder-footer">
+                        <p>Drag corners to flip • Use arrows to navigate</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Gallery Tab (Infinite Scroll) -->
+            <section id="gallery-tab" class="tab-content">
+                <div class="gallery-container">
+                    <div class="gallery-header">
+                        <h2>Card Gallery</h2>
+                        <div class="gallery-controls">
+                            <div class="search-box">
+                                <input type="text" id="gallery-search" placeholder="Search cards...">
+                            </div>
+                            <select id="gallery-sort">
+                                <option value="newest">Newest First</option>
+                                <option value="oldest">Oldest First</option>
+                                <option value="name">By Name</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="gallery-grid" class="gallery-grid">
+                        <div class="gallery-loading">
+                            <div class="spinner"></div>
+                            <p>Loading cards...</p>
+                        </div>
+                    </div>
+                    <div id="gallery-end" class="gallery-end hidden">
+                        <p>No more cards to load</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Stats Tab -->
+            <section id="stats-tab" class="tab-content">
+                <div class="stats-layout">
+                    <div class="stats-header">
+                        <h2>Collection Statistics</h2>
+                        <button id="export-stats" class="btn btn-secondary">Export Report</button>
+                    </div>
+                    <div id="stats-grid" class="stats-grid">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <p>Loading statistics...</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Login Modal -->
+    <div id="login-modal" class="modal hidden">
+        <div class="modal-content modal-auth">
+            <button class="modal-close" data-close="true">&times;</button>
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-auth="login">Login</button>
+                <button class="auth-tab" data-auth="register">Register</button>
+            </div>
+            <form id="login-form" class="auth-form active" autocomplete="on">
+                <h3>Welcome Back</h3>
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" id="login-username" autocomplete="username" autocapitalize="none" required>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" id="login-password" autocomplete="current-password" required>
+                </div>
+                <button id="login-btn" type="submit" class="btn btn-primary btn-full">Login</button>
+                <p class="auth-error" id="login-error"></p>
+            </form>
+            <form id="register-form" class="auth-form" autocomplete="on">
+                <h3>Create Account</h3>
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" id="register-username" autocomplete="username" autocapitalize="none" required>
+                </div>
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="register-email" autocomplete="email" required>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" id="register-password" autocomplete="new-password" required>
+                </div>
+                <button id="register-btn" type="submit" class="btn btn-primary btn-full">Register</button>
+                <p class="auth-error" id="register-error"></p>
+            </form>
+        </div>
+    </div>
+
+    <!-- Card Detail Modal -->
+    <div id="card-modal" class="modal hidden">
+        <div class="modal-content modal-card">
+            <button class="modal-close" data-close="true">&times;</button>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <!-- Add to Collection Modal -->
+    <div id="add-modal" class="modal hidden">
+        <div class="modal-content">
+            <button class="modal-close" data-close="true">&times;</button>
+            <div id="add-modal-body"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/main.js?t={{ timestamp }}"></script>
+</body>
+</html>

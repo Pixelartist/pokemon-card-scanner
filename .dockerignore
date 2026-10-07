@@ -1,0 +1,24 @@
+# Keep the build context small: data volumes, weights, caches stay out of the image
+.git
+.github
+.venv
+venv
+__pycache__
+**/__pycache__
+data/
+!src/data
+*.db
+*.pt
+!src/models/pokemon_card_yolo.pt
+*.log
+*.pid
+.env
+.env.*
+test_*.py
+debug_*.py
+kanban/
+server_*.py
+DEEP_CHECK_REPORT.md
+ERROR_LOGGING_ENHANCEMENT.md
+INDEX_EXPANSION_PLAN.md
+NETWORK_ERROR_FIX_REPORT.md
