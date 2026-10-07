@@ -17,7 +17,7 @@ WORKDIR /opt/data/pokemon-card-scanner
 # CPU-only torch wheels keep the image ~1 GB smaller than the CUDA default
 COPY requirements.txt .
 RUN pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple \
-        torch==2.4.1+cpu torchvision==0.19.1+cpu \
+        torch==2.14.0+cpu torchvision==0.29.0+cpu \
     && pip install -r requirements.txt
 
 COPY . .
