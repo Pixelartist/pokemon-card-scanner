@@ -50,10 +50,11 @@ jobs:
 
       - name: Smoke-test the pushed image
         run: |
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}
+          TAG="ghcr.io/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+          docker pull "$TAG"
           docker run -d --name smoke -p 5005:5005 \
             -e PTCG_API_KEY=*** \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}
+            "$TAG"
           for i in $(seq 1 24); do
             sleep 10
             if curl -sf http://localhost:5005/health; then echo; echo SMOKE_OK; break; fi
