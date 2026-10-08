@@ -171,6 +171,12 @@ def resolve_card_image_url(card_id: str, raw_url: str = "") -> str:
     if not card_id:
         return ""
     images_dir = DB_DIR / "images"
+    # Already-resolved local static URLs (e.g. German art mounted at
+    # /static/german_cards/images) live outside data/images/ — verify in place.
+    if raw_url.startswith("/static/"):
+        direct = DB_DIR / raw_url[len("/static/"):]
+        if direct.is_file():
+            return raw_url
     cid = card_id.replace("/", "_").replace("!", "")
     candidates = [
         f"tcgdex/en/{cid}.png",
@@ -524,7 +530,10 @@ class CLIPCardMatcher:
         tmp.rename(self.index_path)
 
         embeddings = np.array([c.embedding for c in self.card_list], dtype=np.float32)
-        np.savez(self.embeddings_path, embeddings=embeddings)
+        card_ids = np.array([c.card_id for c in self.card_list], dtype="<U64")
+        emb_tmp = self.embeddings_path.with_suffix(".tmp.npz")
+        np.savez(emb_tmp, embeddings=embeddings, card_ids=card_ids)
+        emb_tmp.replace(self.embeddings_path)
 
     # ------------------------------------------------------------------- fetch
 
