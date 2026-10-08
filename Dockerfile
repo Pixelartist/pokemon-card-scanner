@@ -22,9 +22,13 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-u
 
 COPY . .
 
-# Non-root user; owns the app dir. The data volume is chown'ed at startup
-# since mounted volumes keep host ownership.
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /opt/data/pokemon-card-scanner
+# Run as the host's uid so bind-mounted data volumes (owned by whoever created
+# them on the host, e.g. uid 10000 for hermes) remain writable.
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+RUN groupadd -g ${HOST_GID} appgroup || true && \
+    useradd -m -u ${HOST_UID} -g ${HOST_GID} -o appuser && \
+    chown -R ${HOST_UID}:${HOST_GID} /opt/data/pokemon-card-scanner
 COPY --chown=appuser:appuser docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
