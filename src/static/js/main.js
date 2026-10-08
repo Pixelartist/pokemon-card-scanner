@@ -399,7 +399,13 @@ function displayScanResult(data, container) {
     }
     
     if (data.decision === 'no_match') {
-        container.innerHTML = '<div class="card-result"><h3>No Match Found</h3><p>No matching card found in the database. Try a clearer image or specify the set.</p></div>';
+        container.innerHTML = '<div class="card-result"><h3>No Match Found</h3><p>No matching card found. Try a clearer image, or use the manual search below to find and add your card.</p></div>';
+        const panel = document.getElementById('manual-search-panel');
+        if (panel) {
+            const inp = document.getElementById('manual-search-input');
+            if (inp) inp.focus();
+            panel.scrollIntoView({behavior: 'smooth', block: 'center'});
+        }
         return;
     }
     
@@ -445,8 +451,74 @@ function displayScanResult(data, container) {
         });
         html += '</div></div>';
     }
-    
     container.innerHTML = html;
+}
+
+async function performManualSearch() {
+    const input = document.getElementById('manual-search-input');
+    const resultsDiv = document.getElementById('manual-search-results');
+    if (!input || !resultsDiv) return;
+
+    const query = input.value.trim();
+    if (!query) return;
+
+    resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div><p>Searching...</p></div>';
+
+    try {
+        const response = await fetch(`/api/cards/search?query=${encodeURIComponent(query)}`);
+        const data = await response.json();
+
+        if (data.results.length === 0) {
+            resultsDiv.innerHTML = '<p>No cards found. Try a different search term.</p>';
+            return;
+        }
+
+        let html = '<div class="candidate-list">';
+        data.results.forEach(card => {
+            const imgSrc = card.images?.large || card.images?.small || '';
+            const setId = card.ptcg_id || `${card.set_name || ''}-${card.number || ''}`;
+            html += `
+                <div class="candidate" onclick="addToCollectionById('${setId}', '${card.name.replace(/'/g, "\\'")}')">
+                    <img src="${imgSrc}" alt="${card.name}" onerror="this.src='/static/images/default-card.png'">
+                    <div class="candidate-name">${card.name}</div>
+                    <div class="candidate-number">${card.number || ''} • ${card.rarity || ''}</div>
+                    <div class="candidate-set">${card.set_name || ''}</div>
+                </div>
+            `;
+        });
+        html += '</div>';
+        resultsDiv.innerHTML = html;
+    } catch (error) {
+        resultsDiv.innerHTML = `<p>Error searching: ${error.message}</p>`;
+    }
+}
+
+// Wire up the manual search input + button (permanent panel in the sidebar)
+document.addEventListener('DOMContentLoaded', () => {
+    const searchInput = document.getElementById('manual-search-input');
+    const searchBtn = document.getElementById('manual-search-btn');
+    if (searchInput) {
+        searchInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') performManualSearch();
+        });
+    }
+    if (searchBtn) {
+        searchBtn.addEventListener('click', performManualSearch);
+    }
+});
+
+async function addToCollectionById(ptcgId, name) {
+    // Get or create card in local DB, then open add modal
+    let cardId = ptcgId;
+    try {
+        const resp = await fetch(`/api/cards/${encodeURIComponent(ptcgId)}/create-or-get`, { method: 'POST' });
+        const result = await resp.json();
+        cardId = result.card_id || result.id || ptcgId;
+    } catch (e) {
+        console.error('Error creating card:', e);
+    }
+    // Now call the original addToCollection with the resolved card ID
+    addToCollection(cardId);
 }
 
 async function addToCollection(cardId) {

@@ -551,6 +551,107 @@ async def get_sets():
     return {"sets": sets}
 
 
+def _resolve_local_card_image(ptcg_id: str, img_url: str) -> str:
+    """Prefer locally-served card images; fall back to the remote URL."""
+    if ptcg_id:
+        base = Path(__file__).resolve().parent.parent.parent / "data"
+        candidates = [
+            (base / "clip_images" / f"{ptcg_id}.jpg", f"/static/clip_images/{ptcg_id}.jpg"),
+            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.png", f"/static/card_images/tcgdex/en/{ptcg_id}.png"),
+            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.jpg", f"/static/card_images/tcgdex/en/{ptcg_id}.jpg"),
+        ]
+        for full, url in candidates:
+            if full.exists():
+                return url
+    return img_url or ""
+
+
+@app.get("/api/cards/search")
+async def search_cards(query: str, limit: int = 20):
+    """Search cards by name, set code, or number (public endpoint, no auth).
+    Searches both the local DB and the full CLIP card index (~21k cards)."""
+    import sqlite3
+    from pathlib import Path
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
+
+    q = query.strip().lower()
+    results = []
+    seen = set()
+
+    # 1) Database results
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    search_param = f"%{q}%"
+    cursor.execute(
+        """
+        SELECT c.id, c.ptcg_id, c.name, c.number, c.rarity, c.set_name, c.hp, c.types, c.images
+        FROM cards c
+        WHERE c.name LIKE ? OR c.number LIKE ? OR c.set_name LIKE ? OR c.ptcg_id LIKE ?
+        ORDER BY c.name ASC
+        LIMIT ?
+        """,
+        (search_param, search_param, search_param, search_param, limit)
+    )
+    for row in cursor.fetchall():
+        d = dict(row)
+        if d.get("images"):
+            try:
+                d["images"] = __import__("json").loads(d["images"])
+            except Exception:
+                d["images"] = {}
+            # Resolve external image URLs to local static paths
+            for img_key in ("small", "large"):
+                img_url = d["images"].get(img_key, "")
+                if img_url and img_url.startswith("https://"):
+                    d["images"][img_key] = _resolve_local_card_image(d.get("ptcg_id") or "", img_url)
+        if d.get("ptcg_id"):
+            seen.add(d["ptcg_id"])
+        results.append(d)
+    conn.close()
+
+    # 2) CLIP index results (covers cards not yet in the DB)
+    if len(results) < limit:
+        try:
+            from services.clip_matcher import get_clip_matcher
+            matcher = get_clip_matcher()
+            matcher.load_index()
+            for card in matcher.cards.values():
+                if len(results) >= limit:
+                    break
+                if card.card_id in seen:
+                    continue
+                haystacks = [
+                    (card.name or "").lower(),
+                    (card.number or "").lower(),
+                    (card.set_code or "").lower(),
+                    (card.set_name or "").lower(),
+                    card.card_id.lower(),
+                ]
+                if any(q in h for h in haystacks):
+                    seen.add(card.card_id)
+                    img = _resolve_local_card_image(card.card_id, card.image_url or "")
+                    results.append({
+                        "id": None,
+                        "ptcg_id": card.card_id,
+                        "name": card.name,
+                        "number": card.number,
+                        "rarity": card.rarity or "",
+                        "set_name": card.set_name or card.set_code,
+                        "types": getattr(card, "types", None) or [],
+                        "images": {"small": img, "large": img},
+                    })
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("CLIP index search failed: %s", e)
+
+    # Sort: exact-ish name matches first
+    results.sort(key=lambda d: (0 if q in (d.get("name") or "").lower() else 1, d.get("name") or ""))
+    results = results[:limit]
+
+    return {"results": results, "count": len(results)}
+
+
 @app.get("/api/cards/{card_id}")
 async def get_card(card_id: str):
     """Get a single card by ID (supports both ptcg_id like "me05-015" and DB PK)."""
