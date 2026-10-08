@@ -11,6 +11,51 @@ from api.models.schemas import CollectionItemCreate, BinderCreate, BinderUpdate
 logger = logging.getLogger(__name__)
 
 
+def _normalize_images(images, ptcg_id):
+    """Prefer locally-served card images; fix extension-less TCGdex URLs.
+
+    The TCGdex API returns image URLs WITHOUT a file extension
+    (e.g. https://assets.tcgdex.net/en/swsh/swsh10/046) which serve an
+    HTML error page instead of the image. Local copies live under
+    data/clip_images/{id}.jpg and data/images/tcgdex/en/{id}.png and are
+    served at /static/clip_images and /static/card_images/tcgdex/en.
+    """
+    if not images:
+        return images
+    from pathlib import Path
+    base = Path(__file__).resolve().parent.parent.parent / "data"
+    local = ""
+    if ptcg_id:
+        for full, url in (
+            (base / "clip_images" / f"{ptcg_id}.jpg", f"/static/clip_images/{ptcg_id}.jpg"),
+            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.png", f"/static/card_images/tcgdex/en/{ptcg_id}.png"),
+            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.jpg", f"/static/card_images/tcgdex/en/{ptcg_id}.jpg"),
+        ):
+            if full.exists():
+                local = url
+                break
+
+    def fix(u):
+        if not isinstance(u, str) or not u:
+            return u
+        if local:
+            return local
+        # extension-less TCGdex URL -> append .png so it resolves
+        if u.startswith("http") and u.rsplit(".", 1)[-1].lower() not in ("png", "jpg", "jpeg", "webp", "gif"):
+            return u + ".png"
+        return u
+
+    if isinstance(images, dict):
+        out = dict(images)
+        for k in ("small", "large", "hd"):
+            if k in out:
+                out[k] = fix(out[k])
+        return out
+    if isinstance(images, str):
+        return fix(images)
+    return images
+
+
 class CollectionService:
     """Manages the user's Pokemon card collection."""
 
@@ -104,6 +149,7 @@ class CollectionService:
                         images = json.loads(row['images'])
                     except:
                         images = None
+                    images = _normalize_images(images, row['ptcg_id'])
                 
                 types = None
                 if row['types']:
@@ -175,6 +221,7 @@ class CollectionService:
                     images = json.loads(row['images'])
                 except:
                     images = None
+                images = _normalize_images(images, row['ptcg_id'])
             
             types = None
             if row['types']:

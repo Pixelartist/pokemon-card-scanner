@@ -451,6 +451,8 @@ async def search_collection(query: str,
                 item["images"] = json.loads(item["images"])
             except:
                 item["images"] = []
+            from services.collection import _normalize_images
+            item["images"] = _normalize_images(item["images"], item.get("ptcg_id") or "")
         results.append(item)
     
     return {"results": results, "count": len(results)}
@@ -549,6 +551,33 @@ async def get_sets():
     client = get_client()
     sets = client.get_sets()
     return {"sets": sets}
+
+
+def _normalize_local_row_images(images, ptcg_id: str = ""):
+    from services.collection import _normalize_images
+    return _normalize_images(images, ptcg_id)
+
+
+def _resolve_tcgdex_image_url(image_url: str, ptcg_id: str = "") -> str:
+    """Normalize a TCGdex image URL.
+
+    The TCGdex API returns image URLs WITHOUT the file extension
+    (e.g. 'https://assets.tcgdex.net/en/swsh/swsh10/046'), and that
+    bare URL serves an HTML error page, not an image. Append the
+    extension so the URL actually resolves to the image.
+    """
+    if not image_url:
+        return ""
+    if not image_url.startswith("http"):
+        return image_url
+    # Already has an image extension?
+    if image_url.lower().rsplit(".", 1)[-1] in ("png", "jpg", "jpeg", "webp"):
+        return image_url
+    # Try to infer the extension from the card id (e.g. swsh10-046.png)
+    if ptcg_id:
+        return f"{image_url}.png"
+    # Fall back to the common .png
+    return f"{image_url}.png"
 
 
 def _resolve_local_card_image(ptcg_id: str, img_url: str) -> str:
@@ -668,6 +697,14 @@ async def get_card(card_id: str):
         conn.close()
         if row:
             card_dict = dict(row)
+            import json as _json
+            _imgs = card_dict.get("images")
+            if isinstance(_imgs, str):
+                try:
+                    _imgs = _json.loads(_imgs)
+                except Exception:
+                    _imgs = {}
+            _imgs = _normalize_local_row_images(_imgs, card_dict.get("ptcg_id") or "")
             return {
                 "ptcg_id": card_dict.get("ptcg_id"),
                 "name": card_dict.get("name"),
@@ -676,7 +713,7 @@ async def get_card(card_id: str):
                 "rarity": card_dict.get("rarity") or "",
                 "types": card_dict.get("types") or [],
                 "hp": card_dict.get("hp") or None,
-                "images": card_dict.get("images") or {},
+                "images": _imgs or {},
                 "source": "database"
             }
     except (ValueError, TypeError):
@@ -734,8 +771,8 @@ async def create_or_get_card(card_id: str):
         rarity = card_data.get("rarity", "")
         hp = card_data.get("hp", 0)
         types = card_data.get("types", [])
-        image_url = card_data.get("image", "")
-        
+        image_url = _resolve_tcgdex_image_url(card_data.get("image", ""), card_id)
+
         # Create or get in database
         db_id = collection.get_or_create_card(
             card_id=card_id,
@@ -866,7 +903,7 @@ async def get_card_details(card_id: str):
                             "types": types,
                             "artist": None,
                             "set": {"name": row["set_name"], "code": row["set_name"]},
-                            "images": images,
+                            "images": _normalize_local_row_images(images, card_id),
                         },
                         "legalities": None,
                         "prices": None,
@@ -898,7 +935,8 @@ async def get_card_details(card_id: str):
                     "types": getattr(local, "types", None) or None,
                     "artist": getattr(local, "artist", None) or None,
                     "set": {"name": local.set_name or local.set_code, "code": local.set_code},
-                    "images": {"small": local.image_url, "large": local.image_url},
+                    "images": {"small": _resolve_local_card_image(local.card_id, local.image_url or ""),
+                               "large": _resolve_local_card_image(local.card_id, local.image_url or "")},
                 },
                 "legalities": None,
                 "prices": None,
@@ -909,6 +947,7 @@ async def get_card_details(card_id: str):
     # Add structured details
     details = {
         "basic_info": {
+            "ptcg_id": card.get("ptcg_id") or card_id,
             "name": card.get("name"),
             "number": card.get("number"),
             "rarity": card.get("rarity"),
@@ -930,6 +969,15 @@ async def get_card_details(card_id: str):
             details["basic_info"]["images"] = json.loads(details["basic_info"]["images"])
         except Exception:
             pass
+    from services.collection import _normalize_images
+    _bi = details["basic_info"]
+    _pid = _bi.get("ptcg_id") or ""
+    _bi_imgs = _normalize_images(_bi.get("images"), _pid)
+    if isinstance(_bi_imgs, dict):
+        for _k in ("small", "large", "hd"):
+            if _bi_imgs.get(_k):
+                _bi_imgs[_k] = _resolve_local_card_image(_pid, _bi_imgs[_k])
+    _bi["images"] = _bi_imgs
     
     return details
 
