@@ -114,6 +114,17 @@ def main():
     matcher = get_clip_matcher()
     matcher._load_model()
 
+    # Pre-allocate to avoid vstack/concatenate memory churn (8GB cgroup limit)
+    n_existing = mat.shape[0]
+    n_new = len(todo)
+    new_mat = np.empty((n_existing + n_new, 512), dtype=np.float32)
+    new_mat[:n_existing] = mat
+    new_ids = np.empty(n_existing + n_new, dtype="<U64")
+    new_ids[:n_existing] = ids
+    mat = new_mat
+    ids = new_ids
+    del new_mat, new_ids
+
     def persist():
         tmp = INDEX_PATH.with_suffix(".tmp")
         with open(tmp, "w") as f:
@@ -154,8 +165,8 @@ def main():
                 "types": [], "hp": 0, "artist": "", "attacks": [],
                 "weaknesses": [], "retreat": 0, "pricing": {},
             })
-            mat = np.vstack([mat, np.array([emb], dtype=np.float32)])
-            ids = np.concatenate([ids, np.array([de_id], dtype="<U64")])
+            mat[n_existing + added] = np.array(emb, dtype=np.float32)
+            ids[n_existing + added] = de_id
             added += 1
         persist()
         print(f"  {i + len(chunk)}/{len(todo)} processed | +{added} indexed, {failed} failed", flush=True)
