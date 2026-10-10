@@ -1177,13 +1177,22 @@ async function showEnhancedCardDetail(cardId) {
     const setData = card.basic_info?.set || {};
     const setCode = setData.code || card.basic_info?.set?.code || 'N/A';
     
+    // Normalize: the API may hand back SQLite columns as JSON strings
+    const parseJsonish = (v, fallback) => {
+        if (v == null) return fallback;
+        if (typeof v === 'string') {
+            try { const p = JSON.parse(v); return p == null ? fallback : p; } catch { return fallback; }
+        }
+        return v;
+    };
+
     // Format types
-    const types = (card.basic_info?.types || []).map(t => 
+    const types = parseJsonish(card.basic_info?.types, []).map(t => 
         `<span class="type-badge">${t}</span>`
     ).join('');
     
     // Format legalities
-    const legalities = card.legalities || {};
+    const legalities = parseJsonish(card.legalities, {});
     const legalBadges = Object.entries(legalities)
         .filter(([_, v]) => v === "Legal")
         .map(([k, _]) => `<span class="legal-badge">${k}</span>`)
@@ -1591,9 +1600,11 @@ function buildBinderPages(cards) {
         container.appendChild(page);
     }
     
-    // Add blank pages if needed
-    const totalPages = 1 + Math.ceil(cards.length / CARDS_PER_PAGE);
-    if (totalPages % 2 === 1) {
+    // Landscape spreads pair data pages after the hard cover. When the data
+    // page count is odd, the last spread would show a lone left page with the
+    // dark container showing through on the right — pad with a blank page.
+    const dataPages = Math.ceil(cards.length / CARDS_PER_PAGE);
+    if (dataPages % 2 === 1) {
         const blankPage = document.createElement('div');
         blankPage.className = 'page';
         blankPage.setAttribute('data-density', 'soft');
@@ -1601,7 +1612,7 @@ function buildBinderPages(cards) {
         container.appendChild(blankPage);
     }
     
-    return totalPages;
+    return 1 + dataPages;
 }
 
 async function initBinder() {
@@ -1646,17 +1657,17 @@ async function initBinder() {
     const containerWidth = bookContainer.offsetWidth - (isMobile ? 20 : 60);
     const pageWidth = isMobile
         ? Math.min(containerWidth, 360)            // single page per view on phones
-        : Math.min(containerWidth / 2, 320);       // two-page spread on desktop
-    const pageHeight = pageWidth * (3.5 / 2.5); // Pokemon card ratio
+        : Math.min(containerWidth / 2, 380);       // two-page spread on desktop
+    const pageHeight = Math.min(pageWidth * (3.5 / 2.5), 560); // Pokemon card ratio
     
     pageFlip = new St.PageFlip(bookEl, {
         width: pageWidth,
         height: pageHeight,
         size: 'fixed',
-        minWidth: 160,
-        maxWidth: 400,
-        minHeight: 224,
-        maxHeight: 560,
+        minWidth: pageWidth,
+        maxWidth: pageWidth,
+        minHeight: pageHeight,
+        maxHeight: pageHeight,
         drawShadow: true,
         flippingTime: 800,
         usePortrait: isMobile,   // one page per view on phones
@@ -1666,22 +1677,29 @@ async function initBinder() {
         mobileScrollSupport: true
     });
     
-    pageFlip.loadFromHtml(pages);
+    // page-flip@2.0.7 exposes loadFromHTML (capital HTML) — the old
+    // loadFromHtml typo threw TypeError, so the book was never rendered:
+    // only the raw source cover (with its "Start Scanning" button) remained
+    // and navigation did nothing. The library adopts the passed live nodes.
+    pageFlip.loadFromHTML([...pages]);
     
     // Update page info
     updatePageInfo();
     
-    // Bind navigation
-    document.getElementById('prev-page')?.addEventListener('click', () => {
-        pageFlip?.flipPrev();
-    });
-    
-    document.getElementById('next-page')?.addEventListener('click', () => {
-        pageFlip?.flipNext();
-    });
+    // Bind navigation (once — initBinder re-runs on every tab switch)
+    const prevBtn = document.getElementById('prev-page');
+    const nextBtn = document.getElementById('next-page');
+    if (prevBtn && !prevBtn.dataset.bound) {
+        prevBtn.dataset.bound = '1';
+        prevBtn.addEventListener('click', () => pageFlip?.flipPrev());
+    }
+    if (nextBtn && !nextBtn.dataset.bound) {
+        nextBtn.dataset.bound = '1';
+        nextBtn.addEventListener('click', () => pageFlip?.flipNext());
+    }
     
     // Listen for page turn events
-    pageFlip?.on('flip', (e) => {
+    pageFlip?.on('flip', () => {
         updatePageInfo();
     });
 }
@@ -1692,6 +1710,11 @@ function updatePageInfo() {
         const current = pageFlip.getCurrentPageIndex() + 1;
         const total = pageFlip.getPageCount();
         pageInfo.textContent = `Page ${current} of ${total}`;
+        // Disable nav buttons at the edges
+        const prev = document.getElementById('prev-page');
+        const next = document.getElementById('next-page');
+        if (prev) prev.disabled = current <= 1;
+        if (next) next.disabled = current >= total;
     }
 }
 

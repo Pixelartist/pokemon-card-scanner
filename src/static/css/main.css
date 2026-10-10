@@ -1203,6 +1203,13 @@ body {
     font-size: 1.2rem;
 }
 
+.btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
 /* Preview */
 .preview {
     text-align: center;
