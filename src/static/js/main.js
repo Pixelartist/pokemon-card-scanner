@@ -1641,21 +1641,25 @@ async function initBinder() {
     const pages = bookEl.querySelectorAll('.page');
     
     // Calculate page size based on container
-    const containerWidth = document.getElementById('book-container').offsetWidth - 60;
-    const pageWidth = Math.min(containerWidth / 2, 320);
+    const isMobile = window.innerWidth <= 768;
+    const bookContainer = document.getElementById('book-container');
+    const containerWidth = bookContainer.offsetWidth - (isMobile ? 20 : 60);
+    const pageWidth = isMobile
+        ? Math.min(containerWidth, 360)            // single page per view on phones
+        : Math.min(containerWidth / 2, 320);       // two-page spread on desktop
     const pageHeight = pageWidth * (3.5 / 2.5); // Pokemon card ratio
     
     pageFlip = new St.PageFlip(bookEl, {
         width: pageWidth,
         height: pageHeight,
         size: 'fixed',
-        minWidth: 200,
+        minWidth: 160,
         maxWidth: 400,
-        minHeight: 280,
+        minHeight: 224,
         maxHeight: 560,
         drawShadow: true,
         flippingTime: 800,
-        usePortrait: false,
+        usePortrait: isMobile,   // one page per view on phones
         startZIndex: 50,
         maxShadowOpacity: 0.5,
         showCover: true,
