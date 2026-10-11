@@ -75,11 +75,11 @@ class CollectionService:
             cursor.execute(
                 """INSERT INTO collection_items 
                    (card_id, user_id, condition, language, quantity, notes, 
-                    is_reverse_holo, is_first_edition, scan_image_path, date_acquired)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    is_reverse_holo, is_first_edition, scan_image_path, crop_image_path, date_acquired)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (item.card_id, user_id, item.condition, item.language, item.quantity,
                  item.notes, item.is_reverse_holo, item.is_first_edition,
-                 item.scan_image_path, datetime.utcnow().strftime('%Y-%m-%d'))
+                 item.scan_image_path, item.crop_image_path, datetime.utcnow().strftime('%Y-%m-%d'))
             )
             conn.commit()
             item_id = cursor.lastrowid
@@ -97,11 +97,11 @@ class CollectionService:
                 cursor.execute(
                     """INSERT INTO collection_items 
                        (card_id, user_id, condition, language, quantity, notes,
-                        is_reverse_holo, is_first_edition, scan_image_path, date_acquired)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        is_reverse_holo, is_first_edition, scan_image_path, crop_image_path, date_acquired)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (item.card_id, user_id, item.condition, item.language, item.quantity,
                      item.notes, item.is_reverse_holo, item.is_first_edition,
-                     item.scan_image_path, datetime.utcnow().strftime('%Y-%m-%d'))
+                     item.scan_image_path, item.crop_image_path, datetime.utcnow().strftime('%Y-%m-%d'))
                 )
                 saved_items.append(self.get_item(cursor.lastrowid, user_id))
             conn.commit()
@@ -169,6 +169,7 @@ class CollectionService:
                     "is_reverse_holo": bool(row["is_reverse_holo"]),
                     "is_first_edition": bool(row["is_first_edition"]),
                     "scan_image_path": row["scan_image_path"],
+                    "crop_image_path": row["crop_image_path"],
                     "date_acquired": row["date_acquired"],
                     "added_at": row["added_at"],
                     "card": {
@@ -241,6 +242,7 @@ class CollectionService:
                 "is_reverse_holo": bool(row["is_reverse_holo"]),
                 "is_first_edition": bool(row["is_first_edition"]),
                 "scan_image_path": row["scan_image_path"],
+                "crop_image_path": row["crop_image_path"],
                 "date_acquired": row["date_acquired"],
                 "card": {
                     "ptcg_id": row["ptcg_id"],

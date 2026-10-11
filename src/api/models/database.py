@@ -79,6 +79,7 @@ def init_db():
             date_acquired TEXT,
             added_at TEXT DEFAULT CURRENT_TIMESTAMP,
             scan_image_path TEXT,
+            crop_image_path TEXT,
             FOREIGN KEY (card_id) REFERENCES cards (id),
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
@@ -143,6 +144,16 @@ def init_db():
     
     for idx_sql in indexes:
         cursor.execute(idx_sql)
+    
+    # Column migrations for pre-existing databases (CREATE TABLE IF NOT
+    # skips them, so SQLite needs an explicit ALTER TABLE, one column at a
+    # time). Keep in sync with the collection_items schema above.
+    cursor.execute("PRAGMA table_info(collection_items)")
+    ci_columns = {r[1] for r in cursor.fetchall()}
+    if 'scan_image_path' not in ci_columns:
+        cursor.execute("ALTER TABLE collection_items ADD COLUMN scan_image_path TEXT")
+    if 'crop_image_path' not in ci_columns:
+        cursor.execute("ALTER TABLE collection_items ADD COLUMN crop_image_path TEXT")
     
     conn.commit()
     conn.close()

@@ -40,6 +40,48 @@ init_db()
 SCAN_DIR = Path("/opt/data/pokemon-card-scanner/data/scans")
 SCAN_DIR.mkdir(parents=True, exist_ok=True)
 
+# Card crops cut out of scan photos by the detector (shown in detail modals)
+CROP_DIR = SCAN_DIR / "crops"
+CROP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def crop_card_image(image_bytes: bytes, timestamp: str) -> Optional[str]:
+    """Run the detector on a scan image and save the cropped card.
+
+    Returns the relative path (for the URL /data/scans/crops/...) or None if
+    no card could be cut out. Never raises: a failed crop must not fail the
+    scan itself.
+    """
+    try:
+        import io
+        from PIL import Image
+        from services.card_detector import get_detector
+
+        detector = get_detector()
+        result = detector.detect_card(image_bytes)
+        if not result.get("found") or not result.get("bbox"):
+            return None
+
+        x, y, w, h = result["bbox"]
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img_w, img_h = img.size
+        pad = max(2, int(0.01 * max(w, h)))  # 1% breathing room
+        left, top = max(0, x - pad), max(0, y - pad)
+        right, bottom = min(img_w, x + w + pad), min(img_h, y + h + pad)
+        if right - left < 40 or bottom - top < 40:
+            return None  # degenerate detection
+
+        crop = img.crop((left, top, right, bottom))
+        # Keep file sizes sane on the NAS without losing detail
+        if max(crop.size) > 1200:
+            crop.thumbnail((1200, 1200), Image.LANCZOS)
+        crop_path = CROP_DIR / f"crop_{timestamp}.jpg"
+        crop.save(crop_path, "JPEG", quality=88)
+        return f"scans/crops/crop_{timestamp}.jpg"
+    except Exception as e:
+        logger.warning(f"Card crop failed: {e}")
+        return None
+
 # Create FastAPI app
 app = FastAPI(title="Pokemon Card Scanner", version="1.0.0")
 
@@ -162,7 +204,8 @@ async def scan_card(
             raise HTTPException(status_code=400, detail="Empty image file")
 
         # Save original scan image
-        scan_filename = f"scan_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{image.filename}"
+        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        scan_filename = f"scan_{ts}_{image.filename}"
         scan_path = SCAN_DIR / scan_filename
         with open(scan_path, "wb") as f:
             f.write(image_bytes)
@@ -179,6 +222,10 @@ async def scan_card(
             set_hint=set_hint,
             region=region,
         )
+
+        # Cut the card out of the photo (detector also runs off-loop). This is
+        # a convenience for later viewing — never fail the scan over it.
+        crop_relative_path = await asyncio.to_thread(crop_card_image, image_bytes, datetime.utcnow().strftime('%Y%m%d_%H%M%S%f'))
 
         # If we got candidates from offline matcher, they already have image_url and name
         # If from API, we need to hydrate with full card details
@@ -212,6 +259,8 @@ async def scan_card(
 
         # Add scan path to response
         result["scan_image_path"] = scan_relative_path
+        if crop_relative_path:
+            result["crop_image_path"] = crop_relative_path
 
         return JSONResponse(result)
 
@@ -229,6 +278,7 @@ async def add_to_collection(card_id: str = Form(...),
                             is_reverse_holo: bool = Form(False),
                             is_first_edition: bool = Form(False),
                             scan_image_path: Optional[str] = Form(None),
+                            crop_image_path: Optional[str] = Form(None),
                             current_user: User = Depends(get_current_user)):
     """Add a card to the collection."""
     try:
@@ -330,6 +380,7 @@ async def add_to_collection(card_id: str = Form(...),
             is_reverse_holo=is_reverse_holo,
             is_first_edition=is_first_edition,
             scan_image_path=scan_image_path,
+            crop_image_path=crop_image_path,
         )
         item = collection_service.add_card(item_data, user_id=current_user.id)
         return {"success": True, "id": item["id"]}
@@ -456,6 +507,45 @@ async def search_collection(query: str,
         results.append(item)
     
     return {"results": results, "count": len(results)}
+
+
+@app.get("/api/collection/crop/{card_id}")
+async def get_card_crop(card_id: str,
+                        current_user: User = Depends(get_current_user)):
+    """Most recent user scan of this card, preferring the detector crop.
+
+    card_id may be a ptcg_id (with or without the de_ German-index prefix).
+    Returns {found: false} when the user never scanned this card.
+    """
+    import sqlite3
+    from pathlib import Path
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        candidates = [card_id]
+        if card_id.startswith("de_"):
+            candidates.append(card_id[3:])
+        placeholders = ",".join("?" * len(candidates))
+        cursor.execute(
+            f"""SELECT ci.scan_image_path, ci.crop_image_path, ci.added_at
+                FROM collection_items ci
+                JOIN cards c ON ci.card_id = c.id
+                WHERE ci.user_id = ? AND c.ptcg_id IN ({placeholders})
+                  AND (ci.crop_image_path IS NOT NULL OR ci.scan_image_path IS NOT NULL)
+                ORDER BY ci.added_at DESC LIMIT 1""",
+            (current_user.id, *candidates),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"found": False}
+        path = row["crop_image_path"] or row["scan_image_path"]
+        kind = "crop" if row["crop_image_path"] else "scan"
+        # Paths are stored relative to data/ which is mounted at /data
+        return {"found": True, "url": f"/data/{path}", "kind": kind, "date": row["added_at"]}
+    finally:
+        conn.close()
 
 
 @app.get("/api/collection/{item_id}")

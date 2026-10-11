@@ -41,6 +41,7 @@ class CollectionItemSchema(BaseModel):
     is_first_edition: bool = False
     date_acquired: Optional[datetime] = None
     scan_image_path: Optional[str] = None
+    crop_image_path: Optional[str] = None
 
 
 class CollectionItemCreate(BaseModel):
@@ -52,6 +53,7 @@ class CollectionItemCreate(BaseModel):
     is_reverse_holo: bool = False
     is_first_edition: bool = False
     scan_image_path: Optional[str] = None
+    crop_image_path: Optional[str] = None
 
 
 class BatchCollectionCreate(BaseModel):

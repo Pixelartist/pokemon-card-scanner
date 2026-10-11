@@ -115,6 +115,10 @@ localStorage.removeItem('auth_token');
 // here because token refresh (below) can run before the rest of the file.
 let ownedQtyMap = null;
 
+// Cut-out (or raw scan photo) from the most recent successful scan; travels
+// to the add-collection form so the stored item remembers the user's cut.
+let lastScanImages = null;
+
 // Non-blocking toast — native alert() halts JS until dismissed, which stalls
 // re-renders (e.g. the binder rebuild after adding a card).
 function showToast(message, ms = 2500) {
@@ -383,6 +387,12 @@ if (scanBtn) {
             const data = await response.json();
             // Unwrap the API response envelope
             const result = data.data || data;
+            if (result.scan_image_path || result.crop_image_path) {
+                lastScanImages = {
+                    scan_image_path: result.scan_image_path || null,
+                    crop_image_path: result.crop_image_path || null,
+                };
+            }
             displayScanResult(result, resultDiv);
         } catch (error) {
             if (error.name === 'AbortError') {
@@ -604,6 +614,8 @@ async function addToCollection(cardId) {
                 </label>
             </div>
             <input type="hidden" name="card_id" value="${cardId}">
+            ${lastScanImages?.scan_image_path ? `<input type="hidden" name="scan_image_path" value="${lastScanImages.scan_image_path}">` : ''}
+            ${lastScanImages?.crop_image_path ? `<input type="hidden" name="crop_image_path" value="${lastScanImages.crop_image_path}">` : ''}
             <button type="submit" class="btn btn-primary">Add to Collection</button>
         </form>
     `;
@@ -629,6 +641,7 @@ async function submitAddCollection(e) {
         if (response.ok) {
             showToast('✓ Added to collection');
             ownedQtyMap = null;  // refresh owned-count cache
+            lastScanImages = null;  // crop belongs to this add only
             document.getElementById('add-modal').classList.add('hidden');
             initBinder();
         } else {
@@ -1236,6 +1249,30 @@ async function showEnhancedCardDetail(cardId) {
     });
     const card = await response.json();
     const ownedQty = await getOwnedQuantity(cardId);
+
+    // If the user scanned this card before, show their cut-out card (or the
+    // raw scan photo) above the official art.
+    let cardScanHtml = '';
+    try {
+        const cropResp = await fetch('/api/collection/crop/' + encodeURIComponent(cardId), {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (cropResp.ok) {
+            const cropData = await cropResp.json();
+            if (cropData.found) {
+                cardScanHtml = `
+                    <div class="card-scan-section">
+                        <div class="card-scan-header">
+                            <span>${cropData.kind === 'crop' ? '✂ Your Cut' : '📷 Your Scan'}</span>
+                            <span class="card-scan-date">${new Date(cropData.date).toLocaleDateString()}</span>
+                        </div>
+                        <img src="${cropData.url}" alt="Your cut of this card">
+                    </div>`;
+            }
+        }
+    } catch (e) {
+        // Non-fatal — official art still shows
+    }
     
     const modal = document.getElementById('card-modal');
     const modalBody = document.getElementById('modal-body');
@@ -1294,6 +1331,7 @@ async function showEnhancedCardDetail(cardId) {
         <h2>${card.basic_info.name}</h2>
         <div class="enhanced-card-grid">
             <div class="card-image">
+                ${cardScanHtml}
                 <img src="${card.basic_info.images?.large || ''}" alt="${card.basic_info.name}">
             </div>
             <div class="card-details">
@@ -1622,7 +1660,7 @@ function normalizeCollectionItem(raw) {
         card_id: raw.card_id,
         ptcg_id: c.ptcg_id || '',
         card_name: c.name || raw.card_name || 'Unknown',
-        image_url: c.images?.large || c.images?.small || raw.scan_image_path || '',
+        image_url: c.images?.large || c.images?.small || raw.crop_image_path || raw.scan_image_path || '',
         set_id: c.ptcg_id ? c.ptcg_id.split('-')[0] : '',
         set_info: c.set_name || '',
     };

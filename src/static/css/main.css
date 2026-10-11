@@ -239,6 +239,29 @@ body {
     vertical-align: middle;
 }
 
+/* Card scan / cut section (shown in detail modal + binder) */
+.card-scan-section {
+    margin-bottom: 14px;
+}
+.card-scan-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    padding: 0 2px;
+}
+.card-scan-header img {
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    display: block;
+}
+.card-scan-date {
+    opacity: 0.7;
+}
+
 /* Scan Result */
 .scan-result {
     margin-top: 30px;
