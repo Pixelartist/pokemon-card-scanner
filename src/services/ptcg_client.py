@@ -315,6 +315,27 @@ class PokemonTCGClient:
             logger.error(f"Error fetching sets: {e}")
             return []
 
+    def get_prices(self, card_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch price data from the free pokemontcg.io API (no key required, rate-limited)."""
+        try:
+            resp = requests.get(
+                f"https://api.pokemontcg.io/v2/cards/{card_id}",
+                timeout=15
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data")
+                if data:
+                    return {
+                        "tcgplayer": data.get("tcgplayer"),
+                        "cardmarket": data.get("cardmarket"),
+                    }
+            elif resp.status_code == 429:
+                logger.warning(f"Rate limited by pokemontcg.io for {card_id}")
+            return None
+        except Exception as e:
+            logger.debug(f"Price fetch failed for {card_id}: {e}")
+            return None
+
 
 # Singleton instance
 _client: Optional[PokemonTCGClient] = None

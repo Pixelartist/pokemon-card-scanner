@@ -805,7 +805,39 @@ async function loadStats() {
         });
         const stats = await response.json();
         
+        const valueEur = stats.total_value_eur || 0;
+        const valueUsd = stats.total_value_usd || 0;
+        const topCards = stats.top_cards || [];
+        
+        let topCardsHtml = '';
+        if (topCards.length > 0) {
+            topCardsHtml = `
+                <div class="stat-card" style="grid-column: 1 / -1;">
+                    <div class="stat-label" style="margin-bottom: 15px;">Most Valuable Cards</div>
+                    <div class="top-cards-list">
+                        ${topCards.map(c => `
+                            <div class="top-card-item">
+                                <div class="top-card-name">${c.name} ${c.quantity > 1 ? `(×${c.quantity})` : ''}</div>
+                                <div class="top-card-value">
+                                    ${c.value_eur > 0 ? `€${c.value_eur.toFixed(2)}` : ''}
+                                    ${c.value_usd > 0 ? ` / $${c.value_usd.toFixed(2)}` : ''}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+        
         container.innerHTML = `
+            <div class="stat-card value-card">
+                <div class="stat-label">Collection Value (EUR)</div>
+                <div class="stat-number value-eur">€${valueEur.toFixed(2)}</div>
+            </div>
+            <div class="stat-card value-card">
+                <div class="stat-label">Collection Value (USD)</div>
+                <div class="stat-number value-usd">$${valueUsd.toFixed(2)}</div>
+            </div>
             <div class="stat-card">
                 <div class="stat-number">${stats.total_items}</div>
                 <div class="stat-label">Total Cards</div>
@@ -818,10 +850,11 @@ async function loadStats() {
                 <div class="stat-number">${stats.total_cards}</div>
                 <div class="stat-label">Total Items</div>
             </div>
-            <div class="stat-card" style="grid-column: span 2;">
+            <div class="stat-card" style="grid-column: 1 / -1;">
                 <div class="stat-label" style="margin-bottom: 15px;">Cards by Set</div>
                 ${stats.by_set.map(s => `<div>${s.set}: ${s.count}</div>`).join('')}
             </div>
+            ${topCardsHtml}
         `;
     } catch (error) {
         container.innerHTML = '<p>Error loading stats: ' + error.message + '</p>';
@@ -1310,16 +1343,28 @@ async function showEnhancedCardDetail(cardId) {
             <div class="price-section">
                 <h4>Market Prices</h4>
                 <div class="price-table">
-                    ${prices.tcgplayer?.marketPrice ? `
+                    ${prices.tcgplayer?.prices?.normal?.market ? `
                         <div class="price-item">
                             <div class="price-label">TCGPlayer Market</div>
-                            <div class="price-value">$${prices.tcgplayer.marketPrice}</div>
+                            <div class="price-value">$${prices.tcgplayer.prices.normal.market}</div>
                         </div>
                     ` : ''}
-                    ${prices.cardmarket?.avg30 ? `
+                    ${prices.tcgplayer?.prices?.reverseHolofoil?.market ? `
+                        <div class="price-item">
+                            <div class="price-label">TCGPlayer Reverse Holo</div>
+                            <div class="price-value">$${prices.tcgplayer.prices.reverseHolofoil.market}</div>
+                        </div>
+                    ` : ''}
+                    ${prices.cardmarket?.prices?.avg30 ? `
                         <div class="price-item">
                             <div class="price-label">Cardmarket 30d Avg</div>
-                            <div class="price-value">€${prices.cardmarket.avg30}</div>
+                            <div class="price-value">€${prices.cardmarket.prices.avg30}</div>
+                        </div>
+                    ` : ''}
+                    ${prices.cardmarket?.prices?.trendPrice ? `
+                        <div class="price-item">
+                            <div class="price-label">Cardmarket Trend</div>
+                            <div class="price-value">€${prices.cardmarket.prices.trendPrice}</div>
                         </div>
                     ` : ''}
                 </div>

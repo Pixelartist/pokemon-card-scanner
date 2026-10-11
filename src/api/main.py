@@ -983,7 +983,8 @@ async def get_card_details(card_id: str):
                             types = _json.loads(types)
                         except Exception:
                             types = [types] if types else None
-                    return {
+                    # Build response and fetch prices
+                    details = {
                         "basic_info": {
                             "id": str(row["id"]),
                             "name": row["name"],
@@ -999,6 +1000,15 @@ async def get_card_details(card_id: str):
                         "prices": None,
                         "source": "local_db",
                     }
+                    # Fetch prices from pokemontcg.io
+                    try:
+                        client = get_client()
+                        prices = client.get_prices(row["ptcg_id"])
+                        if prices:
+                            details["prices"] = prices
+                    except Exception as e:
+                        logger.debug(f"Price fetch skipped for local card {row['ptcg_id']}: {e}")
+                    return details
         except Exception:
             pass
     client = get_client()
@@ -1032,6 +1042,15 @@ async def get_card_details(card_id: str):
                 "prices": None,
                 "source": "local_index",
             }
+            # Fetch prices from pokemontcg.io
+            try:
+                client = get_client()
+                prices = client.get_prices(local.card_id)
+                if prices:
+                    details["prices"] = prices
+            except Exception as e:
+                logger.debug(f"Price fetch skipped for local_index card {local.card_id}: {e}")
+            return details
         raise HTTPException(status_code=404, detail="Card not found")
     
     # Add structured details
@@ -1068,7 +1087,17 @@ async def get_card_details(card_id: str):
             if _bi_imgs.get(_k):
                 _bi_imgs[_k] = _resolve_local_card_image(_pid, _bi_imgs[_k])
     _bi["images"] = _bi_imgs
-    
+
+    # Fetch prices if not already present (from pokemontcg.io free API)
+    if not details.get("prices"):
+        try:
+            client = get_client()
+            prices = client.get_prices(card_id)
+            if prices:
+                details["prices"] = prices
+        except Exception as e:
+            logger.debug(f"Price fetch skipped for {card_id}: {e}")
+
     return details
 
 

@@ -4,6 +4,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import sqlite3
 import json
+import requests
 
 from api.models.database import get_db_connection, init_db
 from api.models.schemas import CollectionItemCreate, BinderCreate, BinderUpdate
@@ -309,14 +310,97 @@ class CollectionService:
             """)
             by_set = [{"set": row[0] or "Unknown", "count": row[1]} for row in cursor.fetchall()]
 
+            # Collection value - fetch prices for each unique card in collection
+            total_value_eur = 0.0
+            total_value_usd = 0.0
+            top_cards = []  # List of (card_name, ptcg_id, quantity, value_eur, value_usd)
+            
+            if user_id:
+                cursor.execute("""
+                    SELECT c.ptcg_id, c.name, ci.quantity
+                    FROM collection_items ci
+                    JOIN cards c ON ci.card_id = c.id
+                    WHERE ci.user_id = ?
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT c.ptcg_id, c.name, ci.quantity
+                    FROM collection_items ci
+                    JOIN cards c ON ci.card_id = c.id
+                """)
+            
+            items = cursor.fetchall()
+            
+            # Fetch prices for each card (with simple in-memory cache for this request)
+            price_cache = {}
+            for ptcg_id, name, quantity in items:
+                if ptcg_id in price_cache:
+                    prices = price_cache[ptcg_id]
+                else:
+                    prices = self._fetch_card_prices(ptcg_id)
+                    price_cache[ptcg_id] = prices
+                
+                # Use Cardmarket trend price (EUR) and TCGPlayer market (USD) as best estimates
+                value_eur = 0.0
+                value_usd = 0.0
+                
+                if prices:
+                    if prices.get("cardmarket", {}).get("prices", {}).get("trendPrice"):
+                        value_eur = prices["cardmarket"]["prices"]["trendPrice"] * quantity
+                    elif prices.get("cardmarket", {}).get("prices", {}).get("avg30"):
+                        value_eur = prices["cardmarket"]["prices"]["avg30"] * quantity
+                    
+                    if prices.get("tcgplayer", {}).get("prices", {}).get("normal", {}).get("market"):
+                        value_usd = prices["tcgplayer"]["prices"]["normal"]["market"] * quantity
+                    elif prices.get("tcgplayer", {}).get("prices", {}).get("reverseHolofoil", {}).get("market"):
+                        value_usd = prices["tcgplayer"]["prices"]["reverseHolofoil"]["market"] * quantity
+                
+                total_value_eur += value_eur
+                total_value_usd += value_usd
+                
+                if value_eur > 0 or value_usd > 0:
+                    top_cards.append({
+                        "name": name,
+                        "ptcg_id": ptcg_id,
+                        "quantity": quantity,
+                        "value_eur": round(value_eur, 2),
+                        "value_usd": round(value_usd, 2)
+                    })
+            
+            # Sort top cards by value (EUR preferred)
+            top_cards.sort(key=lambda x: max(x["value_eur"], x["value_usd"]), reverse=True)
+            top_cards = top_cards[:10]  # Top 10
+
             return {
                 "total_items": total_items,
                 "total_cards": total_cards,
                 "unique_cards": unique_cards,
                 "by_set": by_set,
+                "total_value_eur": round(total_value_eur, 2),
+                "total_value_usd": round(total_value_usd, 2),
+                "top_cards": top_cards,
             }
         finally:
             conn.close()
+
+    def _fetch_card_prices(self, ptcg_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch prices from pokemontcg.io API."""
+        try:
+            resp = requests.get(
+                f"https://api.pokemontcg.io/v2/cards/{ptcg_id}",
+                timeout=10
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data")
+                if data:
+                    return {
+                        "tcgplayer": data.get("tcgplayer"),
+                        "cardmarket": data.get("cardmarket"),
+                    }
+            return None
+        except Exception as e:
+            logger.debug(f"Price fetch failed for {ptcg_id}: {e}")
+            return None
 
     def get_or_create_card(self, card_id: str, name: str, set_code: str,
                            set_name: str = "", number: str = "", rarity: str = "",

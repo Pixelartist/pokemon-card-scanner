@@ -526,7 +526,46 @@ body {
     font-size: 1rem;
 }
 
-/* Modal */
+.value-card {
+    background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card));
+    border: 1px solid var(--accent-glow);
+}
+
+.value-card .stat-number.value-eur {
+    color: var(--success);
+}
+
+.value-card .stat-number.value-usd {
+    color: var(--accent);
+}
+
+.top-cards-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    text-align: left;
+}
+
+.top-card-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 15px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    border: 1px solid var(--bg-card);
+}
+
+.top-card-name {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.top-card-value {
+    font-family: 'Inter', monospace;
+    color: var(--success);
+    font-weight: 600;
+}
 .modal {
     position: fixed;
     top: 0;
