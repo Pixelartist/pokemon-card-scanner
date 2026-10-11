@@ -110,6 +110,27 @@ function setAuthToken(token) {
 // One-time migration: drop tokens persisted by the old localStorage scheme
 localStorage.removeItem('auth_token');
 
+// Map of ptcg_id -> total quantity owned (per logged-in user). Cached after
+// first load; invalidated on login/logout and after adding a card. Declared
+// here because token refresh (below) can run before the rest of the file.
+let ownedQtyMap = null;
+
+// Non-blocking toast — native alert() halts JS until dismissed, which stalls
+// re-renders (e.g. the binder rebuild after adding a card).
+function showToast(message, ms = 2500) {
+    let toast = document.getElementById('app-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'app-toast';
+        toast.className = 'app-toast hidden';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.classList.remove('hidden');
+    clearTimeout(toast._hideTimer);
+    toast._hideTimer = setTimeout(() => toast.classList.add('hidden'), ms);
+}
+
 let refreshInFlight = null;
 
 async function refreshAccessToken() {
@@ -121,6 +142,7 @@ async function refreshAccessToken() {
                 if (!response.ok) return false;
                 const data = await response.json();
                 setAuthToken(data.access_token);
+                ownedQtyMap = null;  // fresh session -> refresh owned counts
                 if (data.user?.username) {
                     localStorage.setItem('username', data.user.username);
                     updateUserInfo(data.user.username);
@@ -250,6 +272,7 @@ async function handleLoginSubmit(e) {
         if (response.ok) {
             const data = await response.json();
             setAuthToken(data.access_token);
+            ownedQtyMap = null;  // fresh session -> refresh owned counts
             const uname = data.user?.username || data.username;
             if (uname) localStorage.setItem('username', uname);
             updateUserInfo(uname);
@@ -296,6 +319,7 @@ async function handleRegisterSubmit(e) {
         if (response.ok) {
             const data = await response.json();
             setAuthToken(data.access_token);
+            ownedQtyMap = null;  // fresh session -> refresh owned counts
             const uname = data.user?.username || data.username;
             if (uname) localStorage.setItem('username', uname);
             updateUserInfo(uname);
@@ -603,7 +627,8 @@ async function submitAddCollection(e) {
         });
         
         if (response.ok) {
-            alert('Card added to collection!');
+            showToast('✓ Added to collection');
+            ownedQtyMap = null;  // refresh owned-count cache
             document.getElementById('add-modal').classList.add('hidden');
             initBinder();
         } else {
@@ -622,6 +647,7 @@ async function showCandidateDetail(cardId) {
         }
     });
     const card = await response.json();
+    const ownedQty = await getOwnedQuantity(cardId);
     
     const modal = document.getElementById('card-modal');
     const modalBody = document.getElementById('modal-body');
@@ -639,7 +665,12 @@ async function showCandidateDetail(cardId) {
                     <span>Set: ${card.set_name || 'Unknown'}</span>
                 </div>
                 <div class="card-actions" style="margin-top: 20px;">
-                    <button class="btn btn-primary" onclick="addToCollection('${card.id}')">Add to Collection</button>
+                    ${ownedQty > 0 ? `
+                        <div class="owned-badge">✓ In Collection · ${ownedQty}×</div>
+                        <button class="btn btn-secondary" onclick="addToCollection('${card.id}')">+ Add Another</button>
+                    ` : `
+                        <button class="btn btn-primary" onclick="addToCollection('${card.id}')">Add to Collection</button>
+                    `}
                 </div>
             </div>
         </div>
@@ -819,6 +850,7 @@ async function initializeApp() {
                 await fetch('/api/auth/logout', { method: 'POST' });
             } catch { /* offline logout still clears local state */ }
             setAuthToken(null);
+            ownedQtyMap = null;  // drop per-user owned-count cache
             localStorage.removeItem('username');
             updateUserInfo('Guest');
             document.getElementById('login-modal')?.classList.remove('hidden');
@@ -1161,6 +1193,40 @@ async function exportCollection() {
 }
 
 // Enhanced card detail display
+// (owned-count helpers live near the top of the file, next to ownedQtyMap)
+function normalizeCardId(id) {
+    return (id || '').replace(/^de_/, '');
+}
+
+async function getOwnedQuantity(cardId) {
+    if (!getAuthToken()) return 0;
+    if (!ownedQtyMap) {
+        ownedQtyMap = new Map();
+        try {
+            const response = await fetch('/api/collection?limit=500', {
+                headers: { 'Authorization': `Bearer ${getAuthToken()}` }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                const items = data.items || data.data || data.collection || [];
+                for (const raw of items) {
+                    const key = ((raw.card && raw.card.ptcg_id) || raw.ptcg_id || '');
+                    if (!key) continue;
+                    ownedQtyMap.set(key, (ownedQtyMap.get(key) || 0) + (raw.quantity || 1));
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load owned counts:', error);
+            ownedQtyMap = null;
+            return 0;
+        }
+    }
+    // Exact match first; German-index ids (de_*) may also be stored without
+    // the prefix, so fall back to the normalized key.
+    const exact = ownedQtyMap.get(cardId);
+    return exact != null ? exact : (ownedQtyMap.get(normalizeCardId(cardId)) || 0);
+}
+
 async function showEnhancedCardDetail(cardId) {
     const token = getAuthToken();
     const response = await fetch('/api/cards/' + cardId + '/details', {
@@ -1169,6 +1235,7 @@ async function showEnhancedCardDetail(cardId) {
         }
     });
     const card = await response.json();
+    const ownedQty = await getOwnedQuantity(cardId);
     
     const modal = document.getElementById('card-modal');
     const modalBody = document.getElementById('modal-body');
@@ -1246,7 +1313,12 @@ async function showEnhancedCardDetail(cardId) {
                 </div>
                 ${priceHtml}
                 <div class="card-actions" style="margin-top: 20px;">
-                    <button class="btn btn-primary" onclick="addToCollection('${cardId}')">Add to Collection</button>
+                    ${ownedQty > 0 ? `
+                        <div class="owned-badge">✓ In Collection · ${ownedQty}×</div>
+                        <button class="btn btn-secondary" onclick="addToCollection('${cardId}')">+ Add Another</button>
+                    ` : `
+                        <button class="btn btn-primary" onclick="addToCollection('${cardId}')">Add to Collection</button>
+                    `}
                 </div>
             </div>
         </div>
@@ -1268,6 +1340,7 @@ displayScanResult = async function(data, container) {
     if (data.decision === 'match' && data.candidates.length > 0) {
         const card = data.candidates[0];
         const cardId = card.card?.id || card.id;
+        const ownedQty = await getOwnedQuantity(cardId);
         
         // Fetch enhanced details
         try {
@@ -1302,7 +1375,12 @@ displayScanResult = async function(data, container) {
                             </div>
                             ${details.basic_info.hp ? `<div style="margin-top: 10px;">HP: ${details.basic_info.hp}</div>` : ''}
                             <div class="card-actions" style="margin-top: 20px;">
-                                <button class="btn btn-primary" onclick="addToCollection('${cardId}')">Add to Collection</button>
+                                ${ownedQty > 0 ? `
+                                    <div class="owned-badge">✓ In Collection · ${ownedQty}×</div>
+                                    <button class="btn btn-secondary" onclick="addToCollection('${cardId}')">+ Add Another</button>
+                                ` : `
+                                    <button class="btn btn-primary" onclick="addToCollection('${cardId}')">Add to Collection</button>
+                                `}
                                 <button class="btn btn-secondary" onclick="showEnhancedCardDetail('${cardId}')">View Details</button>
                             </div>
                         </div>

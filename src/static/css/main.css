@@ -206,6 +206,39 @@ body {
     background: var(--bg-secondary);
 }
 
+/* Non-blocking toast (bottom-center) */
+.app-toast {
+    position: fixed;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-card, #1e1e2a);
+    color: var(--text-primary, #fff);
+    border: 1px solid rgba(46, 204, 113, 0.4);
+    border-radius: 999px;
+    padding: 10px 20px;
+    font-size: 0.9rem;
+    z-index: 10000;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+    transition: opacity 0.25s ease;
+}
+
+/* "In Collection" pill shown in card detail modals */
+.owned-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    margin-right: 10px;
+    border-radius: 999px;
+    background: rgba(46, 204, 113, 0.15);
+    color: #2ecc71;
+    border: 1px solid rgba(46, 204, 113, 0.4);
+    font-size: 0.85rem;
+    font-weight: 600;
+    vertical-align: middle;
+}
+
 /* Scan Result */
 .scan-result {
     margin-top: 30px;
