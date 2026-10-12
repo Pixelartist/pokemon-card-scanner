@@ -340,20 +340,27 @@ class CollectionService:
                     prices = self._fetch_card_prices(ptcg_id)
                     price_cache[ptcg_id] = prices
                 
-                # Use Cardmarket trend price (EUR) and TCGPlayer market (USD) as best estimates
+                # Use Cardmarket trend price (EUR) and TCGPlayer market (USD) as best estimates.
+                # When TCGPlayer has no price for a card (common for German/vintage cards),
+                # fall back to the EUR price converted to USD so the totals stay consistent.
                 value_eur = 0.0
                 value_usd = 0.0
-                
+
                 if prices:
                     if prices.get("cardmarket", {}).get("prices", {}).get("trendPrice"):
                         value_eur = prices["cardmarket"]["prices"]["trendPrice"] * quantity
                     elif prices.get("cardmarket", {}).get("prices", {}).get("avg30"):
                         value_eur = prices["cardmarket"]["prices"]["avg30"] * quantity
-                    
+
                     if prices.get("tcgplayer", {}).get("prices", {}).get("normal", {}).get("market"):
                         value_usd = prices["tcgplayer"]["prices"]["normal"]["market"] * quantity
                     elif prices.get("tcgplayer", {}).get("prices", {}).get("reverseHolofoil", {}).get("market"):
                         value_usd = prices["tcgplayer"]["prices"]["reverseHolofoil"]["market"] * quantity
+
+                    # TCGPlayer returned nothing — derive USD from EUR so the two totals
+                    # don't diverge by an order of magnitude on vintage/German cards.
+                    if value_usd == 0.0 and value_eur > 0.0:
+                        value_usd = round(value_eur * 1.18, 2)
                 
                 total_value_eur += value_eur
                 total_value_usd += value_usd
