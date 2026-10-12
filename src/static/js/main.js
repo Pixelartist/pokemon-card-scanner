@@ -653,43 +653,9 @@ async function submitAddCollection(e) {
 }
 
 async function showCandidateDetail(cardId) {
-    const token = getAuthToken();
-    const response = await fetch('/api/cards/' + cardId, {
-        headers: {
-            'Authorization': `Bearer ${token}`
-        }
-    });
-    const card = await response.json();
-    const ownedQty = await getOwnedQuantity(cardId);
-    
-    const modal = document.getElementById('card-modal');
-    const modalBody = document.getElementById('modal-body');
-    
-    modalBody.innerHTML = `
-        <h2>${card.name}</h2>
-        <div class="card-main" style="margin-top: 20px;">
-            <div class="card-image">
-                <img src="${card.images?.large || ''}" alt="${card.name}">
-            </div>
-            <div class="card-details">
-                <div class="card-meta">
-                    <span>Number: ${card.number || 'N/A'}</span>
-                    <span>Rarity: ${card.rarity || 'N/A'}</span>
-                    <span>Set: ${card.set_name || 'Unknown'}</span>
-                </div>
-                <div class="card-actions" style="margin-top: 20px;">
-                    ${ownedQty > 0 ? `
-                        <div class="owned-badge">✓ In Collection · ${ownedQty}×</div>
-                        <button class="btn btn-secondary" onclick="addToCollection('${card.id}')">+ Add Another</button>
-                    ` : `
-                        <button class="btn btn-primary" onclick="addToCollection('${card.id}')">Add to Collection</button>
-                    `}
-                </div>
-            </div>
-        </div>
-    `;
-    
-    modal.classList.remove('hidden');
+    // Reuse the enhanced detail modal — it includes prices, your scan photo,
+    // ownership badge and set info (the plain view lacked prices).
+    return showEnhancedCardDetail(cardId);
 }
 
 // Modal close handlers

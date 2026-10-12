@@ -316,25 +316,46 @@ class PokemonTCGClient:
             return []
 
     def get_prices(self, card_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch price data from the free pokemontcg.io API (no key required, rate-limited)."""
-        try:
-            resp = requests.get(
-                f"https://api.pokemontcg.io/v2/cards/{card_id}",
-                timeout=15
-            )
-            if resp.status_code == 200:
-                data = resp.json().get("data")
-                if data:
-                    return {
-                        "tcgplayer": data.get("tcgplayer"),
-                        "cardmarket": data.get("cardmarket"),
-                    }
-            elif resp.status_code == 429:
-                logger.warning(f"Rate limited by pokemontcg.io for {card_id}")
-            return None
-        except Exception as e:
-            logger.debug(f"Price fetch failed for {card_id}: {e}")
-            return None
+        """Fetch price data from the free pokemontcg.io API (no key required, rate-limited).
+
+        The API intermittently returns empty bodies or 500s under load, so retry
+        a few times with a short backoff before giving up.
+        """
+        import time as _time
+        last_err = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(
+                    f"https://api.pokemontcg.io/v2/cards/{card_id}",
+                    timeout=15
+                )
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json().get("data")
+                    except ValueError:
+                        last_err = "empty/invalid body"
+                        _time.sleep(0.6)
+                        continue
+                    if data:
+                        return {
+                            "tcgplayer": data.get("tcgplayer"),
+                            "cardmarket": data.get("cardmarket"),
+                        }
+                    # Valid JSON but no price data for this card
+                    return None
+                elif resp.status_code == 429:
+                    logger.warning(f"Rate limited by pokemontcg.io for {card_id}")
+                    _time.sleep(1.5)
+                    continue
+                else:
+                    last_err = f"HTTP {resp.status_code}"
+                    _time.sleep(0.6)
+                    continue
+            except Exception as e:
+                last_err = str(e)
+                _time.sleep(0.6)
+        logger.debug(f"Price fetch failed for {card_id} after retries: {last_err}")
+        return None
 
 
 # Singleton instance
