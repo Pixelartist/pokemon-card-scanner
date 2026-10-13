@@ -1066,9 +1066,12 @@ async def get_card_details(card_id: str):
                 "source": "local_index",
             }
             # Try TCGdex for enrichment if metadata is missing
+            # Use appropriate language based on card ID prefix
+            _card_id = local.card_id.replace("de_", "") if local.card_id.startswith("de_") else local.card_id
+            _lang = "de" if local.card_id.startswith("de_") else "en"
             try:
                 import requests as _req2
-                _r2 = _req2.get(f"https://api.tcgdex.net/v2/en/cards/{local.card_id}", timeout=10)
+                _r2 = _req2.get(f"https://api.tcgdex.net/v2/{_lang}/cards/{_card_id}", timeout=10)
                 if _r2.status_code == 200:
                     _d2 = _r2.json()
                     if _d2.get("set"):
