@@ -1358,8 +1358,10 @@ async function showEnhancedCardDetail(cardId) {
     const setData = card.basic_info?.set || {};
     let setCode = setData.code || card.basic_info?.set?.code;
     // Guard: if setCode is null/undefined, try extracting from ptcg_id (e.g., de_sv03-213 -> sv03)
-    if (!setCode && card.ptcg_id) {
-        setCode = card.ptcg_id.replace(/^de_/, '').replace(/-.*$/, '');
+    // Note: ptcg_id lives inside basic_info, NOT at the top level of the response
+    const cardPtcgId = card.ptcg_id || card.basic_info?.ptcg_id;
+    if (!setCode && cardPtcgId) {
+        setCode = cardPtcgId.replace(/^de_/, '').replace(/-.*$/, '');
     }
     // If still no setCode, use 'unknown'
     if (!setCode) {
@@ -2239,26 +2241,31 @@ async function showSetView(setCode) {
         const totalCards = setInfo?.total || set.total_cards || cards.length;
 
         // Build card grid HTML
-        let cardsHtml = '';
-        cards.forEach(card => {
-            const imgUrl = card.images?.large || card.images?.small || '';
-            const cardName = card.name || 'Unknown';
-            const cardNumber = card.number || '';
-            const cardRarity = card.rarity || '';
+                let cardsHtml = '';
+                cards.forEach(card => {
+                    const cardName = card.name || 'Unknown';
+                    const cardNumber = card.number || '';
+                    const cardRarity = card.rarity || '';
 
-            cardsHtml += `
-                <div class="set-card-item" onclick="event.stopPropagation(); showEnhancedCardDetail('${card.ptcg_id}')">
-                    ${imgUrl
-                        ? `<img src="${imgUrl}" alt="${cardName}" loading="lazy">`
-                        : '<div class="no-image">No Image</div>'
+                    // Build image URL: prefer stored images, fall back to constructed path
+                    let ImgUrl = card.images?.large || card.images?.small || '';
+                    if (!ImgUrl && card.ptcg_id) {
+                        ImgUrl = `/static/card_images/tcgdex/en/${card.ptcg_id}.png`;
                     }
-                    <div class="set-card-info">
-                        <div class="set-card-name">${cardName}</div>
-                        <div class="set-card-meta">${cardNumber} · ${cardRarity}</div>
-                    </div>
-                </div>
-            `;
-        });
+
+                    cardsHtml += `
+                        <div class="set-card-item" onclick="event.stopPropagation(); showEnhancedCardDetail('${card.ptcg_id}')">
+                            ${ImgUrl
+                                ? `<img src="${ImgUrl}" alt="${cardName}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image').style.display='flex'">`
+                                : '<div class="no-image">No Image</div>'
+                            }
+                            <div class="set-card-info">
+                                <div class="set-card-name">${cardName}</div>
+                                <div class="set-card-meta">${cardNumber} · ${cardRarity}</div>
+                            </div>
+                        </div>
+                    `;
+                });
 
         if (cards.length === 0) {
             cardsHtml = '<div class="no-cards">No cards found in this set.</div>';
