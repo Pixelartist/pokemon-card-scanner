@@ -1,5 +1,6 @@
 """FastAPI application for Pokemon Card Scanner."""
 import os
+import sqlite3
 import sys
 import logging
 import tempfile
@@ -949,6 +950,122 @@ async def scan_card_advanced(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+# ============================================================
+# CARD METADATA CACHE (SQLite-backed)
+# ============================================================
+_CACHE_TTL_HOURS = 24
+
+
+def _cache_get(card_id: str) -> Optional[Dict[str, Any]]:
+    """Get cached card metadata from SQLite."""
+    try:
+        import sqlite3 as _sqlite3
+        db_path = Path("/opt/data/pokemon-card-scanner/data/pokemon_cards.db")
+        if not db_path.exists():
+            return None
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM card_metadata WHERE card_id = ?",
+            (card_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            fetched_at = row["fetched_at"]
+            if fetched_at:
+                try:
+                    from datetime import datetime, timedelta, timezone
+                    fetched_dt = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) - fetched_dt > timedelta(hours=_CACHE_TTL_HOURS):
+                        return None  # Stale
+                except Exception:
+                    pass
+            import json as _json
+            return {
+                "card_id": row["card_id"],
+                "name": row["name"],
+                "set_name": row["set_name"],
+                "set_code": row["set_code"],
+                "rarity": row["rarity"],
+                "hp": row["hp"],
+                "types": _json.loads(row["types"]) if row["types"] else [],
+                "artist": row["artist"],
+                "legalities": _json.loads(row["legalities"]) if row["legalities"] else {},
+                "tcgdex_data": _json.loads(row["tcgdex_data"]) if row["tcgdex_data"] else {},
+            }
+    except Exception as e:
+        logging.debug(f"Cache get failed for {card_id}: {e}")
+    return None
+
+
+def _cache_set(card_id: str, data: Dict[str, Any]):
+    """Store card metadata in SQLite cache."""
+    try:
+        import sqlite3 as _sqlite3
+        db_path = Path("/opt/data/pokemon-card-scanner/data/pokemon_cards.db")
+        if not db_path.exists():
+            return
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        import json as _json
+        from datetime import datetime
+        cursor.execute(
+            """INSERT OR REPLACE INTO card_metadata
+               (card_id, name, set_name, set_code, rarity, hp, types, artist, legalities, tcgdex_data, fetched_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                card_id,
+                data.get("name"),
+                data.get("set_name"),
+                data.get("set_code"),
+                data.get("rarity"),
+                data.get("hp"),
+                _json.dumps(data.get("types", [])),
+                data.get("artist"),
+                _json.dumps(data.get("legalities", {})),
+                _json.dumps(data.get("tcgdex_data", {})),
+                datetime.utcnow().isoformat() + "Z",
+            )
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.debug(f"Cache set failed for {card_id}: {e}")
+
+
+def _fetch_card_metadata_from_tcgdex(card_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch and cache card metadata from TCGdex API."""
+    try:
+        import requests
+        lang = "de" if card_id.startswith("de_") else "en"
+        api_card_id = card_id[3:] if card_id.startswith("de_") else card_id
+        resp = requests.get(
+            f"https://api.tcgdex.net/v2/{lang}/cards/{api_card_id}",
+            timeout=10
+        )
+        if resp.status_code == 200:
+            d = resp.json()
+            metadata = {
+                "name": d.get("name"),
+                "set_name": d.get("set", {}).get("name"),
+                "set_code": d.get("set", {}).get("id"),
+                "rarity": d.get("rarity"),
+                "hp": d.get("hp"),
+                "types": d.get("types", []),
+                "artist": d.get("illustrator"),
+                "legalities": d.get("legalities", {}),
+                "tcgdex_data": d,
+            }
+            _cache_set(card_id, metadata)
+            return metadata
+    except Exception as e:
+        logging.debug(f"TCGdex fetch failed for {card_id}: {e}")
+    return None
+
+
 @app.get("/api/cards/{card_id}/details")
 async def get_card_details(card_id: str):
     """Get detailed card information including evolution chain and legalities."""
@@ -1014,31 +1131,27 @@ async def get_card_details(card_id: str):
     client = get_client()
     card = client.get_card(card_id)
     
-    # If found in local DB but missing metadata, try TCGdex API for enrichment
+    # If found in local DB but missing metadata, try cache then TCGdex API
     if card and card.get("source") == "local_db":
-        try:
-            import requests as _req
-            # Detect language from card ID prefix (de_* for German, etc.)
-            lang = "de" if card_id.startswith("de_") else "en"
-            card_id_for_api = card_id[3:] if card_id.startswith("de_") else card_id
-            # Note: Additional language prefixes (fr_, es_, it_, pt_, ja_) can be added here
-            _r = _req.get(f"https://api.tcgdex.net/v2/{lang}/cards/{card_id_for_api}", timeout=10)
-            if _r.status_code == 200:
-                _d = _r.json()
-                if _d.get("set"):
-                    card["set"] = _d.get("set")
-                if _d.get("rarity"):
-                    card["rarity"] = _d.get("rarity")
-                if _d.get("types"):
-                    card["types"] = _d.get("types")
-                if _d.get("hp"):
-                    card["hp"] = _d.get("hp")
-                if _d.get("illustrator"):
-                    card["artist"] = _d.get("illustrator")
-                if _d.get("legalities"):
-                    card["legalities"] = _d.get("legalities")
-        except Exception:
-            pass
+        # Check cache first
+        cached = _cache_get(card_id)
+        if cached:
+            card["set"] = cached.get("set_name") and {"name": cached["set_name"]} or card.get("set")
+            card["rarity"] = cached.get("rarity") or card.get("rarity")
+            card["types"] = cached.get("types") or card.get("types")
+            card["hp"] = cached.get("hp") or card.get("hp")
+            card["artist"] = cached.get("artist") or card.get("artist")
+            card["legalities"] = cached.get("legalities") or card.get("legalities")
+        else:
+            # Fetch from TCGdex and cache
+            metadata = _fetch_card_metadata_from_tcgdex(card_id)
+            if metadata:
+                card["set"] = metadata.get("set_name") and {"name": metadata["set_name"]} or card.get("set")
+                card["rarity"] = metadata.get("rarity") or card.get("rarity")
+                card["types"] = metadata.get("types") or card.get("types")
+                card["hp"] = metadata.get("hp") or card.get("hp")
+                card["artist"] = metadata.get("artist") or card.get("artist")
+                card["legalities"] = metadata.get("legalities") or card.get("legalities")
     
     if not card:
         # Fall back to the local CLIP index (covers German 'de_*' cards and
@@ -1069,28 +1182,33 @@ async def get_card_details(card_id: str):
                 "prices": None,
                 "source": "local_index",
             }
-            # Try TCGdex for enrichment if metadata is missing
-            # Use appropriate language based on card ID prefix
-            _card_id = local.card_id.replace("de_", "") if local.card_id.startswith("de_") else local.card_id
-            _lang = "de" if local.card_id.startswith("de_") else "en"
-            # Note: Additional language prefixes (fr_, es_, it_, pt_, ja_) can be added here
-            try:
-                import requests as _req2
-                _r2 = _req2.get(f"https://api.tcgdex.net/v2/{_lang}/cards/{_card_id}", timeout=10)
-                if _r2.status_code == 200:
-                    _d2 = _r2.json()
-                    if _d2.get("set"):
-                        details["basic_info"]["set"] = {"name": _d2["set"].get("name", local.set_code), "code": local.set_code}
-                    if _d2.get("rarity") and not details["basic_info"]["rarity"]:
-                        details["basic_info"]["rarity"] = _d2.get("rarity")
-                    if _d2.get("types") and not details["basic_info"]["types"]:
-                        details["basic_info"]["types"] = _d2.get("types")
-                    if _d2.get("hp") and not details["basic_info"]["hp"]:
-                        details["basic_info"]["hp"] = _d2.get("hp")
-                    if _d2.get("illustrator") and not details["basic_info"]["artist"]:
-                        details["basic_info"]["artist"] = _d2.get("illustrator")
-            except Exception:
-                pass
+            # Try cache first, then TCGdex for enrichment
+            cached = _cache_get(local.card_id)
+            if cached:
+                if not details["basic_info"]["set"]["name"] or details["basic_info"]["set"]["name"] == local.set_code:
+                    details["basic_info"]["set"]["name"] = cached.get("set_name") or details["basic_info"]["set"]["name"]
+                if not details["basic_info"]["rarity"]:
+                    details["basic_info"]["rarity"] = cached.get("rarity")
+                if not details["basic_info"]["types"]:
+                    details["basic_info"]["types"] = cached.get("types")
+                if not details["basic_info"]["hp"]:
+                    details["basic_info"]["hp"] = cached.get("hp")
+                if not details["basic_info"]["artist"]:
+                    details["basic_info"]["artist"] = cached.get("artist")
+            else:
+                # Fetch from TCGdex and cache
+                metadata = _fetch_card_metadata_from_tcgdex(local.card_id)
+                if metadata:
+                    if not details["basic_info"]["set"]["name"] or details["basic_info"]["set"]["name"] == local.set_code:
+                        details["basic_info"]["set"]["name"] = metadata.get("set_name") or details["basic_info"]["set"]["name"]
+                    if not details["basic_info"]["rarity"]:
+                        details["basic_info"]["rarity"] = metadata.get("rarity")
+                    if not details["basic_info"]["types"]:
+                        details["basic_info"]["types"] = metadata.get("types")
+                    if not details["basic_info"]["hp"]:
+                        details["basic_info"]["hp"] = metadata.get("hp")
+                    if not details["basic_info"]["artist"]:
+                        details["basic_info"]["artist"] = metadata.get("artist")
             # Fetch prices (cached; falls back to stale cache on API failure)
             try:
                 from services.price_cache import get_prices_cached

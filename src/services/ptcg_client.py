@@ -323,12 +323,15 @@ class PokemonTCGClient:
         pokemontcg.io is intermittent (500s, empty bodies) so we retry it
         then fall back to TCGdex API which has reliable pricing data.
         """
+        # pokemontcg.io / TCGdex IDs have no language prefix (strip de_)
+        api_id = card_id[3:] if card_id.startswith("de_") else card_id
+
         # Try pokemontcg.io first (primary source)
         import time as _time
         for attempt in range(3):
             try:
                 resp = requests.get(
-                    f"https://api.pokemontcg.io/v2/cards/{card_id}",
+                    f"https://api.pokemontcg.io/v2/cards/{api_id}",
                     timeout=15
                 )
                 if resp.status_code == 200:
@@ -354,7 +357,7 @@ class PokemonTCGClient:
         try:
             lang = "en"  # Default to English for prices
             resp = requests.get(
-                f"https://api.tcgdex.net/v2/{lang}/cards/{card_id}",
+                f"https://api.tcgdex.net/v2/{lang}/cards/{api_id}",
                 timeout=15
             )
             if resp.status_code == 200:

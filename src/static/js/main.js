@@ -1314,36 +1314,44 @@ async function getOwnedQuantity(cardId) {
 
 async function showEnhancedCardDetail(cardId) {
     const token = getAuthToken();
-    const response = await fetch('/api/cards/' + cardId + '/details', {
-        headers: {
-            'Authorization': `Bearer ${token}`
-        }
-    });
-    const card = await response.json();
-    const ownedQty = await getOwnedQuantity(cardId);
+    
+    // Show loading state immediately
+    const modal = document.getElementById('card-modal');
+    const modalBody = document.getElementById('modal-body');
+    modal.classList.remove('hidden');
+    modalBody.innerHTML = '<div class="loading-spinner" style="padding: 40px; text-align: center;"><div class="spinner"></div><p>Loading card details...</p></div>';
+    
+    // Parallel fetches: card details, crop image, and owned quantity
+    const [card, cropData, ownedQty] = await Promise.all([
+        (async () => {
+            const response = await fetch('/api/cards/' + cardId + '/details', {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            return await response.json();
+        })(),
+        (async () => {
+            try {
+                const cropResp = await fetch('/api/collection/crop/' + encodeURIComponent(cardId), {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (cropResp.ok) return await cropResp.json();
+            } catch (e) {}
+            return null;
+        })(),
+        getOwnedQuantity(cardId)
+    ]);
 
-    // If the user scanned this card before, show their cut-out card (or the
-    // raw scan photo) above the official art.
+    // Build card scan HTML if crop exists
     let cardScanHtml = '';
-    try {
-        const cropResp = await fetch('/api/collection/crop/' + encodeURIComponent(cardId), {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (cropResp.ok) {
-            const cropData = await cropResp.json();
-            if (cropData.found) {
-                cardScanHtml = `
-                    <div class="card-scan-section">
-                        <div class="card-scan-header">
-                            <span>${cropData.kind === 'crop' ? '✂ Your Cut' : '📷 Your Scan'}</span>
-                            <span class="card-scan-date">${new Date(cropData.date).toLocaleDateString()}</span>
-                        </div>
-                        <img src="${cropData.url}" alt="Your cut of this card">
-                    </div>`;
-            }
-        }
-    } catch (e) {
-        // Non-fatal — official art still shows
+    if (cropData && cropData.found) {
+        cardScanHtml = `
+            <div class="card-scan-section">
+                <div class="card-scan-header">
+                    <span>${cropData.kind === 'crop' ? '✂ Your Cut' : '📷 Your Scan'}</span>
+                    <span class="card-scan-date">${new Date(cropData.date).toLocaleDateString()}</span>
+                </div>
+                <img src="${cropData.url}" alt="Your cut of this card">
+            </div>`;
     }
     
     const modal = document.getElementById('card-modal');

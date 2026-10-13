@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 # How long a cached price stays "fresh" before we try to re-fetch.
 CACHE_TTL_HOURS = 24
 
+# How long we remember a *failed* price lookup (stored as an empty dict)
+# so a card with no available pricing doesn't pay the full retry latency
+# on every click.
+NEGATIVE_TTL_HOURS = 6
+
 
 def _conn() -> sqlite3.Connection:
     return sqlite3.connect(DATABASE_URL)
@@ -90,8 +95,16 @@ def get_prices_cached(card_id: str, ttl_hours: float = CACHE_TTL_HOURS) -> Optio
         return None
 
     age = _cache_age_hours(card_id)
-    if age is not None and age < ttl_hours:
-        return get_cached_prices(card_id)
+    if age is not None:
+        cached = get_cached_prices(card_id)
+        if cached == {}:
+            # Negative-cache marker: a recent fetch found no prices.
+            # Keep it shorter than the success TTL so new listings surface.
+            if age < NEGATIVE_TTL_HOURS:
+                return None
+        elif cached:
+            if age < ttl_hours:
+                return cached
 
     # Cache miss or stale: fetch live.
     from services.ptcg_client import get_client
@@ -103,9 +116,14 @@ def get_prices_cached(card_id: str, ttl_hours: float = CACHE_TTL_HOURS) -> Optio
     # Live fetch failed (or returned no data). Prefer any cached prices we
     # have over nothing — a slightly old price beats a missing one.
     stale = get_cached_prices(card_id)
-    if stale is not None:
+    if stale:  # non-empty dict
         logger.debug(f"Serving stale cached prices for {card_id} (fetch failed)")
-    return stale
+        return stale
+
+    # Nothing available anywhere: record the failure so the next lookup is
+    # instant instead of paying the full retry latency again.
+    _store_prices(card_id, {})
+    return None
 
 
 def prime_cache(card_id: str, prices: Dict[str, Any]) -> None:
