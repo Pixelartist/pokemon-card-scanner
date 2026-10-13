@@ -2324,3 +2324,50 @@ function initSets() {
         });
     }
 }
+
+    // Password change modal toggle from user menu
+    const passwordChangeModal = document.getElementById('password-change-modal');
+    const changePasswordLinks = document.querySelectorAll('[data-change-password]');
+    if (passwordChangeModal) {
+        changePasswordLinks.forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                const mode = link.dataset.changePassword;
+                // Show the appropriate form mode
+                document.querySelectorAll('.auth-tabs button').forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.changePassword === mode);
+                });
+                document.querySelectorAll('.auth-form').forEach(form => {
+                    form.style.display = form.id === `${mode}-password-form` ? 'block' : 'none';
+                });
+                passwordChangeModal.classList.remove('hidden');
+            });
+        });
+        // Close modal on outside click
+        passwordChangeModal.addEventListener('click', (e) => {
+            if (e.target === passwordChangeModal) {
+                passwordChangeModal.classList.add('hidden');
+            }
+        });
+    }
+
+    // If still no valid session, show login
+
+    // Password change button in user menu
+    const changePasswordBtn = document.querySelector('.user-menu-button[data-change-password-mode]');
+    const passwordChangeModal = document.getElementById('password-change-modal');
+    if (changePasswordBtn && passwordChangeModal) {
+        changePasswordBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            const mode = changePasswordBtn.dataset.changePasswordMode;
+            // Show the Change Password tab (only mode for now)
+            document.querySelectorAll('.auth-tabs button').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.changePassword === 'current');
+            });
+            document.querySelectorAll('.auth-form').forEach(form => {
+                form.style.display = form.id === 'change-password-form' ? 'block' : 'none';
+            });
+            passwordChangeModal.classList.remove('hidden');
+        });
+    }
+

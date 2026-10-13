@@ -330,6 +330,44 @@
         </div>
     </div>
 
+    <!-- Password Change Modal -->
+    <div id="password-change-modal" class="modal hidden">
+        <div class="modal-content modal-auth">
+            <button class="modal-close" data-close="true">&times;</button>
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-change-password="current">Change Password</button>
+                <button class="auth-tab" data-change-password="reset">Reset Password</button>
+            </div>
+            <form id="change-password-form" class="auth-form active" autocomplete="current-password">
+                <h3>Change Password</h3>
+                <div class="form-group">
+                    <label>Current Password</label>
+                    <input type="password" id="change-current-password" autocomplete="current-password" required>
+                </div>
+                <div class="form-group">
+                    <label>New Password</label>
+                    <input type="password" id="change-new-password" autocomplete="new-password" required>
+                </div>
+                <div class="form-group">
+                    <label>Confirm New Password</label>
+                    <input type="password" id="change-confirm-password" autocomplete="new-password" required>
+                </div>
+                <button id="change-password-submit" type="submit" class="btn btn-primary btn-full">Change Password</button>
+                <p class="auth-error" id="change-password-error"></p>
+            </form>
+            <form id="reset-password-form" class="auth-form" autocomplete="current-password" style="display:none">
+                <h3>Reset Password</h3>
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="reset-email" autocomplete="email" required>
+                </div>
+                <button id="reset-password-submit" type="submit" class="btn btn-primary btn-full">Reset Password</button>
+                <p class="auth-error" id="reset-password-error"></p>
+            </form>
+        </div>
+    </div>
+
+
     <!-- Add to Collection Modal -->
     <div id="add-modal" class="modal hidden">
         <div class="modal-content">

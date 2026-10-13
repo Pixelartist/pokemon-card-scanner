@@ -1624,3 +1624,22 @@ async def general_exception_handler(request, exc):
         status_code=500,
         content={"detail": "Internal server error", "error": str(exc)}
     )
+
+@app.post("/api/auth/change-password")
+async def change_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Change the current user's password.
+
+    Validates the current password, then updates to the new password.
+    Returns success/error states.
+    """
+    auth_service = AuthService()
+    ok = auth_service.change_password(current_user.id, current_password, new_password)
+    if ok:
+        return {"success": True, "detail": "Password updated successfully"}
+    return {"success": False, "detail": "Invalid current password or new password too short (< 6 chars)"}
+

@@ -380,3 +380,31 @@ class AuthService:
             return self.get_user(user_id)
         finally:
             conn.close()
+
+    def change_password(self, user_id: int, current_password: str, new_password: str) -> bool:
+        """Change the user's password after verifying the current one.
+
+        Returns True on success, False if current password is wrong or new password is too short.
+        """
+        if len(new_password) < 6:
+            return False
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # Verify current password by checking the stored bcrypt hash
+            cursor.execute("SELECT hashed_password FROM users WHERE id = ?", (user_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            if not verify_password(current_password, row[0]):
+                return False
+            # Hash the new password and update
+            new_hash = hash_password(new_password)
+            cursor.execute(
+                "UPDATE users SET hashed_password = ? WHERE id = ?",
+                (new_hash, user_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
