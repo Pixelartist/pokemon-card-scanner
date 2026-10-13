@@ -644,18 +644,6 @@ async def get_sets():
     return {"sets": sets}
 
 
-@app.get("/set/{set_code}", response_class=HTMLResponse)
-async def set_page(request: Request, set_code: str):
-    """Serve a dedicated set page showing all cards in a set."""
-    try:
-        template = jinja_env.get_template("set.html")
-        html = template.render(set_code=set_code, timestamp=int(time.time()))
-        return HTMLResponse(content=html)
-    except Exception as e:
-        logger.error(f"Error rendering set page: {e}")
-        return HTMLResponse(content=f"<h1>Error loading set {set_code}</h1>", status_code=500)
-
-
 @app.get("/api/sets/{set_code}/cards")
 async def get_set_cards(set_code: str):
     """Get all cards in a set with basic info."""

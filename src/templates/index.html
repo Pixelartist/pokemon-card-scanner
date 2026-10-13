@@ -54,6 +54,10 @@
                 <span class="tab-icon">🖼️</span>
                 Gallery
             </button>
+            <button class="tab" data-tab="sets">
+                <span class="tab-icon">📚</span>
+                Sets
+            </button>
             <button class="tab" data-tab="stats">
                 <span class="tab-icon">📊</span>
                 Stats
@@ -228,6 +232,33 @@
                     </div>
                     <div id="gallery-end" class="gallery-end hidden">
                         <p>No more cards to load</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Sets Tab -->
+            <section id="sets-tab" class="tab-content">
+                <div id="sets-view">
+                    <div class="sets-list-header">
+                        <h2>Card Sets</h2>
+                        <div class="search-box">
+                            <input type="text" id="sets-search" placeholder="Search sets...">
+                        </div>
+                    </div>
+                    <div id="sets-grid" class="sets-grid">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <p>Loading sets...</p>
+                        </div>
+                    </div>
+                </div>
+                <div id="set-detail-view" class="hidden">
+                    <button class="btn btn-secondary back-btn" onclick="hideSetView()">← Back to Sets</button>
+                    <div id="set-detail-content">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <p>Loading set details...</p>
+                        </div>
                     </div>
                 </div>
             </section>

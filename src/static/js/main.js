@@ -1356,7 +1356,11 @@ async function showEnhancedCardDetail(cardId) {
     
     // Extract set info
     const setData = card.basic_info?.set || {};
-    const setCode = setData.code || card.basic_info?.set?.code || 'N/A';
+    let setCode = setData.code || card.basic_info?.set?.code || 'N/A';
+    // For German cards (de_sv03-213), strip the 'de_' prefix to get the set code
+    if (setCode.startsWith('de_')) {
+        setCode = setCode.replace('de_', '');
+    }
     
     // Normalize: the API may hand back SQLite columns as JSON strings
     const parseJsonish = (v, fallback) => {
@@ -1425,7 +1429,7 @@ async function showEnhancedCardDetail(cardId) {
             </div>
             <div class="card-details">
                 <div class="card-meta">
-                    <a href="/set/${setCode}" class="set-link">Set: ${setData.name || 'Unknown'}</a>
+                    <a href="#" class="set-link" onclick="event.preventDefault(); showSetView('${setCode}')">Set: ${setData.name || 'Unknown'}</a>
                     <span>Number: ${card.basic_info.number || 'N/A'}</span>
                     <span>Rarity: ${card.basic_info.rarity || 'N/A'}</span>
                 </div>
@@ -2111,6 +2115,8 @@ function switchTab(tabName) {
         initBinder();
     } else if (tabName === 'gallery') {
         initGallery();
+    } else if (tabName === 'sets') {
+        initSets();
     } else if (tabName === 'collection') {
         // Keep old collection functionality if needed
         loadCollection();
@@ -2126,3 +2132,172 @@ document.addEventListener('DOMContentLoaded', () => {
         console.error('[App] initializeApp error:', e);
     }
 });
+
+// ============================================
+// SETS VIEW
+// ============================================
+let setsData = [];
+let setsSearchQuery = '';
+
+async function loadSets() {
+    const grid = document.getElementById('sets-grid');
+    if (!grid) return;
+
+    grid.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading sets...</p></div>';
+
+    try {
+        const response = await fetch('/api/sets');
+        if (!response.ok) throw new Error('Failed to load sets');
+
+        const data = await response.json();
+        setsData = (data.sets || []).map(set => ({
+            ...set,
+            code: set.code || set.id
+        })).sort((a, b) => {
+            // Sort by release date descending
+            const dateA = a.release_date ? new Date(a.release_date) : new Date(0);
+            const dateB = b.release_date ? new Date(b.release_date) : new Date(0);
+            return dateB - dateA;
+        });
+
+        renderSets();
+    } catch (error) {
+        console.error('Error loading sets:', error);
+        grid.innerHTML = '<div class="error-state"><p>Failed to load sets. Please try again.</p></div>';
+    }
+}
+
+function renderSets() {
+    const grid = document.getElementById('sets-grid');
+    if (!grid) return;
+
+    let filtered = setsData;
+    if (setsSearchQuery) {
+        const query = setsSearchQuery.toLowerCase();
+        filtered = setsData.filter(s =>
+            s.name.toLowerCase().includes(query) ||
+            s.code.toLowerCase().includes(query) ||
+            (s.series && s.series.toLowerCase().includes(query))
+        );
+    }
+
+    if (filtered.length === 0) {
+        grid.innerHTML = '<div class="no-sets"><p>No sets found</p></div>';
+        return;
+    }
+
+    grid.innerHTML = filtered.map(set => `
+        <div class="set-item" onclick="showSetView('${set.code}')">
+            <div class="set-item-header">
+                <span class="set-item-code">${set.code}</span>
+                ${set.total ? `<span class="set-item-total">${set.total} cards</span>` : ''}
+            </div>
+            <div class="set-item-name">${set.name}</div>
+            ${set.series ? `<div class="set-item-series">${set.series}</div>` : ''}
+            ${set.release_date ? `<div class="set-item-date">${new Date(set.release_date).toLocaleDateString()}</div>` : ''}
+        </div>
+    `).join('');
+}
+
+async function showSetView(setCode) {
+    const setsView = document.getElementById('sets-view');
+    const detailView = document.getElementById('set-detail-view');
+    const content = document.getElementById('set-detail-content');
+
+    if (!setsView || !detailView || !content) return;
+
+    // Hide sets list, show detail
+    setsView.classList.add('hidden');
+    detailView.classList.remove('hidden');
+
+    content.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading set details...</p></div>';
+
+    try {
+        const response = await fetch(`/api/sets/${encodeURIComponent(setCode)}/cards`);
+        if (!response.ok) throw new Error('Failed to load set');
+
+        const data = await response.json();
+        const set = data.set;
+        const cards = data.cards || [];
+
+        // Get total cards from sets API if available
+        const setInfo = setsData.find(s => s.code === setCode || s.id === setCode);
+        const totalCards = setInfo?.total || set.total_cards || cards.length;
+
+        // Build card grid HTML
+        let cardsHtml = '';
+        cards.forEach(card => {
+            const imgUrl = card.images?.large || card.images?.small || '';
+            const cardName = card.name || 'Unknown';
+            const cardNumber = card.number || '';
+            const cardRarity = card.rarity || '';
+
+            cardsHtml += `
+                <div class="set-card-item" onclick="event.stopPropagation(); showEnhancedCardDetail('${card.ptcg_id}')">
+                    ${imgUrl
+                        ? `<img src="${imgUrl}" alt="${cardName}" loading="lazy">`
+                        : '<div class="no-image">No Image</div>'
+                    }
+                    <div class="set-card-info">
+                        <div class="set-card-name">${cardName}</div>
+                        <div class="set-card-meta">${cardNumber} · ${cardRarity}</div>
+                    </div>
+                </div>
+            `;
+        });
+
+        if (cards.length === 0) {
+            cardsHtml = '<div class="no-cards">No cards found in this set.</div>';
+        }
+
+        content.innerHTML = `
+            <div class="set-header">
+                <h2>${set.name || setCode}</h2>
+                <div class="set-meta">
+                    ${set.series ? `<span class="set-meta-item"><strong>Series:</strong> ${set.series}</span>` : ''}
+                    ${set.release_date
+                        ? `<span class="set-meta-item"><strong>Released:</strong> ${new Date(set.release_date).toLocaleDateString()}</span>`
+                        : ''
+                    }
+                    <span class="set-meta-item"><strong>Total:</strong> ${totalCards} cards</span>
+                    <span class="set-meta-item"><strong>In Database:</strong> ${cards.length} cards</span>
+                </div>
+            </div>
+            <div class="set-cards-header">
+                <h3>Card Collection (${cards.length})</h3>
+            </div>
+            <div class="set-cards-grid">
+                ${cardsHtml}
+            </div>
+        `;
+    } catch (error) {
+        console.error('Error loading set:', error);
+        content.innerHTML = '<div class="error-state"><p>Failed to load set details. Please try again.</p></div>';
+    }
+}
+
+function hideSetView() {
+    const setsView = document.getElementById('sets-view');
+    const detailView = document.getElementById('set-detail-view');
+
+    if (setsView) setsView.classList.remove('hidden');
+    if (detailView) detailView.classList.add('hidden');
+}
+
+function initSets() {
+    // Load sets
+    loadSets();
+
+    // Setup search
+    const searchInput = document.getElementById('sets-search');
+    if (searchInput) {
+        let debounceTimer;
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                setsSearchQuery = e.target.value;
+                renderSets();
+            }, 300);
+        });
+    }
+}
