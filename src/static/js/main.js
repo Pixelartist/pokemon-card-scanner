@@ -1354,9 +1354,6 @@ async function showEnhancedCardDetail(cardId) {
             </div>`;
     }
     
-    const modal = document.getElementById('card-modal');
-    const modalBody = document.getElementById('modal-body');
-    
     // Extract set info
     const setData = card.basic_info?.set || {};
     const setCode = setData.code || card.basic_info?.set?.code || 'N/A';
