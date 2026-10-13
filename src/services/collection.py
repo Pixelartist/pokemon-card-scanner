@@ -114,14 +114,14 @@ class CollectionService:
         finally:
             conn.close()
 
-    def get_all_items(self, limit: int = 100, offset: int = 0, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Get all collection items with card details."""
+    def get_all_items(self, limit=100, offset=0, user_id=None):
+        """Get all collection items with card details (includes value tiers for glow effects)."""
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             if user_id:
                 cursor.execute(
-                    """SELECT ci.*, c.name as card_name, c.ptcg_id, c.number, c.rarity, 
+                    """SELECT ci.*, c.name as card_name, c.ptcg_id, c.number, c.rarity,
                                c.set_name, c.images, c.hp, c.types
                         FROM collection_items ci
                         LEFT JOIN cards c ON ci.card_id = c.id
@@ -140,9 +140,19 @@ class CollectionService:
                         LIMIT ? OFFSET ?""",
                     (limit, offset)
                 )
-            
+
             rows = cursor.fetchall()
             result = []
+            # Batch-fetch prices once for all visible cards to avoid N+1 API calls
+            ptcg_ids = [r['ptcg_id'] for r in rows if r['ptcg_id']]
+            price_map = {}
+            if ptcg_ids:
+                from services.price_cache import get_prices_cached
+                for pid in ptcg_ids:
+                    try:
+                        price_map[pid] = get_prices_cached(pid)
+                    except Exception:
+                        pass
             for row in rows:
                 images = None
                 if row['images']:
@@ -151,14 +161,18 @@ class CollectionService:
                     except:
                         images = None
                     images = _normalize_images(images, row['ptcg_id'])
-                
+
                 types = None
                 if row['types']:
                     try:
                         types = json.loads(row['types'])
                     except:
                         types = None
-                
+
+                ptcg_id = row['ptcg_id'] or ''
+                prices = price_map.get(ptcg_id)
+                value_eur, value_usd, glow_tier = self._card_value(ptcg_id, prices, row)
+
                 result.append({
                     "id": row["id"],
                     "card_id": row["card_id"],
@@ -173,6 +187,9 @@ class CollectionService:
                     "crop_image_path": row["crop_image_path"],
                     "date_acquired": row["date_acquired"],
                     "added_at": row["added_at"],
+                    "value_eur": value_eur,
+                    "value_usd": value_usd,
+                    "glow_tier": glow_tier,
                     "card": {
                         "id": row["id"],
                         "ptcg_id": row["ptcg_id"],
@@ -188,6 +205,38 @@ class CollectionService:
             return result
         finally:
             conn.close()
+
+    def _card_value(self, ptcg_id, prices, row):
+        """Return (value_eur, value_usd, glow_tier) for one collection row."""
+        quantity = int(row['quantity'] or 1)
+        value_eur, value_usd = 0.0, 0.0
+        if prices:
+            cm = prices.get("cardmarket", {})
+            cm_prices = cm.get("prices", {})
+            if cm_prices.get("trendPrice"):
+                value_eur = float(cm_prices["trendPrice"]) * quantity
+            elif cm_prices.get("avg30"):
+                value_eur = float(cm_prices["avg30"]) * quantity
+            tcg = prices.get("tcgplayer", {})
+            tcg_prices = tcg.get("prices", {})
+            normal_market = tcg_prices.get("normal", {})
+            if isinstance(normal_market, dict) and normal_market.get("market"):
+                value_usd = float(normal_market["market"]) * quantity
+            else:
+                rh_market = tcg_prices.get("reverseHolofoil", {})
+                if isinstance(rh_market, dict) and rh_market.get("market"):
+                    value_usd = float(rh_market["market"]) * quantity
+            if value_usd == 0.0 and value_eur > 0.0:
+                value_usd = round(value_eur * 1.18, 2)
+        if value_eur >= 200 or value_usd >= 250:
+            glow_tier = "gold"
+        elif value_eur >= 50 or value_usd >= 60:
+            glow_tier = "silver"
+        elif value_eur > 0 or value_usd > 0:
+            glow_tier = "bronze"
+        else:
+            glow_tier = ""
+        return round(value_eur, 2), round(value_usd, 2), glow_tier
 
     def get_item(self, item_id: int, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Get a single collection item."""

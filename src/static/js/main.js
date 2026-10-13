@@ -1766,6 +1766,7 @@ function normalizeCollectionItem(raw) {
         image_url: c.images?.large || c.images?.small || raw.crop_image_path || raw.scan_image_path || '',
         set_id: c.ptcg_id ? c.ptcg_id.split('-')[0] : '',
         set_info: c.set_name || '',
+        glow_tier: raw.glow_tier || '',
     };
 }
 
@@ -1802,7 +1803,7 @@ function buildBinderPages(cards) {
             const imgUrl = card.image_url;
             const detailId = card.ptcg_id || card.card_id || card.id;
             cardsHTML += `
-                <div class="binder-card" onclick="showCardDetail('${detailId}', this)">
+                <div class="binder-card" data-glow-tier="${card.glow_tier}" onclick="showCardDetail('${detailId}', this)">
                     <img src="${imgUrl}" alt="${cardName}" loading="lazy">
                     <div class="binder-card-overlay">${cardName}</div>
                 </div>
@@ -2013,6 +2014,7 @@ async function loadGalleryPage() {
 function createGalleryItem(card) {
     const item = document.createElement('div');
     item.className = 'gallery-item';
+    if (card.glow_tier) item.setAttribute('data-glow-tier', card.glow_tier);
     
     const cardName = card.card_name || card.name || 'Unknown';
     const imgUrl = card.image_url || card.scanned_image_url || '';

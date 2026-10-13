@@ -519,6 +519,64 @@ body {
     gap: 20px;
 }
 
+/* Glow effect tiers for top-rated cards — inspired by "Electric Border" concept.
+   Three levels based on card market value (EUR preferred, USD fallback):
+   - Bronze: €0-50   /  $0-60   → subtle amber glow
+   - Silver: €50-200 / $60-250  → bright silver border
+   - Gold:   €200+   / $250+    → intense golden electric border
+   Applied via data-glow-tier attribute on card elements (.gallery-item, .binder-card, .set-card-item).
+*/
+[data-glow-tier="bronze"] {
+    border-color: rgba(255, 165, 0, 0.45);
+    box-shadow:
+        inset 0 0 12px rgba(255, 165, 0, 0.12),
+        0 0 10px rgba(255, 165, 0, 0.25),
+        0 0 22px rgba(255, 165, 0, 0.10);
+}
+[data-glow-tier="bronze"]:hover {
+    box-shadow:
+        inset 0 0 18px rgba(255, 165, 0, 0.18),
+        0 0 14px rgba(255, 165, 0, 0.38),
+        0 0 32px rgba(255, 165, 0, 0.16);
+}
+[data-glow-tier="silver"] {
+    border-color: rgba(192, 192, 220, 0.55);
+    box-shadow:
+        inset 0 0 16px rgba(192, 192, 220, 0.14),
+        0 0 12px rgba(192, 192, 220, 0.40),
+        0 0 28px rgba(192, 192, 220, 0.20),
+        0 0 48px rgba(192, 192, 220, 0.08);
+}
+[data-glow-tier="silver"]:hover {
+    box-shadow:
+        inset 0 0 24px rgba(192, 192, 220, 0.22),
+        0 0 18px rgba(192, 192, 220, 0.55),
+        0 0 42px rgba(192, 192, 220, 0.28),
+        0 0 70px rgba(192, 192, 220, 0.12);
+}
+[data-glow-tier="gold"] {
+    border-color: rgba(255, 215, 0, 0.65);
+    box-shadow:
+        inset 0 0 24px rgba(255, 215, 0, 0.20),
+        0 0 16px rgba(255, 215, 0, 0.55),
+        0 0 38px rgba(255, 215, 0, 0.35),
+        0 0 70px rgba(255, 215, 0, 0.16),
+        0 0 110px rgba(255, 215, 0, 0.07);
+    animation: glow-pulse-gold 3s ease-in-out infinite;
+}
+[data-glow-tier="gold"]:hover {
+    box-shadow:
+        inset 0 0 36px rgba(255, 215, 0, 0.30),
+        0 0 24px rgba(255, 215, 0, 0.72),
+        0 0 56px rgba(255, 215, 0, 0.45),
+        0 0 100px rgba(255, 215, 0, 0.22),
+        0 0 150px rgba(255, 215, 0, 0.10);
+}
+@keyframes glow-pulse-gold {
+    0%, 100% { box-shadow: inset 0 0 24px rgba(255, 215, 0, 0.20), 0 0 16px rgba(255, 215, 0, 0.55), 0 0 38px rgba(255, 215, 0, 0.35), 0 0 70px rgba(255, 215, 0, 0.16), 0 0 110px rgba(255, 215, 0, 0.07); }
+    50% { box-shadow: inset 0 0 30px rgba(255, 215, 0, 0.28), 0 0 22px rgba(255, 215, 0, 0.70), 0 0 52px rgba(255, 215, 0, 0.44), 0 0 90px rgba(255, 215, 0, 0.22), 0 0 140px rgba(255, 215, 0, 0.10); }
+}
+
 .stat-card {
     background: var(--bg-secondary);
     border-radius: 16px;
@@ -1581,8 +1639,7 @@ body {
 
 .gallery-item img {
     width: 100%;
-    height: 240px;
-    object-fit: cover;
+    height: auto; /* full card, natural 2.5:3 aspect — no crop */
     display: block;
 }
 
@@ -1621,23 +1678,86 @@ body {
 /* ============================================
    SETS VIEW
    ============================================ */
-.sets-list-header {
+.sets-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 20px;
+    padding: 0 16px;
 }
 
-.sets-list-header h2 {
+.sets-header h2 {
     margin: 0;
     color: var(--text-primary);
+    font-size: 1.5rem;
+}
+
+.search-box {
+    position: relative;
+    max-width: 300px;
+}
+
+.search-box input {
+    width: 100%;
+    padding: 8px 12px;
+    padding-left: 32px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    transition: all 0.2s ease;
+}
+
+.search-box input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(233, 69, 96, 0.2);
+}
+
+.search-box::before {
+    content: "🔍";
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-secondary);
+}
+
+.series-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+    padding: 0 16px;
+}
+
+.series-btn {
+    padding: 6px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: var(--text-secondary);
+}
+
+.series-btn.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+.series-btn:hover {
+    background: var(--bg-secondary);
 }
 
 .sets-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 16px;
-    padding-bottom: 40px;
+    padding: 0 16px 40px;
 }
 
 .set-item {
@@ -1647,12 +1767,43 @@ body {
     border: 1px solid var(--border);
     cursor: pointer;
     transition: all 0.2s ease;
+    position: relative;
 }
 
 .set-item:hover {
     border-color: var(--accent);
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(233, 69, 96, 0.2);
+}
+
+.set-symbol {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.set-symbol img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.set-symbol-placeholder {
+    width: 100%;
+    height: 100%;
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-secondary);
 }
 
 .set-item-header {
@@ -1681,6 +1832,9 @@ body {
     font-size: 1rem;
     color: var(--text-primary);
     margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .set-item-series {
@@ -1694,34 +1848,92 @@ body {
     color: var(--text-secondary);
 }
 
-.set-header {
-    background: var(--bg-secondary);
-    border-radius: 16px;
-    padding: 24px;
-    margin-bottom: 24px;
-    border: 1px solid var(--border);
+.set-item-badges {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
 }
 
-.set-header h2 {
+.badge {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+}
+
+.badge-de {
+    background: #ffce00;
+    color: #000;
+}
+
+.badge-local {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.badge-img {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.set-hero {
+    background: var(--bg-secondary);
+    border-radius: 16px;
+    padding: 32px;
+    margin-bottom: 24px;
+    border: 1px solid var(--border);
+    position: relative;
+    min-height: 180px;
+    display: flex;
+    align-items: flex-end;
+}
+
+.set-hero-img {
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    position: relative;
+}
+
+.set-hero-img::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    border-radius: 16px;
+}
+
+.set-hero-overlay {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+}
+
+.set-hero h2 {
     margin: 0 0 12px 0;
     font-size: 1.8rem;
-    color: var(--text-primary);
+    color: white;
 }
 
 .set-meta {
     display: flex;
     flex-wrap: wrap;
     gap: 20px;
-    color: var(--text-secondary);
+    color: rgba(255, 255, 255, 0.9);
     font-size: 0.9rem;
 }
 
 .set-meta-item strong {
-    color: var(--text-primary);
+    color: white;
 }
 
 .set-cards-header {
     margin-bottom: 16px;
+    padding: 0 16px;
 }
 
 .set-cards-header h3 {
@@ -1734,7 +1946,7 @@ body {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 16px;
-    padding-bottom: 40px;
+    padding: 0 16px 40px;
 }
 
 .set-card-item {
@@ -1798,6 +2010,7 @@ body {
 
 .back-btn {
     margin-bottom: 20px;
+    margin-left: 16px;
 }
 
 /* ============================================
@@ -1970,10 +2183,6 @@ body {
         gap: 10px;
     }
 
-    .gallery-item img {
-        height: 170px;
-    }
-
     .gallery-header {
         flex-direction: column;
         align-items: flex-start;
@@ -2053,10 +2262,6 @@ body {
     .gallery-grid {
         grid-template-columns: repeat(2, 1fr);
         gap: 8px;
-    }
-
-    .gallery-item img {
-        height: 140px;
     }
 
     .card-main {
