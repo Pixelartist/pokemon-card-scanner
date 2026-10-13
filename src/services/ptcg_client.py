@@ -318,13 +318,13 @@ class PokemonTCGClient:
             return []
 
     def get_prices(self, card_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch price data from the free pokemontcg.io API (no key required, rate-limited).
+        """Fetch price data from pokemontcg.io with TCGdex fallback.
 
-        The API intermittently returns empty bodies or 500s under load, so retry
-        a few times with a short backoff before giving up.
+        pokemontcg.io is intermittent (500s, empty bodies) so we retry it
+        then fall back to TCGdex API which has reliable pricing data.
         """
+        # Try pokemontcg.io first (primary source)
         import time as _time
-        last_err = None
         for attempt in range(3):
             try:
                 resp = requests.get(
@@ -335,28 +335,46 @@ class PokemonTCGClient:
                     try:
                         data = resp.json().get("data")
                     except ValueError:
-                        last_err = "empty/invalid body"
                         _time.sleep(0.6)
                         continue
-                    if data:
+                    if data and (data.get("tcgplayer") or data.get("cardmarket")):
                         return {
                             "tcgplayer": data.get("tcgplayer"),
                             "cardmarket": data.get("cardmarket"),
+                            "source": "pokemontcg"
                         }
-                    # Valid JSON but no price data for this card
-                    return None
                 elif resp.status_code == 429:
-                    logger.warning(f"Rate limited by pokemontcg.io for {card_id}")
                     _time.sleep(1.5)
                     continue
-                else:
-                    last_err = f"HTTP {resp.status_code}"
-                    _time.sleep(0.6)
-                    continue
-            except Exception as e:
-                last_err = str(e)
-                _time.sleep(0.6)
-        logger.debug(f"Price fetch failed for {card_id} after retries: {last_err}")
+            except Exception:
+                pass
+            _time.sleep(0.6)
+
+        # Fallback to TCGdex API
+        try:
+            lang = "en"  # Default to English for prices
+            resp = requests.get(
+                f"https://api.tcgdex.net/v2/{lang}/cards/{card_id}",
+                timeout=15
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                variants = data.get("variants_detailed", [])
+                if variants:
+                    pricing = variants[0].get("pricing", {})
+                    tcgplayer = pricing.get("tcgplayer", {})
+                    cardmarket = pricing.get("cardmarket", {})
+                    # Convert TCGdex format to pokemontcg format
+                    result = {}
+                    if tcgplayer:
+                        result["tcgplayer"] = tcgplayer
+                    if cardmarket:
+                        result["cardmarket"] = cardmarket
+                    if result:
+                        return {**result, "source": "tcgdex"}
+        except Exception as e:
+            logger.debug(f"TCGdex price fallback failed for {card_id}: {e}")
+
         return None
 
 
