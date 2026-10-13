@@ -124,6 +124,15 @@ def init_db():
         )
     """)
 
+    # Create card_prices table (persistent price cache for stable valuations)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS card_prices (
+            card_id TEXT PRIMARY KEY,
+            prices TEXT NOT NULL,
+            fetched_at TEXT NOT NULL
+        )
+    """)
+
     # Create indexes for performance
     indexes = [
         "CREATE INDEX IF NOT EXISTS idx_cards_ptcg_id ON cards(ptcg_id)",

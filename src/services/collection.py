@@ -391,20 +391,11 @@ class CollectionService:
             conn.close()
 
     def _fetch_card_prices(self, ptcg_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch prices from pokemontcg.io API."""
+        """Fetch prices via the persistent cache (24h fresh window,
+        stale-cache fallback when the API fails or rate-limits)."""
         try:
-            resp = requests.get(
-                f"https://api.pokemontcg.io/v2/cards/{ptcg_id}",
-                timeout=10
-            )
-            if resp.status_code == 200:
-                data = resp.json().get("data")
-                if data:
-                    return {
-                        "tcgplayer": data.get("tcgplayer"),
-                        "cardmarket": data.get("cardmarket"),
-                    }
-            return None
+            from services.price_cache import get_prices_cached
+            return get_prices_cached(ptcg_id)
         except Exception as e:
             logger.debug(f"Price fetch failed for {ptcg_id}: {e}")
             return None

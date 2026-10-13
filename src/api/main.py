@@ -1000,10 +1000,10 @@ async def get_card_details(card_id: str):
                         "prices": None,
                         "source": "local_db",
                     }
-                    # Fetch prices from pokemontcg.io
+                    # Fetch prices (cached; falls back to stale cache on API failure)
                     try:
-                        client = get_client()
-                        prices = client.get_prices(row["ptcg_id"])
+                        from services.price_cache import get_prices_cached
+                        prices = get_prices_cached(row["ptcg_id"])
                         if prices:
                             details["prices"] = prices
                     except Exception as e:
@@ -1025,7 +1025,7 @@ async def get_card_details(card_id: str):
             # while image URLs use the 'de_' prefix
             local = matcher.cards.get(card_id[3:])
         if local:
-            return {
+            details = {
                 "basic_info": {
                     "id": local.card_id,
                     "name": local.name,
@@ -1042,10 +1042,10 @@ async def get_card_details(card_id: str):
                 "prices": None,
                 "source": "local_index",
             }
-            # Fetch prices from pokemontcg.io
+            # Fetch prices (cached; falls back to stale cache on API failure)
             try:
-                client = get_client()
-                prices = client.get_prices(local.card_id)
+                from services.price_cache import get_prices_cached
+                prices = get_prices_cached(local.card_id)
                 if prices:
                     details["prices"] = prices
             except Exception as e:
@@ -1088,11 +1088,19 @@ async def get_card_details(card_id: str):
                 _bi_imgs[_k] = _resolve_local_card_image(_pid, _bi_imgs[_k])
     _bi["images"] = _bi_imgs
 
-    # Fetch prices if not already present (from pokemontcg.io free API)
+    # Prime the cache when the card lookup itself carried prices
+    if details.get("prices"):
+        try:
+            from services.price_cache import prime_cache
+            prime_cache(card_id, details["prices"])
+        except Exception:
+            pass
+
+    # Fetch prices if not already present (cached; stale-cache fallback on failure)
     if not details.get("prices"):
         try:
-            client = get_client()
-            prices = client.get_prices(card_id)
+            from services.price_cache import get_prices_cached
+            prices = get_prices_cached(card_id)
             if prices:
                 details["prices"] = prices
         except Exception as e:
