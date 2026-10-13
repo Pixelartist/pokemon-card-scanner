@@ -339,6 +339,18 @@ body {
     color: var(--text-secondary);
 }
 
+.set-link {
+    color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+    transition: color 0.2s ease;
+}
+
+.set-link:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
+}
+
 .card-actions {
     display: flex;
     gap: 10px;

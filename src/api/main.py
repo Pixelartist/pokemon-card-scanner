@@ -644,6 +644,78 @@ async def get_sets():
     return {"sets": sets}
 
 
+@app.get("/set/{set_code}", response_class=HTMLResponse)
+async def set_page(request: Request, set_code: str):
+    """Serve a dedicated set page showing all cards in a set."""
+    try:
+        template = jinja_env.get_template("set.html")
+        html = template.render(set_code=set_code, timestamp=int(time.time()))
+        return HTMLResponse(content=html)
+    except Exception as e:
+        logger.error(f"Error rendering set page: {e}")
+        return HTMLResponse(content=f"<h1>Error loading set {set_code}</h1>", status_code=500)
+
+
+@app.get("/api/sets/{set_code}/cards")
+async def get_set_cards(set_code: str):
+    """Get all cards in a set with basic info."""
+    import sqlite3
+    from pathlib import Path
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Get set info
+    cursor.execute("SELECT * FROM sets WHERE ptcg_id = ?", (set_code,))
+    set_row = cursor.fetchone()
+
+    if not set_row:
+        # Try case-insensitive match
+        cursor.execute("SELECT * FROM sets WHERE LOWER(ptcg_id) = LOWER(?)", (set_code,))
+        set_row = cursor.fetchone()
+
+    if not set_row:
+        raise HTTPException(status_code=404, detail=f"Set '{set_code}' not found")
+
+    # Get all cards in this set, ordered by number
+    cursor.execute("""
+        SELECT c.ptcg_id, c.name, c.number, c.rarity, c.types, c.images
+        FROM cards c
+        WHERE c.set_id = ?
+        ORDER BY c.number
+    """, (set_row["id"],))
+
+    cards = []
+    for row in cursor.fetchall():
+        card_data = dict(row)
+        # Normalize images
+        images = card_data.get("images")
+        if isinstance(images, str):
+            try:
+                images = json.loads(images)
+            except:
+                images = {}
+        card_data["images"] = images or {}
+        cards.append(card_data)
+
+    conn.close()
+
+    return {
+        "set": {
+            "id": set_row["id"],
+            "ptcg_id": set_row["ptcg_id"],
+            "name": set_row["name"],
+            "series": set_row["series"],
+            "release_date": set_row["release_date"],
+            "total_cards": set_row["total_cards"],
+        },
+        "cards": cards,
+        "total": len(cards)
+    }
+
+
 def _normalize_local_row_images(images, ptcg_id: str = ""):
     from services.collection import _normalize_images
     return _normalize_images(images, ptcg_id)

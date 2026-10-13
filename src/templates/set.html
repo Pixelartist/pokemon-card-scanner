@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ set.name }} - Pokémon Card Scanner</title>
+    <link rel="icon" type="image/png" href="/static/images/favicon-32.png" sizes="32x32">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/main.css?t={{ timestamp }}">
+    <style>
+        .set-page {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .set-back-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 20px;
+            padding: 8px 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .set-back-btn:hover {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .set-header {
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 30px;
+            border: 1px solid var(--border);
+        }
+
+        .set-header h1 {
+            font-size: 2rem;
+            margin: 0 0 15px 0;
+            color: var(--text-primary);
+        }
+
+        .set-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .set-meta-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .set-meta-label {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .set-cards-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .set-cards-header h2 {
+            font-size: 1.3rem;
+            margin: 0;
+            color: var(--text-primary);
+        }
+
+        .set-cards-count {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .set-cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 16px;
+            padding-bottom: 40px;
+        }
+
+        .set-card-item {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            border: 1px solid var(--border);
+        }
+
+        .set-card-item:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 24px rgba(233, 69, 96, 0.2);
+            border-color: var(--accent);
+        }
+
+        .set-card-item img {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+            display: block;
+        }
+
+        .set-card-info {
+            padding: 10px;
+        }
+
+        .set-card-name {
+            font-weight: 600;
+            font-size: 0.85rem;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--text-primary);
+        }
+
+        .set-card-meta {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .no-image {
+            width: 100%;
+            height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+        }
+
+        .loading-set {
+            text-align: center;
+            padding: 60px;
+            color: var(--text-secondary);
+        }
+
+        .error-set {
+            text-align: center;
+            padding: 60px;
+            color: var(--text-secondary);
+        }
+
+        @media (max-width: 768px) {
+            .set-header {
+                padding: 20px;
+            }
+
+            .set-header h1 {
+                font-size: 1.5rem;
+            }
+
+            .set-cards-grid {
+                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+                gap: 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="set-page">
+        <a href="/" class="set-back-btn">
+            <span>←</span> Back to Scanner
+        </a>
+
+        <div id="set-content">
+            <div class="loading-set">
+                <div class="spinner"></div>
+                <p>Loading set details...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const setCode = "{{ set_code }}";
+
+        async function loadSet() {
+            const container = document.getElementById('set-content');
+
+            try {
+                const response = await fetch(`/api/sets/${encodeURIComponent(setCode)}/cards`);
+                if (!response.ok) throw new Error('Failed to load set');
+
+                const data = await response.json();
+                const set = data.set;
+                const cards = data.cards || [];
+
+                // Format release date
+                let releaseDate = 'Unknown';
+                if (set.release_date) {
+                    try {
+                        releaseDate = new Date(set.release_date).toLocaleDateString('en-GB', {
+                            year: 'numeric',
+                            month: 'long',
+                            day: 'numeric'
+                        });
+                    } catch {
+                        releaseDate = set.release_date;
+                    }
+                }
+
+                // Build card grid
+                let cardsHtml = '';
+                cards.forEach(card => {
+                    const imgUrl = card.images?.large || card.images?.small || '';
+                    const cardName = card.name || 'Unknown';
+                    const cardNumber = card.number || '';
+                    const cardRarity = card.rarity || '';
+
+                    cardsHtml += `
+                        <div class="set-card-item" onclick="showCardDetail('${card.ptcg_id}')">
+                            ${imgUrl
+                                ? `<img src="${imgUrl}" alt="${cardName}" loading="lazy">`
+                                : '<div class="no-image">No Image</div>'
+                            }
+                            <div class="set-card-info">
+                                <div class="set-card-name">${cardName}</div>
+                                <div class="set-card-meta">${cardNumber} · ${cardRarity}</div>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                if (cards.length === 0) {
+                    cardsHtml = '<div class="error-set"><p>No cards found in this set.</p></div>';
+                }
+
+                container.innerHTML = `
+                    <div class="set-header">
+                        <h1>${set.name || setCode}</h1>
+                        <div class="set-meta">
+                            ${set.series
+                                ? `<div class="set-meta-item"><span class="set-meta-label">Series:</span> ${set.series}</div>`
+                                : ''
+                            }
+                            <div class="set-meta-item"><span class="set-meta-label">Released:</span> ${releaseDate}</div>
+                            <div class="set-meta-item"><span class="set-meta-label">Total Cards:</span> ${set.total_cards || cards.length}</div>
+                            <div class="set-meta-item"><span class="set-meta-label">In Database:</span> ${cards.length}</div>
+                        </div>
+                    </div>
+
+                    <div class="set-cards-header">
+                        <h2>Card Collection</h2>
+                        <span class="set-cards-count">${cards.length} cards</span>
+                    </div>
+
+                    <div class="set-cards-grid">
+                        ${cardsHtml}
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Error loading set:', error);
+                container.innerHTML = '<div class="error-set"><p>Failed to load set details. Please try again.</p></div>';
+            }
+        }
+
+        // Reuse the modal show function for card details
+        async function showCardDetail(cardId) {
+            // Navigate back to index with card ID in URL hash
+            window.location.href = `/?card=${encodeURIComponent(cardId)}`;
+        }
+
+        // Load set on page load
+        loadSet();
+    </script>
+</body>
+</html>
