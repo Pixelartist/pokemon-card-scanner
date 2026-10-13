@@ -1018,9 +1018,10 @@ async def get_card_details(card_id: str):
     if card and card.get("source") == "local_db":
         try:
             import requests as _req
-            # Detect language from card ID prefix (de_* for German)
+            # Detect language from card ID prefix (de_* for German, etc.)
             lang = "de" if card_id.startswith("de_") else "en"
             card_id_for_api = card_id[3:] if card_id.startswith("de_") else card_id
+            # Note: Additional language prefixes (fr_, es_, it_, pt_, ja_) can be added here
             _r = _req.get(f"https://api.tcgdex.net/v2/{lang}/cards/{card_id_for_api}", timeout=10)
             if _r.status_code == 200:
                 _d = _r.json()
@@ -1072,6 +1073,7 @@ async def get_card_details(card_id: str):
             # Use appropriate language based on card ID prefix
             _card_id = local.card_id.replace("de_", "") if local.card_id.startswith("de_") else local.card_id
             _lang = "de" if local.card_id.startswith("de_") else "en"
+            # Note: Additional language prefixes (fr_, es_, it_, pt_, ja_) can be added here
             try:
                 import requests as _req2
                 _r2 = _req2.get(f"https://api.tcgdex.net/v2/{_lang}/cards/{_card_id}", timeout=10)
