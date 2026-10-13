@@ -306,7 +306,7 @@ class AuthService:
             
             # Find user by username
             cursor.execute(
-                "SELECT id, username, email, hashed_password, full_name, created_at FROM users WHERE username = ?",
+                "SELECT id, username, email, hashed_password, full_name, created_at, preferred_language FROM users WHERE username = ?",
                 (login_data.username,)
             )
             row = cursor.fetchone()
@@ -335,6 +335,7 @@ class AuthService:
                     username=row[1],
                     email=row[2],
                     full_name=row[4],
+                    preferred_language=row[6] or "EN",
                     created_at=row[5]
                 )
             }
@@ -347,7 +348,7 @@ class AuthService:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, username, email, full_name, created_at FROM users WHERE id = ?",
+                "SELECT id, username, email, full_name, created_at, preferred_language FROM users WHERE id = ?",
                 (user_id,)
             )
             row = cursor.fetchone()
@@ -358,7 +359,24 @@ class AuthService:
                 username=row[1],
                 email=row[2],
                 full_name=row[3],
+                preferred_language=row[5] or "EN",
                 created_at=row[4]
             )
+        finally:
+            conn.close()
+
+    def set_preferred_language(self, user_id: int, language: str) -> Optional[UserResponse]:
+        """Update the user's preferred card language (EN, DE, ...)."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET preferred_language = ? WHERE id = ?",
+                (language, user_id)
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                return None
+            return self.get_user(user_id)
         finally:
             conn.close()

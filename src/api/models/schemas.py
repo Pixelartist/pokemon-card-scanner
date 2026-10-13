@@ -114,7 +114,12 @@ class UserResponse(BaseModel):
     username: str
     email: str
     full_name: Optional[str] = None
+    preferred_language: str = "EN"
     created_at: datetime
+
+
+class UserProfileUpdate(BaseModel):
+    preferred_language: Optional[str] = None
 
 
 class AuthToken(BaseModel):

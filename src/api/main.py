@@ -20,7 +20,7 @@ import requests
 from datetime import datetime
 
 from api.models.database import init_db, get_db_connection, User, Binder
-from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, BinderCreate, BinderUpdate
+from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, UserProfileUpdate, BinderCreate, BinderUpdate
 from services.ptcg_client import get_client
 from services.collection import CollectionService
 from services.auth import (
@@ -1112,7 +1112,7 @@ async def get_card_details(card_id: str):
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     """Serve the app icon to avoid 404 noise in the browser console."""
-    icon = os.path.join(static_dir, "images", "logo.png")
+    icon = os.path.join(static_dir, "images", "icon.png")
     if os.path.exists(icon):
         return FileResponse(icon, media_type="image/png")
     return Response(status_code=204)
@@ -1312,8 +1312,30 @@ async def get_me(current_user: User = Depends(get_current_user)):
         username=current_user.username,
         email=current_user.email,
         full_name=current_user.full_name,
+        preferred_language=current_user.preferred_language,
         created_at=current_user.created_at
     )
+
+
+ALLOWED_LANGUAGES = {"EN", "DE", "FR", "IT", "ES", "JA", "ZH"}
+
+
+@app.patch("/api/auth/me/language", response_model=UserResponse)
+async def set_my_language(
+    profile: UserProfileUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    """Update the current user's preferred card language."""
+    lang = (profile.preferred_language or "").upper()
+    if lang not in ALLOWED_LANGUAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported language '{profile.preferred_language}'. Allowed: {', '.join(sorted(ALLOWED_LANGUAGES))}",
+        )
+    updated = AuthService().set_preferred_language(current_user.id, lang)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return updated
 
 
 # Keep a reference to the warm-up task so it isn't garbage-collected

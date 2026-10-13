@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="lens" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="100%" style="stop-color:#c73e54"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Background rounded square -->
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#bg)" stroke="#0f3460" stroke-width="2"/>
+  
+  <!-- Scanning lens -->
+  <circle cx="32" cy="28" r="18" fill="none" stroke="url(#lens)" stroke-width="4"/>
+  <circle cx="32" cy="28" r="8" fill="url(#lens)"/>
+  
+  <!-- Scan lines (horizontal arcs suggesting scanner beam) -->
+  <path d="M 12 44 Q 32 52 52 44" fill="none" stroke="#e94560" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M 16 50 Q 32 56 48 50" fill="none" stroke="#e94560" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+  <path d="M 20 56 Q 32 60 44 56" fill="none" stroke="#e94560" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+  
+  <!-- Pokeball button accent -->
+  <circle cx="32" cy="28" r="4" fill="#1a1a2e"/>
+  <line x1="28" y1="28" x2="36" y2="28" stroke="#1a1a2e" stroke-width="1.5"/>
+</svg>

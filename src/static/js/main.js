@@ -201,6 +201,7 @@ window.fetch = async function (input, init = {}) {
 function requireAuth() {
     const token = getAuthToken();
     if (!token) {
+        loadLanguagePreference();
         const modal = document.getElementById('login-modal');
         if (modal) {
             modal.classList.remove('hidden');
@@ -279,6 +280,7 @@ async function handleLoginSubmit(e) {
             ownedQtyMap = null;  // fresh session -> refresh owned counts
             const uname = data.user?.username || data.username;
             if (uname) localStorage.setItem('username', uname);
+            if (data.user?.preferred_language) setPreferredLanguage(data.user.preferred_language);
             updateUserInfo(uname);
             document.getElementById('login-modal')?.classList.add('hidden');
             document.getElementById('login-password').value = '';
@@ -326,6 +328,7 @@ async function handleRegisterSubmit(e) {
             ownedQtyMap = null;  // fresh session -> refresh owned counts
             const uname = data.user?.username || data.username;
             if (uname) localStorage.setItem('username', uname);
+            if (data.user?.preferred_language) setPreferredLanguage(data.user.preferred_language);
             updateUserInfo(uname);
             document.getElementById('login-modal')?.classList.add('hidden');
             if (errorEl) errorEl.textContent = '';
@@ -348,6 +351,72 @@ function updateUserInfo(username) {
     if (statusEl && username) {
         statusEl.innerHTML = `<span class="status-dot"></span><span class="username">${username}</span>`;
     }
+}
+
+// --- Preferred card language (user setting) -------------------------------
+// Stored in localStorage so the add-to-collection form can pre-select it
+// instantly; synced with the server on login and via the header picker.
+function getPreferredLanguage() {
+    return localStorage.getItem('preferred_language') || 'EN';
+}
+
+function setPreferredLanguage(lang) {
+    localStorage.setItem('preferred_language', lang || 'EN');
+    const picker = document.getElementById('lang-pref');
+    if (picker && picker.value !== lang) picker.value = lang;
+}
+
+function bindLanguagePicker() {
+    const picker = document.getElementById('lang-pref');
+    if (!picker || picker.dataset.bound) return;
+    picker.dataset.bound = '1';
+    picker.addEventListener('change', async () => {
+        const lang = picker.value;
+        setPreferredLanguage(lang);
+        try {
+            const response = await nativeFetch('/api/auth/me/language', {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${getAuthToken()}`
+                },
+                body: JSON.stringify({ preferred_language: lang })
+            });
+            if (response.ok) {
+                const user = await response.json();
+                setPreferredLanguage(user.preferred_language);
+                showToast(`Card language set to ${user.preferred_language}`);
+            } else {
+                showToast('Could not save language setting');
+            }
+        } catch {
+            showToast('Could not save language setting');
+        }
+    });
+}
+
+async function loadLanguagePreference() {
+    // Fetch from /api/auth/me so returning users get their saved setting;
+    // show the header picker only while signed in.
+    const picker = document.getElementById('lang-pref');
+    const token = getAuthToken();
+    if (!picker) return;
+    if (!token) {
+        loadLanguagePreference();
+        picker.style.display = 'none';
+        return;
+    }
+    try {
+        const response = await nativeFetch('/api/auth/me', {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.ok) {
+            const user = await response.json();
+            setPreferredLanguage(user.preferred_language || 'EN');
+        }
+    } catch { /* keep localStorage value on network failure */ }
+    picker.value = getPreferredLanguage();
+    picker.style.display = '';
 }
 
 
@@ -571,7 +640,8 @@ async function addToCollection(cardId) {
     
     modalBody.innerHTML = `
         <h2>Add ${card.name} to Collection</h2>
-        <form id="add-form" onsubmit="submitAddCollection(event)">
+
+    // Pre-select user language\n    const prefLang = getPreferredLanguage();\n    const langSelect = document.querySelector(\select[name=language]\);\n    if (langSelect) {\n        for (let i = 0; i < langSelect.options.length; i++) {\n            langSelect.options[i].selected = (langSelect.options[i].value === prefLang);\n        }\n    }\n        <form id="add-form" onsubmit="submitAddCollection(event)">
             <div class="form-group">
                 <label>Condition</label>
                 <select name="condition">
@@ -684,6 +754,7 @@ async function loadCollection() {
         console.log('[loadCollection] Token:', token ? 'present (' + token.length + ' chars)' : 'MISSING');
 
         if (!token) {
+        loadLanguagePreference();
             throw new Error('No authentication token found. Please login first.');
         }
 
@@ -842,6 +913,7 @@ async function initializeApp() {
     }
 
     if (!token) {
+        loadLanguagePreference();
         token = (await refreshAccessToken()) ? getAuthToken() : null;
     }
 
@@ -871,6 +943,7 @@ async function initializeApp() {
 
     // If still no valid session, show login
     if (!token) {
+        loadLanguagePreference();
         const modal = document.getElementById('login-modal');
         if (modal) {
             modal.classList.remove('hidden');
@@ -1868,6 +1941,7 @@ async function loadGalleryPage() {
     try {
         const token = getAuthToken();
         if (!token) {
+        loadLanguagePreference();
             grid.innerHTML = '<div class="gallery-loading"><p>Please login to view your gallery</p></div>';
             galleryLoading = false;
             return;

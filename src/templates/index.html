@@ -7,6 +7,8 @@
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Pokémon Card Scanner</title>
+    <link rel="icon" type="image/png" href="/static/images/icon.png" sizes="64x64">
+    <link rel="icon" type="image/png" href="/static/images/favicon-32.png" sizes="32x32">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/main.css?t={{ timestamp }}">
     <!-- StPageFlip for realistic book binding effect -->
@@ -27,6 +29,15 @@
                 <span class="status-dot"></span>
                 <span class="username">Guest</span>
             </div>
+            <select id="lang-pref" class="lang-pref" title="Preferred card language" style="display:none">
+                <option value="EN">🇬🇧 EN</option>
+                <option value="DE">🇩🇪 DE</option>
+                <option value="FR">🇫🇷 FR</option>
+                <option value="IT">🇮🇹 IT</option>
+                <option value="ES">🇪🇸 ES</option>
+                <option value="JA">🇯🇵 JA</option>
+                <option value="ZH">🇨🇳 ZH</option>
+            </select>
         </header>
 
         <!-- Navigation Tabs -->

@@ -60,6 +60,7 @@ def init_db():
             email TEXT UNIQUE NOT NULL,
             hashed_password TEXT NOT NULL,
             full_name TEXT,
+            preferred_language TEXT DEFAULT 'EN',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -163,6 +164,11 @@ def init_db():
         cursor.execute("ALTER TABLE collection_items ADD COLUMN scan_image_path TEXT")
     if 'crop_image_path' not in ci_columns:
         cursor.execute("ALTER TABLE collection_items ADD COLUMN crop_image_path TEXT")
+
+    cursor.execute("PRAGMA table_info(users)")
+    user_columns = {r[1] for r in cursor.fetchall()}
+    if 'preferred_language' not in user_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN preferred_language TEXT DEFAULT 'EN'")
     
     conn.commit()
     conn.close()
