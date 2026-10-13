@@ -252,6 +252,8 @@ class PokemonTCGClient:
                     for key in card_dict:
                         if isinstance(card_dict[key], (bytes, bytearray)):
                             card_dict[key] = card_dict[key].decode('utf-8')
+                    # Mark as local DB source for downstream enrichment
+                    card_dict["source"] = "local_db"
                     conn.close()
                     return card_dict
                 

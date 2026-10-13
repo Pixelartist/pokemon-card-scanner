@@ -1013,6 +1013,29 @@ async def get_card_details(card_id: str):
             pass
     client = get_client()
     card = client.get_card(card_id)
+    
+    # If found in local DB but missing metadata, try TCGdex API for enrichment
+    if card and card.get("source") == "local_db":
+        try:
+            import requests as _req
+            _r = _req.get(f"https://api.tcgdex.net/v2/en/cards/{card_id}", timeout=10)
+            if _r.status_code == 200:
+                _d = _r.json()
+                if _d.get("set"):
+                    card["set"] = _d.get("set")
+                if _d.get("rarity"):
+                    card["rarity"] = _d.get("rarity")
+                if _d.get("types"):
+                    card["types"] = _d.get("types")
+                if _d.get("hp"):
+                    card["hp"] = _d.get("hp")
+                if _d.get("illustrator"):
+                    card["artist"] = _d.get("illustrator")
+                if _d.get("legalities"):
+                    card["legalities"] = _d.get("legalities")
+        except Exception:
+            pass
+    
     if not card:
         # Fall back to the local CLIP index (covers German 'de_*' cards and
         # any card the TCGdex API lookup misses)
@@ -1042,6 +1065,24 @@ async def get_card_details(card_id: str):
                 "prices": None,
                 "source": "local_index",
             }
+            # Try TCGdex for enrichment if metadata is missing
+            try:
+                import requests as _req2
+                _r2 = _req2.get(f"https://api.tcgdex.net/v2/en/cards/{local.card_id}", timeout=10)
+                if _r2.status_code == 200:
+                    _d2 = _r2.json()
+                    if _d2.get("set"):
+                        details["basic_info"]["set"] = {"name": _d2["set"].get("name", local.set_code), "code": local.set_code}
+                    if _d2.get("rarity") and not details["basic_info"]["rarity"]:
+                        details["basic_info"]["rarity"] = _d2.get("rarity")
+                    if _d2.get("types") and not details["basic_info"]["types"]:
+                        details["basic_info"]["types"] = _d2.get("types")
+                    if _d2.get("hp") and not details["basic_info"]["hp"]:
+                        details["basic_info"]["hp"] = _d2.get("hp")
+                    if _d2.get("illustrator") and not details["basic_info"]["artist"]:
+                        details["basic_info"]["artist"] = _d2.get("illustrator")
+            except Exception:
+                pass
             # Fetch prices (cached; falls back to stale cache on API failure)
             try:
                 from services.price_cache import get_prices_cached
