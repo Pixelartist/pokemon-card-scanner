@@ -1356,7 +1356,11 @@ async function showEnhancedCardDetail(cardId) {
     
     // Extract set info
     const setData = card.basic_info?.set || {};
-    let setCode = setData.code || card.basic_info?.set?.code || 'N/A';
+    let setCode = setData.code || card.basic_info?.set?.code;
+    // Guard: if setCode is null/undefined, use a safe default
+    if (!setCode) {
+        setCode = 'unknown';
+    }
     // For German cards (de_sv03-213), strip the 'de_' prefix to get the set code
     if (setCode.startsWith('de_')) {
         setCode = setCode.replace('de_', '');
@@ -2200,6 +2204,12 @@ function renderSets() {
 }
 
 async function showSetView(setCode) {
+    // Use local API path - the app runs on localhost:5005
+    // The QNAP cloud proxy handles /api/ paths differently
+    const apiBase = window.location.hostname === 'localhost' 
+        ? 'http://localhost:5005' 
+        : 'https://pixelartist.myqnapcloud.com:679';
+    
     const setsView = document.getElementById('sets-view');
     const detailView = document.getElementById('set-detail-view');
     const content = document.getElementById('set-detail-content');
@@ -2213,7 +2223,7 @@ async function showSetView(setCode) {
     content.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading set details...</p></div>';
 
     try {
-        const response = await fetch(`/api/sets/${encodeURIComponent(setCode)}/cards`);
+        const response = await fetch(`${apiBase}/api/sets/${encodeURIComponent(setCode)}/cards`);
         if (!response.ok) throw new Error('Failed to load set');
 
         const data = await response.json();
