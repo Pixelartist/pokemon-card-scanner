@@ -1357,7 +1357,11 @@ async function showEnhancedCardDetail(cardId) {
     // Extract set info
     const setData = card.basic_info?.set || {};
     let setCode = setData.code || card.basic_info?.set?.code;
-    // Guard: if setCode is null/undefined, use a safe default
+    // Guard: if setCode is null/undefined, try extracting from ptcg_id (e.g., de_sv03-213 -> sv03)
+    if (!setCode && card.ptcg_id) {
+        setCode = card.ptcg_id.replace(/^de_/, '').replace(/-.*$/, '');
+    }
+    // If still no setCode, use 'unknown'
     if (!setCode) {
         setCode = 'unknown';
     }
