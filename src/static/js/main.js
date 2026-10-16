@@ -454,7 +454,6 @@ async function loadLanguagePreference() {
     const token = getAuthToken();
     if (!picker) return;
     if (!token) {
-        loadLanguagePreference();
         picker.style.display = 'none';
         return;
     }
@@ -1015,6 +1014,10 @@ async function initializeApp() {
     // Show username in the header
     const savedName = localStorage.getItem('username');
     if (savedName) updateUserInfo(savedName);
+
+    // Load language preference and bind picker for logged-in user
+    await loadLanguagePreference();
+    bindLanguagePicker();
 
     // Load collection on tab switch
     document.querySelectorAll('.tab').forEach(tab => {
