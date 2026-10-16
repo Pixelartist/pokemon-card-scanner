@@ -1826,6 +1826,7 @@ function normalizeCollectionItem(raw) {
 
 function buildBinderPages(cards) {
     const container = document.getElementById('flipbook');
+    if (!container) return;  // Guard: element may have been removed during async load
     container.innerHTML = '';
     
     // Cover page
