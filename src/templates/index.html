@@ -26,19 +26,35 @@
                 </h1>
                 <p class="subtitle">Scan, collect, and browse your card binder</p>
             </div>
-            <div class="user-status" id="user-status">
-                <span class="status-dot"></span>
-                <span class="username">Guest</span>
+            <div class="user-menu">
+                <button class="user-status-btn" id="user-status">
+                    <span class="status-dot"></span>
+                    <span class="username">Guest</span>
+                    <span class="chevron">▾</span>
+                </button>
+                <div class="user-dropdown" id="user-dropdown">
+                    <div class="user-dropdown-header">
+                        <div class="user-info">
+                            <span class="status-dot"></span>
+                            <span class="username">Guest</span>
+                        </div>
+                    </div>
+                    <div class="user-dropdown-section">
+                        <label class="dropdown-label">Preferred Language</label>
+                        <select id="lang-pref" class="lang-pref-dropdown" title="Preferred card language">
+                            <option value="EN">🇬🇧 EN</option>
+                            <option value="DE">🇩🇪 DE</option>
+                            <option value="FR">🇫🇷 FR</option>
+                            <option value="IT">🇮🇹 IT</option>
+                            <option value="ES">🇪🇸 ES</option>
+                            <option value="JA">🇯🇵 JA</option>
+                            <option value="ZH">🇨🇳 ZH</option>
+                        </select>
+                    </div>
+                    <div class="user-dropdown-divider"></div>
+                    <button class="user-dropdown-item signout" id="user-signout">Sign Out</button>
+                </div>
             </div>
-            <select id="lang-pref" class="lang-pref" title="Preferred card language" style="display:none">
-                <option value="EN">🇬🇧 EN</option>
-                <option value="DE">🇩🇪 DE</option>
-                <option value="FR">🇫🇷 FR</option>
-                <option value="IT">🇮🇹 IT</option>
-                <option value="ES">🇪🇸 ES</option>
-                <option value="JA">🇯🇵 JA</option>
-                <option value="ZH">🇨🇳 ZH</option>
-            </select>
         </header>
 
         <!-- Navigation Tabs -->

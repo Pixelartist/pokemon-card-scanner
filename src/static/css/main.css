@@ -1162,6 +1162,16 @@ body {
 }
 
 .user-status {
+    display: none; /* old selector, now using user-menu */
+}
+
+/* User Menu Dropdown */
+.user-menu {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.user-status-btn {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1169,11 +1179,104 @@ body {
     background: rgba(255,255,255,0.05);
     border-radius: 20px;
     cursor: pointer;
-    flex-shrink: 0;
+    border: none;
+    color: var(--text-primary);
+    font-size: 0.9rem;
 }
 
-.user-status:hover {
+.user-status-btn:hover {
     background: rgba(255,255,255,0.1);
+}
+
+.user-status-btn .chevron {
+    font-size: 0.7rem;
+    opacity: 0.6;
+}
+
+.user-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    min-width: 220px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    padding: 12px;
+    z-index: 200;
+    display: none;
+}
+
+.user-dropdown.open {
+    display: block;
+}
+
+.user-dropdown-header {
+    padding: 8px 4px 12px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 12px;
+}
+
+.user-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.user-dropdown-section {
+    padding: 4px 0;
+}
+
+.dropdown-label {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.lang-pref-dropdown {
+    width: 100%;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    padding: 8px 10px;
+    font-size: 0.9rem;
+}
+
+.lang-pref-dropdown:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.user-dropdown-divider {
+    height: 1px;
+    background: var(--border-color);
+    margin: 12px 0;
+}
+
+.user-dropdown-item {
+    width: 100%;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    padding: 8px 4px;
+    text-align: left;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.user-dropdown-item:hover {
+    background: rgba(255,255,255,0.05);
+}
+
+.user-dropdown-item.signout {
+    color: var(--danger);
 }
 
 .status-dot {

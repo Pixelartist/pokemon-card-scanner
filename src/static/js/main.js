@@ -980,25 +980,35 @@ async function initializeApp() {
     // Setup user status click handler (logout) — once, since initializeApp
     // also runs after login and would otherwise stack handlers
     const userStatus = document.getElementById('user-status');
+    const userDropdown = document.getElementById('user-dropdown');
     if (userStatus && !userStatus.dataset.handlerBound) {
         userStatus.dataset.handlerBound = '1';
         userStatus.style.cursor = 'pointer';
-        userStatus.title = 'Currently signed in — click to sign out';
-        userStatus.addEventListener('click', async () => {
-            if (!getAuthToken()) {
-                document.getElementById('login-modal')?.classList.remove('hidden');
-                return;
-            }
-            if (!confirm('Sign out of your account?')) return;
-            try {
-                await fetch('/api/auth/logout', { method: 'POST' });
-            } catch { /* offline logout still clears local state */ }
-            setAuthToken(null);
-            ownedQtyMap = null;  // drop per-user owned-count cache
-            localStorage.removeItem('username');
-            updateUserInfo('Guest');
-            document.getElementById('login-modal')?.classList.remove('hidden');
+        userStatus.title = 'Account menu';
+        userStatus.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            userDropdown?.classList.toggle('open');
         });
+        // Close dropdown on outside click
+        document.addEventListener('click', () => {
+            userDropdown?.classList.remove('open');
+        });
+        // Sign out button
+        const signoutBtn = document.getElementById('user-signout');
+        if (signoutBtn) {
+            signoutBtn.addEventListener('click', async () => {
+                if (!confirm('Sign out of your account?')) return;
+                try {
+                    await fetch('/api/auth/logout', { method: 'POST' });
+                } catch { /* offline logout still clears local state */ }
+                setAuthToken(null);
+                ownedQtyMap = null;
+                localStorage.removeItem('username');
+                updateUserInfo('Guest');
+                document.getElementById('login-modal')?.classList.remove('hidden');
+                userDropdown?.classList.remove('open');
+            });
+        }
     }
 
     // If still no valid session, show login
