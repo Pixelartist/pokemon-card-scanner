@@ -693,7 +693,7 @@ async function addToCollection(cardId) {
     modalBody.innerHTML = `
         <h2>Add ${card.name} to Collection</h2>
 
-    // Pre-select user language\n    const prefLang = getPreferredLanguage();\n    const langSelect = document.querySelector(\select[name=language]\);\n    if (langSelect) {\n        for (let i = 0; i < langSelect.options.length; i++) {\n            langSelect.options[i].selected = (langSelect.options[i].value === prefLang);\n        }\n    }\n        <form id="add-form" onsubmit="submitAddCollection(event)">
+        <form id="add-form" onsubmit="submitAddCollection(event)">
             <div class="form-group">
                 <label>Condition</label>
                 <select name="condition">
@@ -741,7 +741,16 @@ async function addToCollection(cardId) {
             <button type="submit" class="btn btn-primary">Add to Collection</button>
         </form>
     `;
-    
+
+    // Pre-select user language
+    const prefLang = getPreferredLanguage();
+    const langSelect = document.querySelector('select[name="language"]');
+    if (langSelect) {
+        for (let i = 0; i < langSelect.options.length; i++) {
+            langSelect.options[i].selected = (langSelect.options[i].value === prefLang);
+        }
+    }
+
     modal.classList.remove('hidden');
 }
 
