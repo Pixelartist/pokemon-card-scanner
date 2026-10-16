@@ -454,6 +454,7 @@ async function loadLanguagePreference() {
     const token = getAuthToken();
     if (!picker) return;
     if (!token) {
+        // no-op
         picker.style.display = 'none';
         return;
     }
