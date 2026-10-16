@@ -131,6 +131,18 @@ if os.path.exists(german_images_dir):
 if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
+# Prevent proxy/browser caching of static assets so edits show up
+# immediately without manual cache-busting. The QNAP cloud proxy and
+# browsers both honour Cache-Control; without it they serve stale files.
+@app.middleware("http")
+async def no_cache_static(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 # Use Jinja2 directly for template rendering
 import jinja2
 jinja_env = jinja2.Environment(
