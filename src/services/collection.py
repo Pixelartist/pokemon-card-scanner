@@ -123,7 +123,10 @@ class CollectionService:
             conn.close()
 
     def get_all_items(self, limit=100, offset=0, user_id=None):
-        """Get all collection items with card details (includes value tiers for glow effects)."""
+        """Get all collection items with card details (includes value tiers for glow effects).
+
+        Glow tiers are computed across the FULL portfolio, not just the current page.
+        """
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
@@ -134,9 +137,8 @@ class CollectionService:
                         FROM collection_items ci
                         LEFT JOIN cards c ON ci.card_id = c.id
                         WHERE ci.user_id = ?
-                        ORDER BY ci.added_at DESC
-                        LIMIT ? OFFSET ?""",
-                    (user_id, limit, offset)
+                        ORDER BY ci.added_at DESC""",
+                    (user_id,)
                 )
             else:
                 cursor.execute(
@@ -144,107 +146,141 @@ class CollectionService:
                                c.set_name, c.images, c.hp, c.types
                         FROM collection_items ci
                         LEFT JOIN cards c ON ci.card_id = c.id
-                        ORDER BY ci.added_at DESC
-                        LIMIT ? OFFSET ?""",
-                    (limit, offset)
-                )
+                        ORDER BY ci.added_at DESC""")
 
-            rows = cursor.fetchall()
-            result = []
-            # Batch-fetch prices once for all visible cards to avoid N+1 API calls
-            ptcg_ids = [r['ptcg_id'] for r in rows if r['ptcg_id']]
-            price_map = {}
-            if ptcg_ids:
-                from services.price_cache import get_prices_cached
-                for pid in ptcg_ids:
-                    try:
-                        price_map[pid] = get_prices_cached(pid)
-                    except Exception:
-                        pass
-            for row in rows:
-                images = None
-                if row['images']:
-                    try:
-                        images = json.loads(row['images'])
-                    except:
-                        images = None
-                    images = _normalize_images(images, row['ptcg_id'])
-
-                types = None
-                if row['types']:
-                    try:
-                        types = json.loads(row['types'])
-                    except:
-                        types = None
-
-                ptcg_id = row['ptcg_id'] or ''
-                prices = price_map.get(ptcg_id)
-                value_eur, value_usd, glow_tier = self._card_value(ptcg_id, prices, row)
-
-                result.append({
-                    "id": row["id"],
-                    "card_id": row["card_id"],
-                    "user_id": row["user_id"],
-                    "condition": row["condition"],
-                    "language": row["language"],
-                    "quantity": row["quantity"],
-                    "notes": row["notes"],
-                    "is_reverse_holo": bool(row["is_reverse_holo"]),
-                    "is_first_edition": bool(row["is_first_edition"]),
-                    "scan_image_path": row["scan_image_path"],
-                    "crop_image_path": row["crop_image_path"],
-                    "date_acquired": row["date_acquired"],
-                    "added_at": row["added_at"],
-                    "value_eur": value_eur,
-                    "value_usd": value_usd,
-                    "glow_tier": glow_tier,
-                    "card": {
-                        "id": row["id"],
-                        "ptcg_id": row["ptcg_id"],
-                        "name": row["card_name"] or "Unknown",
-                        "number": row["number"],
-                        "rarity": row["rarity"],
-                        "set_name": row["set_name"],
-                        "hp": row["hp"],
-                        "types": types,
-                        "images": images,
-                    } if row["card_name"] else None,
-                })
-            return result
+            all_rows = cursor.fetchall()
         finally:
             conn.close()
 
-    def _card_value(self, ptcg_id, prices, row):
-        """Return (value_eur, value_usd, glow_tier) for one collection row."""
+        # Batch-fetch prices once for ALL cards to avoid N+1 API calls
+        from services.price_cache import get_prices_cached
+        ptcg_ids = [r['ptcg_id'] for r in all_rows if r['ptcg_id']]
+        price_map = {}
+        for pid in ptcg_ids:
+            try:
+                price_map[pid] = get_prices_cached(pid)
+            except Exception:
+                pass
+
+        # Compute values for all items
+        all_results = []
+        for row in all_rows:
+            ptcg_id = row['ptcg_id'] or ''
+            prices = price_map.get(ptcg_id)
+            value_eur, value_usd = self._card_value_no_glow(ptcg_id, prices, row)
+            all_results.append({
+                'row': row,
+                'value_eur': value_eur,
+                'value_usd': value_usd,
+                'ptcg_id': ptcg_id,
+            })
+
+        # Rank by portfolio value and assign glow tiers (top 3)
+        val_items = [r for r in all_results if r['value_eur'] > 0 or r['value_usd'] > 0]
+        sorted_items = sorted(val_items, key=lambda x: max(x['value_eur'], x['value_usd']), reverse=True)
+        tier_map = {}
+        for i, item in enumerate(sorted_items[:3]):
+            row_id = item['row']['id']
+            tier_map[row_id] = ['gold', 'silver', 'bronze'][i]
+
+        # Now build the paginated result with glow tiers assigned
+        result = []
+        for temp in all_results[offset:offset + limit]:
+            row = temp['row']
+            value_eur = temp['value_eur']
+            value_usd = temp['value_usd']
+
+            images = None
+            if row['images']:
+                try:
+                    images = json.loads(row['images'])
+                except:
+                    images = None
+                images = _normalize_images(images, row['ptcg_id'])
+
+            types = None
+            if row['types']:
+                try:
+                    types = json.loads(row['types'])
+                except:
+                    types = None
+
+            glow_tier = tier_map.get(row['id'], "")
+
+            result.append({
+                "id": row["id"],
+                "card_id": row["card_id"],
+                "user_id": row["user_id"],
+                "condition": row["condition"],
+                "language": row["language"],
+                "quantity": row["quantity"],
+                "notes": row["notes"],
+                "is_reverse_holo": bool(row["is_reverse_holo"]),
+                "is_first_edition": bool(row["is_first_edition"]),
+                "scan_image_path": row["scan_image_path"],
+                "crop_image_path": row["crop_image_path"],
+                "date_acquired": row["date_acquired"],
+                "added_at": row["added_at"],
+                "value_eur": value_eur,
+                "value_usd": value_usd,
+                "glow_tier": glow_tier,
+                "card": {
+                    "id": row["id"],
+                    "ptcg_id": row["ptcg_id"],
+                    "name": row["card_name"] or "Unknown",
+                    "number": row["number"],
+                    "rarity": row["rarity"],
+                    "set_name": row["set_name"],
+                    "hp": row["hp"],
+                    "types": types,
+                    "images": images,
+                } if row["card_name"] else None,
+            })
+        return result
+
+    def _card_value_no_glow(self, ptcg_id, prices, row):
+        """Return (value_eur, value_usd) for one collection row without glow tier calculation."""
         quantity = int(row['quantity'] or 1)
         value_eur, value_usd = 0.0, 0.0
         if prices:
-            cm = prices.get("cardmarket", {})
-            cm_prices = cm.get("prices", {})
-            if cm_prices.get("trendPrice"):
-                value_eur = float(cm_prices["trendPrice"]) * quantity
-            elif cm_prices.get("avg30"):
-                value_eur = float(cm_prices["avg30"]) * quantity
-            tcg = prices.get("tcgplayer", {})
-            tcg_prices = tcg.get("prices", {})
-            normal_market = tcg_prices.get("normal", {})
-            if isinstance(normal_market, dict) and normal_market.get("market"):
-                value_usd = float(normal_market["market"]) * quantity
-            else:
-                rh_market = tcg_prices.get("reverseHolofoil", {})
-                if isinstance(rh_market, dict) and rh_market.get("market"):
-                    value_usd = float(rh_market["market"]) * quantity
+            cm = prices.get("cardmarket", {}) or {}
+            tcg = prices.get("tcgplayer", {}) or {}
+            
+            # Parse Cardmarket price - handle both TCGdex and pokemontcg formats
+            if isinstance(cm, dict):
+                # TCGdex format: direct fields
+                if cm.get("trend"):
+                    value_eur = float(cm["trend"]) * quantity
+                elif cm.get("avg30"):
+                    value_eur = float(cm["avg30"]) * quantity
+                # Fallback to nested prices structure
+                elif isinstance(cm.get("prices"), dict):
+                    cm_prices = cm["prices"]
+                    if cm_prices.get("trendPrice"):
+                        value_eur = float(cm_prices["trendPrice"]) * quantity
+                    elif cm_prices.get("avg30"):
+                        value_eur = float(cm_prices["avg30"]) * quantity
+            
+            # Parse TCGPlayer price
+            if isinstance(tcg, dict):
+                # TCGdex format: direct nested values
+                if isinstance(tcg.get("normal"), dict) and tcg["normal"].get("market"):
+                    value_usd = float(tcg["normal"]["market"]) * quantity
+                elif isinstance(tcg.get("reverse-holofoil"), dict) and tcg["reverse-holofoil"].get("market"):
+                    value_usd = float(tcg["reverse-holofoil"]["market"]) * quantity
+                # Fallback to pokemontcg format
+                elif isinstance(tcg.get("prices"), dict):
+                    tcg_prices = tcg["prices"]
+                    if isinstance(tcg_prices.get("normal"), dict) and tcg_prices["normal"].get("market"):
+                        value_usd = float(tcg_prices["normal"]["market"]) * quantity
+                    elif isinstance(tcg_prices.get("reverseHolofoil"), dict) and tcg_prices["reverseHolofoil"].get("market"):
+                        value_usd = float(tcg_prices["reverseHolofoil"]["market"]) * quantity
+            
             if value_usd == 0.0 and value_eur > 0.0:
                 value_usd = round(value_eur * 1.18, 2)
-        if value_eur >= 200 or value_usd >= 250:
-            glow_tier = "gold"
-        elif value_eur >= 50 or value_usd >= 60:
-            glow_tier = "silver"
-        elif value_eur > 0 or value_usd > 0:
-            glow_tier = "bronze"
-        else:
-            glow_tier = ""
-        return round(value_eur, 2), round(value_usd, 2), glow_tier
+        
+        return round(value_eur, 2), round(value_usd, 2)
+
 
     def get_item(self, item_id: int, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Get a single collection item."""
@@ -404,15 +440,40 @@ class CollectionService:
                 value_usd = 0.0
 
                 if prices:
-                    if prices.get("cardmarket", {}).get("prices", {}).get("trendPrice"):
-                        value_eur = float(prices["cardmarket"]["prices"]["trendPrice"]) * quantity
-                    elif prices.get("cardmarket", {}).get("prices", {}).get("avg30"):
-                        value_eur = float(prices["cardmarket"]["prices"]["avg30"]) * quantity
-
-                    if prices.get("tcgplayer", {}).get("prices", {}).get("normal", {}).get("market"):
-                        value_usd = float(prices["tcgplayer"]["prices"]["normal"]["market"]) * quantity
-                    elif prices.get("tcgplayer", {}).get("prices", {}).get("reverseHolofoil", {}).get("market"):
-                        value_usd = float(prices["tcgplayer"]["prices"]["reverseHolofoil"]["market"]) * quantity
+                    cardmarket_data = prices.get("cardmarket", {}) or {}
+                    tcgplayer_data = prices.get("tcgplayer", {}) or {}
+                    
+                    # Parse Cardmarket price - handle both TCGdex and pokemontcg formats
+                    value_eur = 0.0
+                    if isinstance(cardmarket_data, dict):
+                        # TCGdex format: direct fields
+                        if cardmarket_data.get("trend"):
+                            value_eur = float(cardmarket_data["trend"]) * quantity
+                        elif cardmarket_data.get("avg30"):
+                            value_eur = float(cardmarket_data["avg30"]) * quantity
+                        # Fallback to nested prices structure
+                        elif isinstance(cardmarket_data.get("prices"), dict):
+                            cm_prices = cardmarket_data["prices"]
+                            if cm_prices.get("trendPrice"):
+                                value_eur = float(cm_prices["trendPrice"]) * quantity
+                            elif cm_prices.get("avg30"):
+                                value_eur = float(cm_prices["avg30"]) * quantity
+                    
+                    # Parse TCGPlayer price
+                    value_usd = 0.0
+                    if isinstance(tcgplayer_data, dict):
+                        # TCGdex format: direct nested values
+                        if isinstance(tcgplayer_data.get("normal"), dict) and tcgplayer_data["normal"].get("market"):
+                            value_usd = float(tcgplayer_data["normal"]["market"]) * quantity
+                        elif isinstance(tcgplayer_data.get("reverse-holofoil"), dict) and tcgplayer_data["reverse-holofoil"].get("market"):
+                            value_usd = float(tcgplayer_data["reverse-holofoil"]["market"]) * quantity
+                        # Fallback to pokemontcg format
+                        elif isinstance(tcgplayer_data.get("prices"), dict):
+                            tp_prices = tcgplayer_data["prices"]
+                            if isinstance(tp_prices.get("normal"), dict) and tp_prices["normal"].get("market"):
+                                value_usd = float(tp_prices["normal"]["market"]) * quantity
+                            elif isinstance(tp_prices.get("reverseHolofoil"), dict) and tp_prices["reverseHolofoil"].get("market"):
+                                value_usd = float(tp_prices["reverseHolofoil"]["market"]) * quantity
 
                     # TCGPlayer returned nothing — derive USD from EUR so the two totals
                     # don't diverge by an order of magnitude on vintage/German cards.
