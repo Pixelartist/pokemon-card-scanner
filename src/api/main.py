@@ -906,6 +906,64 @@ def _normalize_local_row_images(images, ptcg_id: str = ""):
     return _normalize_images(images, ptcg_id)
 
 
+def _normalize_prices_for_frontend(prices: dict) -> dict:
+    """Convert TCGdex price format to pokemontcg format for frontend compatibility."""
+    if not prices:
+        return prices
+    
+    normalized = {"source": prices.get("source", "tcgdex")}
+    
+    # Normalize cardmarket
+    cm = prices.get("cardmarket", {})
+    if cm:
+        if "trend" in cm or "avg30" in cm:
+            # TCGdex format: flat fields
+            normalized["cardmarket"] = {
+                "prices": {
+                    "trendPrice": cm.get("trend"),
+                    "avg30": cm.get("avg30"),
+                    "averageSellPrice": cm.get("avg"),
+                    "lowPrice": cm.get("low"),
+                }
+            }
+        else:
+            # Already pokemontcg format
+            normalized["cardmarket"] = cm
+    
+    # Normalize tcgplayer
+    tcg = prices.get("tcgplayer", {})
+    if tcg:
+        if "holofoil" in tcg or "normal" in tcg:
+            # TCGdex format: direct variant keys
+            normalized["tcgplayer"] = {
+                "prices": {
+                    "normal": {
+                        "market": tcg.get("normal", {}).get("marketPrice"),
+                        "low": tcg.get("normal", {}).get("lowPrice"),
+                        "high": tcg.get("normal", {}).get("highPrice"),
+                        "mid": tcg.get("normal", {}).get("midPrice"),
+                    } if "normal" in tcg else None,
+                    "holofoil": {
+                        "market": tcg.get("holofoil", {}).get("marketPrice"),
+                        "low": tcg.get("holofoil", {}).get("lowPrice"),
+                        "high": tcg.get("holofoil", {}).get("highPrice"),
+                        "mid": tcg.get("holofoil", {}).get("midPrice"),
+                    } if "holofoil" in tcg else None,
+                    "reverseHolofoil": {
+                        "market": tcg.get("reverse-holofoil", {}).get("marketPrice"),
+                        "low": tcg.get("reverse-holofoil", {}).get("lowPrice"),
+                        "high": tcg.get("reverse-holofoil", {}).get("highPrice"),
+                        "mid": tcg.get("reverse-holofoil", {}).get("midPrice"),
+                    } if "reverse-holofoil" in tcg else None,
+                }
+            }
+        else:
+            # Already pokemontcg format
+            normalized["tcgplayer"] = tcg
+    
+    return normalized
+
+
 def _resolve_tcgdex_image_url(image_url: str, ptcg_id: str = "") -> str:
     """Normalize a TCGdex image URL.
 
@@ -1379,7 +1437,7 @@ async def get_card_details(card_id: str):
                         from services.price_cache import get_prices_cached
                         prices = get_prices_cached(row["ptcg_id"])
                         if prices:
-                            details["prices"] = prices
+                            details["prices"] = _normalize_prices_for_frontend(prices)
                     except Exception as e:
                         logger.debug(f"Price fetch skipped for local card {row['ptcg_id']}: {e}")
                     return details
@@ -1409,6 +1467,15 @@ async def get_card_details(card_id: str):
                 card["hp"] = metadata.get("hp") or card.get("hp")
                 card["artist"] = metadata.get("artist") or card.get("artist")
                 card["legalities"] = metadata.get("legalities") or card.get("legalities")
+        
+        # Fetch prices for local_db cards (normalize them)
+        try:
+            from services.price_cache import get_prices_cached
+            prices = get_prices_cached(card_id)
+            if prices:
+                card["prices"] = _normalize_prices_for_frontend(prices)
+        except Exception as e:
+            logger.debug(f"Price fetch skipped for local DB card {card_id}: {e}")
     
     if not card:
         # Fall back to the local CLIP index (covers German 'de_*' cards and
@@ -1471,7 +1538,7 @@ async def get_card_details(card_id: str):
                 from services.price_cache import get_prices_cached
                 prices = get_prices_cached(local.card_id)
                 if prices:
-                    details["prices"] = prices
+                    details["prices"] = _normalize_prices_for_frontend(prices)
             except Exception as e:
                 logger.debug(f"Price fetch skipped for local_index card {local.card_id}: {e}")
             return details
@@ -1494,6 +1561,10 @@ async def get_card_details(card_id: str):
         "prices": card.get("prices"),
         "source": card.get("source", "api"),
     }
+    
+    # Normalize prices to pokemontcg format for frontend compatibility
+    if details.get("prices"):
+        details["prices"] = _normalize_prices_for_frontend(details["prices"])
 
     # Ensure images is parsed from string if needed
     if isinstance(details["basic_info"]["images"], str):
