@@ -17,6 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv('/opt/data/pokemon-card-scanner/.env')
+
 import requests
 from datetime import datetime
 
@@ -639,9 +643,49 @@ async def get_stats(current_user: User = Depends(get_current_user)):
 @app.get("/api/sets")
 async def get_sets():
     """Get all available sets."""
-    client = get_client()
-    sets = client.get_sets()
-    return {"sets": sets}
+    from pathlib import Path
+    import json
+    
+    # First try API
+    try:
+        client = get_client()
+        sets = client.get_sets()
+        if sets:
+            return {"sets": sets}
+    except Exception as e:
+        import logging
+        logging.warning(f"API sets fetch failed: {e}")
+    
+    # Fall back to cached TCGdex sets
+    try:
+        cache_path = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "tcgdex" / "sets_en.json"
+        if cache_path.exists():
+            with open(cache_path) as f:
+                data = json.load(f)
+                tcgdex_sets = data.get('sets', [])
+                
+                # Convert TCGdex format to API format
+                api_format_sets = []
+                for s in tcgdex_sets:
+                    api_format_sets.append({
+                        'id': s.get('id', ''),
+                        'code': s.get('id', ''),
+                        'name': s.get('name', ''),
+                        'series': s.get('series', ''),
+                        'release_date': s.get('releaseDate', ''),
+                        'total': s.get('cardCount', {}).get('total', 0),
+                        'printed_total': s.get('cardCount', {}).get('official', 0),
+                        'ptcgo_code': None,
+                        'symbol_url': None,
+                        'logo_url': None,
+                    })
+                return {"sets": api_format_sets}
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to load cached sets: {e}")
+    
+    # Last resort: return empty
+    return {"sets": []}
 
 
 @app.get("/api/sets/{set_code}/cards")
@@ -649,13 +693,14 @@ async def get_set_cards(set_code: str):
     """Get all cards in a set with basic info."""
     import sqlite3
     from pathlib import Path
+    import json
     db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Get set info
+    # Get set info from local DB
     cursor.execute("SELECT * FROM sets WHERE ptcg_id = ?", (set_code,))
     set_row = cursor.fetchone()
 
@@ -664,7 +709,159 @@ async def get_set_cards(set_code: str):
         cursor.execute("SELECT * FROM sets WHERE LOWER(ptcg_id) = LOWER(?)", (set_code,))
         set_row = cursor.fetchone()
 
+    # If set not found in local DB, try fetching from API
     if not set_row:
+        try:
+            client = get_client()
+            # First, get set info from API
+            sets = client.get_sets()
+            set_info = None
+            for s in sets:
+                if s.get('id') == set_code or s.get('code') == set_code:
+                    set_info = s
+                    break
+            
+            if set_info:
+                # Fetch cards from API for this set
+                import requests
+                from services.ptcg_client import _get_api_key
+                api_key = _get_api_key()
+                headers = {"X-Api-Key": api_key}
+                
+                # Fetch cards from API
+                all_cards = []
+                limit = 250
+                cursor = None
+                while True:
+                    params = {'set': set_code, 'limit': limit}
+                    if cursor:
+                        params['cursor'] = cursor
+                    
+                    resp = requests.get(
+                        "https://api.pokemontcgapi.com/v1/cards",
+                        headers=headers,
+                        params=params,
+                        timeout=30
+                    )
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    cards_page = data.get('data', [])
+                    if not cards_page:
+                        break
+                    all_cards.extend(cards_page)
+                    if len(cards_page) < limit:
+                        break
+                    # Get cursor for next page
+                    links = data.get('links', {})
+                    next_link = links.get('next')
+                    if not next_link:
+                        break
+                    # Parse cursor from next link URL
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(next_link)
+                    query_params = parse_qs(parsed.query)
+                    cursor = query_params.get('cursor', [None])[0]
+                    if not cursor:
+                        break
+                
+                # Sort cards by number
+                all_cards.sort(key=lambda x: x.get('number', ''))
+                
+                conn.close()
+                return {
+                    "set": {
+                        "id": set_info.get('id'),
+                        "ptcg_id": set_info.get('code'),
+                        "name": set_info.get('name'),
+                        "series": set_info.get('series'),
+                        "release_date": set_info.get('release_date'),
+                        "total_cards": set_info.get('total'),
+                    },
+                    "cards": all_cards,
+                    "total": len(all_cards),
+                    "source": "api"
+                }
+        except Exception as e:
+            import logging
+            logging.error(f"API fetch failed for set {set_code}: {e}")
+            logging.exception(e)
+        
+        # Set not found in DB or API - try to get from card catalog as fallback
+        try:
+            from pathlib import Path
+            import json
+            
+            catalog_path = Path(__file__).resolve().parent.parent.parent / "data" / "card_catalog.json"
+            if catalog_path.exists():
+                with open(catalog_path) as f:
+                    catalog = json.load(f)
+                
+                # Filter cards for this set
+                cards = []
+                set_info = None
+                
+                for card in catalog.get('cards', []):
+                    if card.get('set_code') == set_code:
+                        cards.append(card)
+                        # Build set info from first card
+                        if not set_info:
+                            # Try to get set name from TCGdex cache
+                            set_name = card.get('set_name', '')
+                            set_series = card.get('series', '')  # TCGdex might not have this in catalog
+                            set_release_date = card.get('releaseDate', '')  # TCGdex might not have this
+                            
+                            # If we don't have set info in card, try TCGdex cache
+                            if not set_name:
+                                tcgdex_cache_path = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "tcgdex" / "sets_en.json"
+                                if tcgdex_cache_path.exists():
+                                    with open(tcgdex_cache_path) as tf:
+                                        tcgdex_data = json.load(tf)
+                                        for s in tcgdex_data.get('sets', []):
+                                            if s.get('id') == set_code:
+                                                set_name = s.get('name', set_code)
+                                                set_series = s.get('series', '')
+                                                set_release_date = s.get('releaseDate', '')
+                                                break
+                            
+                            set_info = {
+                                'id': len(catalog.get('cards', [])),  # placeholder
+                                'ptcg_id': set_code,
+                                'name': set_name or set_code.upper(),
+                                'series': set_series,
+                                'release_date': set_release_date,
+                                'total_cards': len(cards),
+                                'printed_total': len(cards)  # approximation
+                            }
+                
+                if cards:
+                    # Sort cards by number (handle special characters like !, *, etc.)
+                    def card_sort_key(card):
+                        num = card.get('number', '')
+                        # Extract leading numbers for sorting
+                        import re
+                        match = re.match(r'(\d+)', str(num))
+                        if match:
+                            return (0, int(match.group(1)), str(num))  # (type, numeric part, original)
+                        else:
+                            return (1, 0, str(num))  # non-numeric goes after
+                    
+                    cards.sort(key=card_sort_key)
+                    
+                    conn.close()
+                    return {
+                        "set": set_info,
+                        "cards": cards,
+                        "total": len(cards),
+                        "source": "card_catalog"
+                    }
+        except Exception as e:
+            import logging
+            logging.error(f"Card catalog fallback failed for set {set_code}: {e}")
+            logging.exception(e)
+        
+        # Set not found in DB, API, or card catalog
+        conn.close()
         raise HTTPException(status_code=404, detail=f"Set '{set_code}' not found")
 
     # Get all cards in this set, ordered by number
@@ -685,7 +882,7 @@ async def get_set_cards(set_code: str):
                 images = json.loads(images)
             except:
                 images = {}
-        card_data["images"] = images or {}
+        card_data["images"] = _normalize_local_row_images(images, card_data.get("ptcg_id") or "") or {}
         cards.append(card_data)
 
     conn.close()

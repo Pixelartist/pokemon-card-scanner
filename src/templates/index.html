@@ -15,7 +15,8 @@
     <script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.js"></script>
 </head>
 <body>
-    <div class="app-container">
+<!-- SVG Electric Border Filters - Must be in DOM before CSS applies -->
+<div class="app-container">
         <!-- Header -->
         <header class="header">
             <div class="header-content">
@@ -61,6 +62,10 @@
             <button class="tab" data-tab="stats">
                 <span class="tab-icon">📊</span>
                 Stats
+            </button>
+            <button class="tab" data-tab="electric-test" id="electric-debug-tab">
+                <span class="tab-icon">⚡</span>
+                Electric Test
             </button>
         </nav>
 
@@ -376,6 +381,238 @@
         </div>
     </div>
 
+    <!-- Electric Test Tab Content -->
+    <section id="electric-test-tab" class="tab-content">
+        <div class="container" style="max-width: 800px; margin: 40px auto; text-align: center;">
+            <h2>⚡ Electric Border 1:1 Test</h2>
+            <p style="margin-bottom: 30px; opacity: 0.8;">ReactBits Electric Border effect</p>
+
+            <div style="position: relative; width: 420px; height: 540px; margin: 40px auto;" id="electric-wrapper">
+                <canvas id="electric-canvas" width="420" height="540" style="position: absolute; top: 0; left: 0; pointer-events: none; z-index: 2;"></canvas>
+                <div style="position: absolute; inset: 60px; background: #1a1a1a; border-radius: 20px; display: flex; align-items: center; justify-content: center; color: white; flex-direction: column; padding: 20px;">
+                    <h3 style="margin: 0; font-size: 24px; font-weight: 600;">⚡ Electric</h3>
+                    <p style="margin: 10px 0 0; opacity: 0.8;">1:1 Test Card</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <script>
+    (function() {
+        const canvas = document.getElementById('electric-canvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+
+        const color = '#FFD700';
+        const speed = 1.8;
+        const chaos = 1.1;
+        const spread = 0.8;
+
+        let width = 420;
+        let height = 540;
+        let time = 0;
+
+        function random(x) {
+            return (Math.sin(x * 12.9898) * 43758.5453) % 1;
+        }
+
+        function noise2D(x, y) {
+            const i = Math.floor(x);
+            const j = Math.floor(y);
+            const fx = x - i;
+            const fy = y - j;
+            const a = random(i + j * 57);
+            const b = random(i + 1 + j * 57);
+            const c = random(i + (j + 1) * 57);
+            const d = random(i + 1 + (j + 1) * 57);
+            const ux = fx * fx * (3.0 - 2.0 * fx);
+            const uy = fy * fy * (3.0 - 2.0 * fy);
+            return a * (1 - ux) * (1 - uy) + b * ux * (1 - uy) + c * (1 - ux) * uy + d * ux * uy;
+        }
+
+        function octavedNoise(x, octaves, lacunarity, gain, baseAmplitude, baseFrequency, t, seed, baseFlatness) {
+            let y = 0;
+            let amplitude = baseAmplitude;
+            let frequency = baseFrequency;
+            for (let i = 0; i < octaves; i++) {
+                let octaveAmplitude = amplitude;
+                if (i === 0) octaveAmplitude *= baseFlatness;
+                y += octaveAmplitude * noise2D(frequency * x + seed * 100, t * frequency * 0.3);
+                frequency *= lacunarity;
+                amplitude *= gain;
+            }
+            return y;
+        }
+
+        function getCornerPoint(cx, cy, radius, startAngle, arcLength, progress) {
+            const angle = startAngle + progress * arcLength;
+            return { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+        }
+
+        function getRoundedRectPoint(t, left, top, w, h, radius) {
+            const straightWidth = w - 2 * radius;
+            const straightHeight = h - 2 * radius;
+            const cornerArc = (Math.PI * radius) / 2;
+            const totalPerimeter = 2 * straightWidth + 2 * straightHeight + 4 * cornerArc;
+            const distance = t * totalPerimeter;
+            let acc = 0;
+            if (distance <= acc + straightWidth) {
+                const p = (distance - acc) / straightWidth;
+                return { x: left + radius + p * straightWidth, y: top };
+            }
+            acc += straightWidth;
+            if (distance <= acc + cornerArc) {
+                const p = (distance - acc) / cornerArc;
+                return getCornerPoint(left + w - radius, top + radius, radius, -Math.PI/2, Math.PI/2, p);
+            }
+            acc += cornerArc;
+            if (distance <= acc + straightHeight) {
+                const p = (distance - acc) / straightHeight;
+                return { x: left + w, y: top + radius + p * straightHeight };
+            }
+            acc += straightHeight;
+            if (distance <= acc + cornerArc) {
+                const p = (distance - acc) / cornerArc;
+                return getCornerPoint(left + w - radius, top + h - radius, radius, 0, Math.PI/2, p);
+            }
+            acc += cornerArc;
+            if (distance <= acc + straightWidth) {
+                const p = (distance - acc) / straightWidth;
+                return { x: left + w - radius - p * straightWidth, y: top + h };
+            }
+            acc += straightWidth;
+            if (distance <= acc + cornerArc) {
+                const p = (distance - acc) / cornerArc;
+                return getCornerPoint(left + radius, top + h - radius, radius, Math.PI/2, Math.PI/2, p);
+            }
+            acc += cornerArc;
+            if (distance <= acc + straightHeight) {
+                const p = (distance - acc) / straightHeight;
+                return { x: left, y: top + h - radius - p * straightHeight };
+            }
+            acc += straightHeight;
+            const p = (distance - acc) / cornerArc;
+            return getCornerPoint(left + radius, top + radius, radius, Math.PI, Math.PI/2, p);
+        }
+
+        function draw(timestamp) {
+            const dt = (timestamp - (draw.lastTime || timestamp)) / 1000;
+            draw.lastTime = timestamp;
+            time += dt * speed;
+
+            ctx.clearRect(0, 0, width, height);
+
+            const octaves = 10;
+            const lacunarity = 1.6;
+            const gain = 0.7;
+            const baseFlatness = 0;
+            const displacement = 12;
+            // Content sits at inset 60; draw strands slightly outside the content edge
+            const borderOffset = 56;
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            const scale = displacement * (0.8 + 0.2 * Math.sin(time * 1.8));
+            const left = borderOffset;
+            const top = borderOffset;
+            const borderWidth = width - 2 * borderOffset;
+            const borderHeight = height - 2 * borderOffset;
+            const radius = 24;
+            const approximatePerimeter = 2 * (borderWidth + borderHeight) + 2 * Math.PI * radius;
+            const sampleCount = Math.floor(approximatePerimeter / 1.5);
+
+            for (let strand = 0; strand < 3; strand++) {
+                ctx.beginPath();
+                const strandOffset = strand * 0.5;
+
+                for (let i = 0; i <= sampleCount; i++) {
+                    const progress = i / sampleCount;
+                    const point = getRoundedRectPoint(progress, left, top, borderWidth, borderHeight, radius);
+
+                    const xNoise = octavedNoise(
+                        progress * 8 + strandOffset, octaves, lacunarity, gain,
+                        chaos * spread, 10, time + strand, 0, baseFlatness
+                    );
+                    const yNoise = octavedNoise(
+                        progress * 8 + strandOffset, octaves, lacunarity, gain,
+                        chaos * spread, 10, time + strand, 1, baseFlatness
+                    );
+
+                    const dx = point.x + xNoise * scale;
+                    const dy = point.y + yNoise * scale;
+
+                    if (i === 0) ctx.moveTo(dx, dy);
+                    else ctx.lineTo(dx, dy);
+                }
+
+                ctx.closePath();
+                ctx.globalAlpha = 0.85 - strand * 0.15;
+                ctx.shadowColor = color;
+                ctx.shadowBlur = 12;
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.globalAlpha = 0.25;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 4;
+            ctx.filter = 'blur(3px)';
+            ctx.beginPath();
+
+            for (let i = 0; i <= sampleCount; i++) {
+                const progress = i / sampleCount;
+                const point = getRoundedRectPoint(progress, left, top, borderWidth, borderHeight, radius);
+
+                const xNoise = octavedNoise(progress * 8, octaves, lacunarity, gain, chaos * spread, 10, time, 0, baseFlatness);
+                const yNoise = octavedNoise(progress * 8, octaves, lacunarity, gain, chaos * spread, 10, time, 1, baseFlatness);
+
+                const dx = point.x + xNoise * scale;
+                const dy = point.y + yNoise * scale;
+
+                if (i === 0) ctx.moveTo(dx, dy);
+                else ctx.lineTo(dx, dy);
+            }
+            ctx.closePath();
+
+            // Glow layers: wide soft halo + tighter inner glow, drawn under the strands
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+
+            // Wide halo
+            ctx.globalAlpha = 0.35;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 10;
+            ctx.filter = 'blur(8px)';
+            ctx.stroke();
+
+            // Medium glow
+            ctx.globalAlpha = 0.5;
+            ctx.lineWidth = 5;
+            ctx.filter = 'blur(3px)';
+            ctx.stroke();
+
+            // Tight bright glow
+            ctx.globalAlpha = 0.7;
+            ctx.lineWidth = 2.5;
+            ctx.filter = 'blur(1px)';
+            ctx.stroke();
+
+            ctx.filter = 'none';
+            ctx.globalAlpha = 1;
+
+            requestAnimationFrame(draw);
+        }
+
+        draw.lastTime = performance.now();
+        requestAnimationFrame(draw);
+    })();
+    </script>
+
+    <!-- Load electric border glow module (shared Canvas2D implementation) -->
+    <script src="/static/js/electric-glow.js?t={{ timestamp }}"></script>
     <script src="/static/js/main.js?t={{ timestamp }}"></script>
 </body>
 </html>

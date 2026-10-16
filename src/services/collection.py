@@ -27,11 +27,19 @@ def _normalize_images(images, ptcg_id):
     base = Path(__file__).resolve().parent.parent.parent / "data"
     local = ""
     if ptcg_id:
-        for full, url in (
-            (base / "clip_images" / f"{ptcg_id}.jpg", f"/static/clip_images/{ptcg_id}.jpg"),
-            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.png", f"/static/card_images/tcgdex/en/{ptcg_id}.png"),
-            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.jpg", f"/static/card_images/tcgdex/en/{ptcg_id}.jpg"),
-        ):
+        candidates = [(base / "clip_images" / f"{ptcg_id}.jpg",
+                       f"/static/clip_images/{ptcg_id}.jpg")]
+        if ptcg_id.startswith("de_"):
+            candidates.append(
+                (base / "german_cards" / "images" / f"de_{ptcg_id[3:]}.png",
+                 f"/static/german_cards/images/de_{ptcg_id[3:]}.png"))
+        candidates += [
+            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.png",
+             f"/static/card_images/tcgdex/en/{ptcg_id}.png"),
+            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.jpg",
+             f"/static/card_images/tcgdex/en/{ptcg_id}.jpg"),
+        ]
+        for full, url in candidates:
             if full.exists():
                 local = url
                 break
@@ -397,14 +405,14 @@ class CollectionService:
 
                 if prices:
                     if prices.get("cardmarket", {}).get("prices", {}).get("trendPrice"):
-                        value_eur = prices["cardmarket"]["prices"]["trendPrice"] * quantity
+                        value_eur = float(prices["cardmarket"]["prices"]["trendPrice"]) * quantity
                     elif prices.get("cardmarket", {}).get("prices", {}).get("avg30"):
-                        value_eur = prices["cardmarket"]["prices"]["avg30"] * quantity
+                        value_eur = float(prices["cardmarket"]["prices"]["avg30"]) * quantity
 
                     if prices.get("tcgplayer", {}).get("prices", {}).get("normal", {}).get("market"):
-                        value_usd = prices["tcgplayer"]["prices"]["normal"]["market"] * quantity
+                        value_usd = float(prices["tcgplayer"]["prices"]["normal"]["market"]) * quantity
                     elif prices.get("tcgplayer", {}).get("prices", {}).get("reverseHolofoil", {}).get("market"):
-                        value_usd = prices["tcgplayer"]["prices"]["reverseHolofoil"]["market"] * quantity
+                        value_usd = float(prices["tcgplayer"]["prices"]["reverseHolofoil"]["market"]) * quantity
 
                     # TCGPlayer returned nothing — derive USD from EUR so the two totals
                     # don't diverge by an order of magnitude on vintage/German cards.

@@ -1,6 +1,58 @@
-// Pokemon Card Scanner JavaScript
+// Inject SVG electric border filters IMMEDIATELY
+(function() {
+    if (document.getElementById('electric-filters-injected')) return;
+    const svgContainer = document.createElement('div');
+    svgContainer.id = 'electric-filters-injected';
+    svgContainer.innerHTML = `<!-- SVG Electric Border Filters -->
+<svg class="svg-filters" width="0" height="0">
+    <defs>
+        <filter id="turbulent-displace-gold" x="-50%" y="-50%" width="200%" height="200%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="3" seed="1" result="noise1">
+                <animate attributeName="baseFrequency" values="0.02;0.04;0.02" dur="3s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="2" result="noise2">
+                <animate attributeName="baseFrequency" values="0.04;0.06;0.04" dur="2.5s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="3" result="noise3">
+                <animate attributeName="baseFrequency" values="0.06;0.08;0.06" dur="2s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feComposite in="noise1" in2="noise2" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combined1"/>
+            <feComposite in="combined1" in2="noise3" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combinedNoise"/>
+            <feDisplacementMap in="SourceGraphic" in2="combinedNoise" scale="15" xChannelSelector="R" yChannelSelector="G"/>
+        </filter>
+        <filter id="turbulent-displace-silver" x="-50%" y="-50%" width="200%" height="200%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="3" seed="4" result="noise1">
+                <animate attributeName="baseFrequency" values="0.02;0.04;0.02" dur="3s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="5" result="noise2">
+                <animate attributeName="baseFrequency" values="0.04;0.06;0.04" dur="2.5s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="6" result="noise3">
+                <animate attributeName="baseFrequency" values="0.06;0.08;0.06" dur="2s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feComposite in="noise1" in2="noise2" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combined1"/>
+            <feComposite in="combined1" in2="noise3" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combinedNoise"/>
+            <feDisplacementMap in="SourceGraphic" in2="combinedNoise" scale="15" xChannelSelector="R" yChannelSelector="G"/>
+        </filter>
+        <filter id="turbulent-displace-bronze" x="-50%" y="-50%" width="200%" height="200%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="3" seed="7" result="noise1">
+                <animate attributeName="baseFrequency" values="0.02;0.04;0.02" dur="3s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="8" result="noise2">
+                <animate attributeName="baseFrequency" values="0.04;0.06;0.04" dur="2.5s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="9" result="noise3">
+                <animate attributeName="baseFrequency" values="0.06;0.08;0.06" dur="2s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feComposite in="noise1" in2="noise2" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combined1"/>
+            <feComposite in="combined1" in2="noise3" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combinedNoise"/>
+            <feDisplacementMap in="SourceGraphic" in2="combinedNoise" scale="15" xChannelSelector="R" yChannelSelector="G"/>
+        </filter>
+    </defs>
+</svg>`;
+    document.documentElement.insertBefore(svgContainer.firstChild, document.documentElement.firstChild);
+})();
 
-// Tab Navigation
 document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
         // Remove active class from all tabs and content
@@ -976,6 +1028,8 @@ async function initializeApp() {
                 await initGallery();
             } else if (tab.dataset.tab === 'stats') {
                 await loadStats();
+            } else if (tab.dataset.tab === 'sets') {
+                initSets();
             }
         });
     });
@@ -1998,7 +2052,12 @@ async function loadGalleryPage() {
             const item = createGalleryItem(card);
             grid.appendChild(item);
         });
-        
+
+        // Attach electric glow canvases to newly added cards
+        if (typeof scanForNewGlowElements === 'function') {
+            scanForNewGlowElements();
+        }
+
         galleryPage++;
         
     } catch (error) {
@@ -2139,6 +2198,8 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('[App] DOMContentLoaded fired');
     try {
         initializeApp();
+        // Attach electric glow canvases to any pre-rendered cards
+        if (typeof initElectricGlow === 'function') initElectricGlow();
         console.log('[App] initializeApp completed');
     } catch(e) {
         console.error('[App] initializeApp error:', e);
@@ -2212,11 +2273,8 @@ function renderSets() {
 }
 
 async function showSetView(setCode) {
-    // Use local API path - the app runs on localhost:5005
-    // The QNAP cloud proxy handles /api/ paths differently
-    const apiBase = window.location.hostname === 'localhost' 
-        ? 'http://localhost:5005' 
-        : 'https://pixelartist.myqnapcloud.com:679';
+    // Use relative paths for API calls - works both locally and via QNAP cloud proxy
+    const apiBase = '';
     
     const setsView = document.getElementById('sets-view');
     const detailView = document.getElementById('set-detail-view');
@@ -2355,7 +2413,6 @@ function initSets() {
 
     // Password change button in user menu
     const changePasswordBtn = document.querySelector('.user-menu-button[data-change-password-mode]');
-    const passwordChangeModal = document.getElementById('password-change-modal');
     if (changePasswordBtn && passwordChangeModal) {
         changePasswordBtn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -2370,4 +2427,68 @@ function initSets() {
             passwordChangeModal.classList.remove('hidden');
         });
     }
+
+// Inject SVG electric border filters
+function injectElectricFilters() {
+    if (document.getElementById('electric-filters-injected')) return;
+    const svgContainer = document.createElement('div');
+    svgContainer.id = 'electric-filters-injected';
+    svgContainer.innerHTML = `
+<!-- SVG Electric Border Filters -->
+<svg class="svg-filters" width="0" height="0">
+    <defs>
+        <!-- Gold Electric Filter -->
+        <filter id="turbulent-displace-gold" x="-50%" y="-50%" width="200%" height="200%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="3" seed="1" result="noise1">
+                <animate attributeName="baseFrequency" values="0.02;0.04;0.02" dur="3s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="2" result="noise2">
+                <animate attributeName="baseFrequency" values="0.04;0.06;0.04" dur="2.5s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="3" result="noise3">
+                <animate attributeName="baseFrequency" values="0.06;0.08;0.06" dur="2s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feComposite in="noise1" in2="noise2" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combined1"/>
+            <feComposite in="combined1" in2="noise3" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combinedNoise"/>
+            <feDisplacementMap in="SourceGraphic" in2="combinedNoise" scale="15" xChannelSelector="R" yChannelSelector="G"/>
+        </filter>
+        
+        <!-- Silver Electric Filter -->
+        <filter id="turbulent-displace-silver" x="-50%" y="-50%" width="200%" height="200%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="3" seed="4" result="noise1">
+                <animate attributeName="baseFrequency" values="0.02;0.04;0.02" dur="3s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="5" result="noise2">
+                <animate attributeName="baseFrequency" values="0.04;0.06;0.04" dur="2.5s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="6" result="noise3">
+                <animate attributeName="baseFrequency" values="0.06;0.08;0.06" dur="2s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feComposite in="noise1" in2="noise2" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combined1"/>
+            <feComposite in="combined1" in2="noise3" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combinedNoise"/>
+            <feDisplacementMap in="SourceGraphic" in2="combinedNoise" scale="15" xChannelSelector="R" yChannelSelector="G"/>
+        </filter>
+        
+        <!-- Bronze Electric Filter -->
+        <filter id="turbulent-displace-bronze" x="-50%" y="-50%" width="200%" height="200%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="3" seed="7" result="noise1">
+                <animate attributeName="baseFrequency" values="0.02;0.04;0.02" dur="3s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="2" seed="8" result="noise2">
+                <animate attributeName="baseFrequency" values="0.04;0.06;0.04" dur="2.5s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="9" result="noise3">
+                <animate attributeName="baseFrequency" values="0.06;0.08;0.06" dur="2s" repeatCount="indefinite"/>
+            </feTurbulence>
+            <feComposite in="noise1" in2="noise2" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combined1"/>
+            <feComposite in="combined1" in2="noise3" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="combinedNoise"/>
+            <feDisplacementMap in="SourceGraphic" in2="combinedNoise" scale="15" xChannelSelector="R" yChannelSelector="G"/>
+        </filter>
+    </defs>
+</svg>
+`;
+    document.body.insertBefore(svgContainer.firstChild, document.body.firstChild);
+}
+
+injectElectricFilters();
 
