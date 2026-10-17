@@ -1,0 +1,8 @@
+# Build output — regenerate with scripts/export_clip_index.py
+public/card-index.bin
+public/card-ids.json
+public/cards_meta.json
+# Local image mount symlinks
+public/card_images
+public/clip_images
+public/german_cards
