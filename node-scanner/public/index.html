@@ -194,6 +194,7 @@
 
   <div class="controls">
     <button class="btn" id="capture-btn" disabled>Capture</button>
+    <button class="btn active" id="auto-scan-btn" onclick="toggleAutoScan()">▶ Auto-Scan: OFF</button>
   </div>
 
   <div class="results">
@@ -473,3 +474,31 @@ init();
 </script>
 </body>
 </html>
+// Auto-scan loop when confidence / similarity is high
+let isAutoScanning = false;
+function toggleAutoScan() {
+  isAutoScanning = !isAutoScanning;
+  const btn = $('auto-scan-btn');
+  if (btn) {
+    btn.textContent = isAutoScanning ? '⏹ Auto-Scan: ON' : '▶ Auto-Scan: OFF';
+    btn.classList.toggle('active', isAutoScanning);
+  }
+  if (isAutoScanning) autoScanLoop();
+}
+
+async function autoScanLoop() {
+  while (isAutoScanning && !busy) {
+    await capture();
+    // Check top match score
+    const topMatchElem = resultsList.querySelector('.match .score');
+    if (topMatchElem) {
+      const pct = parseFloat(topMatchElem.textContent);
+      if (!isNaN(pct) && pct >= 88.0) {
+        setStatus(`Auto-captured high confidence match (${pct}%)!`);
+        // pause briefly to let user notice
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+}
