@@ -33,7 +33,32 @@
     border: 1px solid var(--border); border-radius: var(--radius);
     overflow: hidden; position: relative;
   }
-  #camera { width: 100%; aspect-ratio: 3/4; object-fit: cover; display: block; background: #000; }
+  #camera { 
+  width: 100%; 
+  aspect-ratio: 3/4; 
+  object-fit: cover; 
+  display: block; 
+  background: #000; 
+}
+#camera-overlay {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 63%;
+  aspect-ratio: 63/88;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,0.5), 0 0 0 2px rgba(255,255,255,0.3) inset;
+  pointer-events: none;
+  z-index: 10;
+}
+#camera-overlay::before {
+  content: "";
+  position: absolute;
+  top: -10px; left: -10px; right: -10px; bottom: -10px;
+  border: 1px dashed var(--accent);
+  border-radius: 16px;
+}
   .overlay {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     justify-content: space-between; pointer-events: none;
@@ -96,6 +121,7 @@
   .empty { text-align: center; color: var(--muted); font-size: 0.85rem; padding: 24px 0; }
   .err { color: var(--accent-2); font-size: 0.8rem; text-align: center; margin-top: 12px; }
 </style>
+<script type="module" src="./card-detector.js"></script>
 </head>
 <body>
   <h1>Local Scanner</h1>
@@ -103,6 +129,7 @@
 
   <div class="stage">
     <video id="camera" autoplay playsinline muted></video>
+    <div id="camera-overlay"></div>
     <div class="overlay">
       <div class="topbar">
         <button id="flip-btn">↻ Flip</button>
@@ -139,6 +166,7 @@ const progressBar = progressEl.firstElementChild;
 let video = $('camera'), stream = null, facing = 'environment';
 let model = null, index = null, cardIds = [], meta = [];
 let busy = false;
+let QSCALE = 127.0;  // index quantisation scale, set by loadIndex
 
 function setStatus(text, on) {
   statusText.textContent = text;
@@ -147,16 +175,21 @@ function setStatus(text, on) {
 
 async function loadIndex() {
   setStatus('Loading card index…');
+  const base = '/scanner/';
   const [ids, m] = await Promise.all([
-    fetch('card-ids.json').then(r => r.json()),
-    fetch('cards_meta.json').then(r => r.json()),
+    fetch(base + 'card-ids.json').then(r => r.json()),
+    fetch(base + 'cards_meta.json').then(r => r.json()),
   ]);
   cardIds = ids; meta = m;
-  const buf = await (await fetch('card-index.bin')).arrayBuffer();
-  const bytes = new Int8Array(buf);
+  const buf = await (await fetch(base + 'card-index.bin')).arrayBuffer();
+  // Detect format by size: int16 = 39342080 bytes, int8 = 19671040
+  const isInt16 = buf.byteLength === 38420 * 512 * 2;
+  const arr = isInt16 ? new Int16Array(buf) : new Int8Array(buf);
+  QSCALE = isInt16 ? 32767.0 : 127.0;
   index = new Array(cardIds.length);
   for (let i = 0; i < cardIds.length; i++) {
-    index[i] = bytes.subarray(i * 512, (i + 1) * 512);
+    const start = i * 512;
+    index[i] = arr.subarray(start, start + 512);
   }
 }
 
@@ -174,10 +207,10 @@ async function loadModel() {
   progressEl.classList.remove('show');
 }
 
-function cosineInt8(query, ref) {
+function cosineQ(query, ref) {
   let dot = 0;
   for (let i = 0; i < 512; i++) dot += query[i] * ref[i];
-  return dot / (127.0 * 127.0);  // both sides quantised x127
+  return dot / (QSCALE * QSCALE);  // both sides quantised with the same scale
 }
 
 function blobToDataURL(blob) {
@@ -195,10 +228,11 @@ async function embed(source) {
   const out = await model(input);
   let arr = Array.from(out.data);
   const n = Math.sqrt(arr.reduce((s, v) => s + v * v, 0)) + 1e-9;
-  const q = new Int8Array(512);
+  // quantise the query with the SAME scale as the index (int16 or int8)
+  const q = QSCALE > 128 ? new Int16Array(512) : new Int8Array(512);
   for (let i = 0; i < 512; i++) {
-    let v = Math.round(arr[i] / n * 127.0);
-    v = Math.max(-127, Math.min(127, v));
+    let v = Math.round(arr[i] / n * QSCALE);
+    v = Math.max(-QSCALE, Math.min(QSCALE, v));
     q[i] = v;
   }
   return q;
@@ -209,7 +243,7 @@ async function match(image) {
   const q = await embed(image);
   const scores = [];
   for (let i = 0; i < index.length; i++) {
-    scores.push({ i, s: cosineInt8(q, index[i]) });
+    scores.push({ i, s: cosineQ(q, index[i]) });
   }
   scores.sort((a, b) => b.s - a.s);
   return scores.slice(0, 5);
@@ -249,13 +283,32 @@ async function capture() {
   if (busy) return;
   busy = true;
   captureBtn.disabled = true;
-  resultsList.innerHTML = '<div class="empty">Matching…</div>';
+  resultsList.innerHTML = '<div class="empty">Detecting card…</div>';
   const canvas = document.createElement('canvas');
   canvas.width = video.videoWidth || 640;
   canvas.height = video.videoHeight || 800;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.9));
-  await runMatch(blob);
+  
+  // Detect card and crop to it
+  const cardBbox = await detectCard(blob);
+  let finalBlob = blob;
+  if (cardBbox) {
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cardBbox.w;
+    cropCanvas.height = cardBbox.h;
+    const cropCtx = cropCanvas.getContext('2d');
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = canvas.width;
+    srcCanvas.height = canvas.height;
+    srcCanvas.getContext('2d').drawImage(canvas, 0, 0);
+    cropCtx.drawImage(srcCanvas, cardBbox.x, cardBbox.y, cardBbox.w, cardBbox.h, 0, 0, cardBbox.w, cardBbox.h);
+    finalBlob = await new Promise(r => cropCanvas.toBlob(r, 'image/jpeg', 0.9));
+    setStatus('Card detected, matching…');
+  } else {
+    setStatus('No card detected, trying full frame…');
+  }
+  await runMatch(finalBlob);
   busy = false;
   captureBtn.disabled = false;
 }
@@ -304,10 +357,35 @@ $('file-input').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   busy = true; captureBtn.disabled = true;
-  resultsList.innerHTML = '<div class="empty">Matching…</div>';
-  await runMatch(file);
+  resultsList.innerHTML = '<div class="empty">Detecting card…</div>';
+  
+  // Detect card in uploaded image
+  const cardBbox = await detectCard(file);
+  let finalBlob = file;
+  if (cardBbox) {
+    finalBlob = await cropToBBox(file, cardBbox);
+    setStatus('Card detected, matching…');
+  } else {
+    setStatus('No card detected, trying full image…');
+    finalBlob = await cropToCardRatio(file); // fallback
+  }
+  await runMatch(finalBlob);
   busy = false; captureBtn.disabled = false;
 });
+
+async function cropToBBox(blob, bbox) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = bbox.w;
+      canvas.height = bbox.h;
+      canvas.getContext('2d').drawImage(img, bbox.x, bbox.y, bbox.w, bbox.h, 0, 0, bbox.w, bbox.h);
+      canvas.toBlob(resolve, 'image/jpeg', 0.9);
+    };
+    img.src = URL.createObjectURL(blob);
+  });
+}
 $('capture-btn').addEventListener('click', capture);
 init();
 </script>

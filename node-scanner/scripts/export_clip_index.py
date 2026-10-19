@@ -19,10 +19,9 @@ DATA = Path(os.environ.get("PCS_DATA", "/opt/data/pokemon-card-scanner/data"))
 emb = np.load(DATA / "clip_embeddings.npz")["embeddings"].astype(np.float32)
 ids = np.load(DATA / "clip_embeddings.npz")["card_ids"]
 
-# L2-normalise rows, then quantise to int8
+# L2-normalise rows, then quantise to int16 (scale=32767, better precision than int8)
 emb /= np.clip(np.linalg.norm(emb, axis=1, keepdims=True), 1e-9, None)
-q = np.clip(np.rint(emb * 127.0), -127, 127).astype(np.int8)
-
+q = np.clip(np.rint(emb * 32767.0), -32767, 32767).astype(np.int16)
 (OUT / "card-index.bin").write_bytes(q.tobytes(order="C"))
 
 # Display metadata: clip_card_index.json has name/set/image_url for every indexed card
@@ -55,4 +54,4 @@ meta = [by_id.get(i, {"name": i}) for i in ids_list]
 (OUT / "cards_meta.json").write_text(json.dumps(meta, ensure_ascii=False))
 print(f"meta rows: {len(meta)}, images: {sum(1 for m in meta if m.get('image'))}")
 (OUT / "card-ids.json").write_text(json.dumps(ids_list))
-print(f"index: {q.shape} int8, {(OUT/'card-index.bin').stat().st_size/1e6:.1f} MB")
+print(f"index: {q.shape} int16, {(OUT/'card-index.bin').stat().st_size/1e6:.1f} MB")
