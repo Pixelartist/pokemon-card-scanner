@@ -9,4 +9,4 @@ else
     echo "WARNING: /opt/data/pokemon-card-scanner/data not writable by uid $(id -u) — set volume owner to 1000 on the host" >&2
 fi
 cd /opt/data/pokemon-card-scanner
-exec python run.py
+exec python daemon.py

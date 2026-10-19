@@ -41,3 +41,4 @@ kanban/
 cache/
 .DS_Store
 *.log
+.worktrees/

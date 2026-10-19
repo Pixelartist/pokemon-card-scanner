@@ -38,8 +38,8 @@ A locally hosted website for scanning and identifying Pokemon cards, similar to 
 
 5. **Run the server**:
    ```bash
-   python run.py
-   # Or: uvicorn src.api.main:app --reload
+   python daemon.py                 # foreground
+   python scripts/launch_server.py  # detached, survives session teardown
    ```
 
 6. **Access the app**: Open http://localhost:5005 in your browser
@@ -112,7 +112,7 @@ pokemon-card-scanner/
 │       └── index.html         # Main HTML template
 ├── data/
 │   └── pokemon_cards.db       # SQLite database
-├── run.py                     # Entry point
+├── daemon.py                    # Entry point (detached server)
 ├── .env                       # Environment template
 └── test_api.py                # Test script
 ```
