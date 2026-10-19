@@ -194,7 +194,7 @@
 
   <div class="controls">
     <button class="btn" id="capture-btn" disabled>Capture</button>
-    <button class="btn active" id="auto-scan-btn" onclick="toggleAutoScan()">▶ Auto-Scan: OFF</button>
+    <button class="btn" id="auto-scan-btn">▶ Auto-Scan: OFF</button>
   </div>
 
   <div class="results">
@@ -217,6 +217,7 @@ const progressBar = progressEl.firstElementChild;
 let video = $('camera'), stream = null, facing = 'environment';
 let model = null, index = null, cardIds = [], meta = [];
 let busy = false;
+let lastTopScore = 0;
 let QSCALE = 127.0;  // index quantisation scale, set by loadIndex
 const queue = [];     // scanned cards awaiting user review: {blob, thumb, name, meta, score, id}
 const reviewed = new Set();  // dedupe by blob URL so a re-scan of the same card is not queued twice
@@ -392,6 +393,9 @@ async function runMatch(fileOrBlob) {
         </div>`;
     }).join('');
 
+    lastTopScore = scores[0].s;
+    if (lastTopScore >= 0.88) setStatus(`Auto-captured: ${Math.round(lastTopScore * 100)}% match`);
+
     // Auto-enqueue top match into shared review queue
     const top = scores[0];
     const topMeta = meta[top.i] || {};
@@ -470,35 +474,26 @@ async function cropToBBox(blob, bbox) {
   });
 }
 $('capture-btn').addEventListener('click', capture);
+$('auto-scan-btn').addEventListener('click', toggleAutoScan);
+window.toggleAutoScan = toggleAutoScan;
 init();
+// Auto-scan loop: keep capturing; on a high-confidence match, toast,
+// pause ~1.5s so the card can be flipped, then scan the next one.
+window.isAutoScanning = false;
+function toggleAutoScan() {
+  window.isAutoScanning = !window.isAutoScanning;
+  const btn = $('auto-scan-btn');
+  btn.textContent = window.isAutoScanning ? '⏹ Auto-Scan: ON' : '▶ Auto-Scan: OFF';
+  if (window.isAutoScanning) autoScanLoop();
+}
+async function autoScanLoop() {
+  while (window.isAutoScanning) {
+    if (!busy && model && index && stream) await capture();
+    if (lastTopScore >= 0.88) await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 800));
+  }
+}
+
 </script>
 </body>
 </html>
-// Auto-scan loop when confidence / similarity is high
-let isAutoScanning = false;
-function toggleAutoScan() {
-  isAutoScanning = !isAutoScanning;
-  const btn = $('auto-scan-btn');
-  if (btn) {
-    btn.textContent = isAutoScanning ? '⏹ Auto-Scan: ON' : '▶ Auto-Scan: OFF';
-    btn.classList.toggle('active', isAutoScanning);
-  }
-  if (isAutoScanning) autoScanLoop();
-}
-
-async function autoScanLoop() {
-  while (isAutoScanning && !busy) {
-    await capture();
-    // Check top match score
-    const topMatchElem = resultsList.querySelector('.match .score');
-    if (topMatchElem) {
-      const pct = parseFloat(topMatchElem.textContent);
-      if (!isNaN(pct) && pct >= 88.0) {
-        setStatus(`Auto-captured high confidence match (${pct}%)!`);
-        // pause briefly to let user notice
-        await new Promise(r => setTimeout(r, 1500));
-      }
-    }
-    await new Promise(r => setTimeout(r, 1000));
-  }
-}
