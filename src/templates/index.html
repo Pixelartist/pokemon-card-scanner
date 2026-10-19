@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="/static/css/main.css?t={{ timestamp }}">
     <!-- StPageFlip for realistic book binding effect -->
     <script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.js"></script>
+<script src="/static/js/review-queue.js"></script>
 </head>
 <body>
 <!-- SVG Electric Border Filters - Must be in DOM before CSS applies -->
@@ -122,6 +123,8 @@
 
                         <!-- Camera Section -->
                         <div id="camera-section" class="camera-section hidden">
+                            <!-- Cloud version badge -->
+                            <span class="version-badge cloud">CLOUD</span>
                             <div class="camera-wrapper">
                                 <video id="camera-preview" autoplay playsinline></video>
                                 <canvas id="detection-overlay"></canvas>
@@ -184,6 +187,7 @@
 
                         <!-- Scan Result -->
                         <div id="scan-result" class="scan-result"></div>
+                        <div id="review-queue-root" class="review-queue-root queue-panel"></div>
 
                         <!-- Manual card search (always available) -->
                         <div class="search-section" id="manual-search-panel">

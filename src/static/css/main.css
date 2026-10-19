@@ -2539,3 +2539,66 @@ body {
         filter: brightness(1);
     }
 }
+
+/* ── Scanner overlays: version badge + review queue ─────────────── */
+.version-badge {
+    position: absolute; top: 10px; left: 10px; z-index: 5;
+    background: rgba(0,0,0,0.55); color: var(--accent-2, #f78166);
+    border: 1px solid rgba(247,129,102,0.5);
+    padding: 3px 10px; border-radius: 20px;
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;
+}
+.review-queue-root { margin-top: 16px; }
+
+.queue-panel {
+    background: var(--bg-card, #161b22); border: 1px solid var(--border, #30363d);
+    border-radius: 10px; overflow: hidden;
+}
+.queue-panel .queue-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px; background: var(--bg-hover, #1c2128);
+    border-bottom: 1px solid var(--border, #30363d);
+    font-size: 0.85rem; font-weight: 600;
+}
+.queue-panel .queue-count {
+    background: var(--accent, #58a6ff); color: #fff; border-radius: 20px; padding: 1px 9px;
+    font-size: 0.7rem; font-weight: 700; margin-left: 6px;
+}
+.queue-panel .queue-count.zero { background: var(--text-muted, #8b949e); }
+.queue-panel .queue-list { max-height: 260px; overflow-y: auto; padding: 8px; }
+.queue-panel .queue-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px;
+    border: 1px solid var(--border, #30363d); border-radius: 8px; margin-bottom: 6px;
+}
+.queue-panel .queue-item img { width: 36px; height: 50px; object-fit: contain; border-radius: 6px; }
+.queue-panel .qi-thumb-empty { width: 36px; height: 50px; background: var(--bg-hover, #1c2128); border-radius: 6px; }
+.queue-panel .qi-info { flex: 1; min-width: 0; }
+.queue-panel .qi-name { font-size: 0.85rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue-panel .qi-meta { font-size: 0.7rem; color: var(--text-muted, #8b949e); }
+.queue-panel .qi-actions { display: flex; gap: 4px; }
+.queue-panel .qi-actions button {
+    background: transparent; color: inherit; border: 1px solid var(--border, #30363d);
+    border-radius: 6px; padding: 3px 8px; font-size: 0.7rem; cursor: pointer;
+}
+.queue-panel .qi-actions button.keep { border-color: #3fb950; color: #3fb950; }
+.queue-panel .qi-actions button.discard { border-color: #f85149; color: #f85149; }
+.queue-panel .qi-status { font-size: 0.65rem; color: var(--text-muted, #8b949e); align-self: center; }
+.queue-panel .empty { text-align: center; color: var(--text-muted, #8b949e); font-size: 0.8rem; padding: 20px 0; }
+
+/* Fullscreen camera mode: when the camera section is active, it becomes a
+   full-screen overlay with the version badge floating on the video. */
+.camera-section:not(.hidden) {
+    position: fixed; inset: 0; z-index: 1000; margin: 0;
+    background: #000; color: #fff;
+    display: flex; flex-direction: column;
+}
+.camera-section:not(.hidden) .camera-wrapper {
+    flex: 1; max-width: none; width: 100%; min-height: 0;
+}
+.camera-section:not(.hidden) .camera-wrapper video {
+    width: 100%; height: 100%; object-fit: contain;
+}
+.camera-section:not(.hidden) .camera-controls,
+.camera-section:not(.hidden) .auto-detect-toggle {
+    padding: 12px; background: #000;
+}

@@ -607,6 +607,20 @@ function displayScanResult(data, container) {
         html += '</div></div>';
     }
     container.innerHTML = html;
+    // Auto-enqueue the top cloud match into the shared review queue
+    if (data.decision === 'match' && data.candidates.length > 0) {
+      const c = data.candidates[0];
+      if (c.id && RQ.add({
+        id: c.id,
+        name: c.name || c.id,
+        meta: [c.number, c.rarity, c.set?.name].filter(Boolean).join(' · '),
+        img: c.card?.images?.large || c.image_url || '',
+        score: c.similarity || 0,
+        source: 'cloud',
+      })) {
+        if (window.__reviewQueue) window.__reviewQueue.refresh();
+      }
+    }
 }
 
 async function performManualSearch() {
@@ -959,7 +973,17 @@ async function loadStats() {
     }
 }
 
-// Initialize
+// Shared review queue — appears under every scan result in the cloud app
+const rqRoot = document.getElementById('review-queue-root');
+if (rqRoot && typeof mountReviewQueue === 'function') {
+  window.__reviewQueue = mountReviewQueue(rqRoot, {
+    add(item) {
+      // route "Keep" through the existing add-to-collection flow
+      if (item.id) addToCollection(item.id);
+    },
+  });
+}
+
 async function initializeApp() {
     // Try the stored access token first; if missing/expired, the httpOnly
     // refresh cookie silently re-authenticates (survives server restarts).
