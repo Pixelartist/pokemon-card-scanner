@@ -3,8 +3,12 @@
 import os
 import sys
 
-# Detach from controlling terminal — survives parent session exit
-os.setsid()
+# Detach from controlling terminal — survives parent session exit.
+# Already a session leader when launched via double-fork launcher.
+try:
+    os.setsid()
+except OSError:
+    pass
 os.chdir('/opt/data/pokemon-card-scanner')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 

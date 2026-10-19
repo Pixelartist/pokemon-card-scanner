@@ -121,6 +121,7 @@ if os.path.exists(clip_images_dir):
 card_images_dir = os.path.join(BASE_DIR, "..", "data", "images")
 if os.path.exists(card_images_dir):
     app.mount("/static/card_images", StaticFiles(directory=card_images_dir), name="card_images")
+    app.mount("/card_images", StaticFiles(directory=card_images_dir), name="card_images_root")
 
 # Mount German card images (index references /static/german_cards/images/de_*.png)
 german_images_dir = os.path.join(BASE_DIR, "..", "data", "german_cards", "images")
@@ -137,6 +138,11 @@ if os.path.exists(static_dir):
             return response
 
     app.mount("/static", NoCacheStaticFiles(directory=static_dir), name="static")
+
+# Mount browser-local scanner at /scanner (reuses existing /static/card_images)
+scanner_dir = "/opt/data/pokemon-card-scanner/.worktrees/local-scanner/node-scanner/public"
+if os.path.exists(scanner_dir):
+    app.mount("/scanner", StaticFiles(directory=scanner_dir, html=True), name="scanner")
 
 # Use Jinja2 directly for template rendering
 import jinja2
