@@ -29,9 +29,27 @@ q = np.clip(np.rint(emb * 127.0), -127, 127).astype(np.int8)
 idx = json.loads((DATA / "clip_card_index.json").read_text())
 by_id = {c["card_id"]: {"name": c.get("name", ""), "set": c.get("set_name", "") or c.get("set_code", ""),
                         "number": c.get("number", ""), "rarity": c.get("rarity", ""),
-                        # /static/x -> served at /x by our static server
-                        "image": c.get("image_url", "").replace("/static/", "/")}
+                        # keep /static/ prefix — main app serves those mounts
+                        "image": c.get("image_url", "")}
          for c in idx["cards"]}
+# image_url can point at data/images/ paths that were never downloaded; the
+# clip_images fallback dir (served at /static/clip_images) has many of them.
+fallback = 0
+missing = 0
+for cid, m in by_id.items():
+    img = m["image"]
+    if img.startswith("/static/"):
+        # URL /static/card_images/ serves data/images/ — translate before the disk check
+        rel = img[len("/static/"):].replace("card_images/", "images/", 1)
+        if not (DATA / rel).is_file():
+            alt = DATA / "clip_images" / f"{cid}.jpg"
+            if alt.is_file():
+                m["image"] = f"/static/clip_images/{cid}.jpg"
+                fallback += 1
+            else:
+                m["image"] = ""  # no local copy anywhere; UI shows placeholder
+                missing += 1
+print(f"image fallbacks to clip_images: {fallback}, no local copy: {missing}")
 ids_list = [str(i) for i in ids]
 meta = [by_id.get(i, {"name": i}) for i in ids_list]
 (OUT / "cards_meta.json").write_text(json.dumps(meta, ensure_ascii=False))

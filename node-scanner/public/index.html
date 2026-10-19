@@ -126,7 +126,9 @@
 
   <input type="file" id="file-input" accept="image/*" capture="environment" style="display:none">
 <script type="module">
-import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+// page lives under /scanner/, so default local model path 404s — load from HF CDN
+env.allowLocalModels = false;
 
 const $ = id => document.getElementById(id);
 const statusDot = $('status-dot'), statusText = $('status-text');
