@@ -620,8 +620,45 @@ function displayScanResult(data, container) {
       })) {
         if (window.__reviewQueue) window.__reviewQueue.refresh();
       }
+      // Auto-capture loop: if the top match is confident, keep scanning
+      // (only when the camera is active — upload mode is a one-shot)
+      if (window.__autoScan && window.__autoScan.active) {
+        window.__autoScan.check(c.similarity || 0);
+      }
     }
 }
+
+// ── Auto-scan loop (cloud) ────────────────────────────────────────
+// Triggered by the toggle button next to Capture. When the top CLIP
+// match is >= 88%, it re-captures after a brief pause so the user can
+// flip the card and keep scanning. Upload mode is single-shot.
+window.__autoScan = {
+  active: false,
+  THRESHOLD: 0.88,
+  toggle() {
+    this.active = !this.active;
+    const btn = document.getElementById('auto-scan-btn');
+    if (btn) {
+      btn.textContent = this.active ? '⏹ Auto-Scan: ON' : '▶ Auto-Scan: OFF';
+      btn.classList.toggle('active', this.active);
+    }
+    if (this.active) this.run();
+  },
+  async run() {
+    // One-shot: wait, then trigger a single identify. The result handler
+    // calls check() and, on a high-confidence match, calls run() again.
+    await new Promise(r => setTimeout(r, 1200));
+    if (this.active && currentImage) scanBtn.click();
+  },
+  async check(score) {
+    if (score >= this.THRESHOLD) {
+      const pct = (score * 100).toFixed(1);
+      showToast(`✓ Auto-captured high-confidence match (${pct}%)`);
+      await new Promise(r => setTimeout(r, 1500));
+      this.run();
+    }
+  },
+};
 
 async function performManualSearch() {
     const input = document.getElementById('manual-search-input');
