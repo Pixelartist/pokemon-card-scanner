@@ -155,6 +155,26 @@ def init_db():
     for idx_sql in indexes:
         cursor.execute(idx_sql)
     
+    # False detections corrected by the user in the review queue. One row per
+    # correction: the scan/crop image plus wrong and correct card ids. This is
+    # the training set for index hardening (re-embed crops, add confuser pairs).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS misreads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_image_path TEXT,
+            crop_image_path TEXT,
+            wrong_id TEXT NOT NULL,
+            wrong_name TEXT,
+            correct_id TEXT NOT NULL,
+            correct_name TEXT,
+            score REAL,
+            source TEXT,
+            user_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_created ON misreads(created_at)")
+
     # Column migrations for pre-existing databases (CREATE TABLE IF NOT
     # skips them, so SQLite needs an explicit ALTER TABLE, one column at a
     # time). Keep in sync with the collection_items schema above.

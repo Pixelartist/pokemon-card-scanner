@@ -625,6 +625,8 @@ function displayScanResult(data, container) {
         img: c.card?.images?.large || c.image_url || '',
         score: c.similarity || 0,
         source: 'cloud',
+        scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
+        crop: (data.crop_image_path || lastScanImages?.crop_image_path) || null,
       })) {
         if (window.refreshReviewQueues) window.refreshReviewQueues();
       }
@@ -1719,6 +1721,8 @@ displayScanResult = async function(data, container) {
                 img: detailImg,
                 score: c.similarity || 0,
                 source: 'cloud',
+                scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
+                crop: (data.crop_image_path || lastScanImages?.crop_image_path) || null,
             })) {
                 if (window.refreshReviewQueues) window.refreshReviewQueues();
             }

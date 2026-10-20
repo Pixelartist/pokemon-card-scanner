@@ -31,6 +31,7 @@ from services.collection import CollectionService
 from services.auth import (
     AuthService, get_current_user, security, create_access_token,
     create_refresh_token, validate_refresh_token, revoke_refresh_token,
+    verify_token,
     REFRESH_COOKIE_NAME, REFRESH_COOKIE_MAX_AGE,
 )
 
@@ -1098,6 +1099,100 @@ async def search_cards(query: str, limit: int = 20):
     results = results[:limit]
 
     return {"results": results, "count": len(results)}
+
+
+# ------------------------------------------------------------------ misreads
+_MISREADS_DDL = """
+CREATE TABLE IF NOT EXISTS misreads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_image_path TEXT,
+    crop_image_path TEXT,
+    wrong_id TEXT NOT NULL,
+    wrong_name TEXT,
+    correct_id TEXT NOT NULL,
+    correct_name TEXT,
+    score REAL,
+    source TEXT,
+    user_id INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+
+def _misreads_conn():
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    conn.execute(_MISREADS_DDL)  # idempotent, covers DBs created before the table existed
+    return conn
+
+
+@app.post("/api/misreads")
+async def log_misread(payload: Dict[str, Any], request: Request):
+    """Record a wrong identification corrected by the user in the review queue.
+
+    The crop image + (wrong_id -> correct_id) pair is hard-training data:
+    re-embedding these crops or pinning confuser pairs directly improves the
+    CLIP index. User is optional (the /scanner/ page works without login).
+    """
+    wrong_id = (payload.get("wrong_id") or "").strip()
+    correct_id = (payload.get("correct_id") or "").strip()
+    if not wrong_id or not correct_id:
+        raise HTTPException(status_code=400, detail="wrong_id and correct_id are required")
+    if wrong_id == correct_id:
+        return {"status": "ignored", "reason": "same card"}
+
+    def _valid_rel_path(p):
+        # Only ever accept paths under data/scans/, never absolute or traversing
+        if not p or not isinstance(p, str):
+            return None
+        p = p.strip()
+        if p.startswith("/") or ".." in p or not p.startswith("scans/"):
+            return None
+        return p
+
+    user_id = None
+    try:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            payload = verify_token(auth[7:])
+            user_id = payload.get("sub")
+    except Exception:
+        pass  # anonymous scanner sessions are fine — correction is still useful signal
+
+    conn = _misreads_conn()
+    try:
+        cur = conn.execute(
+            """INSERT INTO misreads
+               (scan_image_path, crop_image_path, wrong_id, wrong_name,
+                correct_id, correct_name, score, source, user_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                _valid_rel_path(payload.get("scan_image_path")),
+                _valid_rel_path(payload.get("crop_image_path")),
+                wrong_id[:120], (payload.get("wrong_name") or "")[:200],
+                correct_id[:120], (payload.get("correct_name") or "")[:200],
+                float(payload.get("score") or 0), (payload.get("source") or "")[:20],
+                user_id,
+            ),
+        )
+        conn.commit()
+        return {"status": "ok", "id": cur.lastrowid}
+    finally:
+        conn.close()
+
+
+@app.get("/api/misreads")
+async def list_misreads(limit: int = 100):
+    """Admin view of corrected false detections (training candidates)."""
+    conn = _misreads_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM misreads ORDER BY created_at DESC LIMIT ?",
+            (max(1, min(limit, 500)),),
+        ).fetchall()
+        return {"misreads": [dict(r) for r in rows], "count": len(rows)}
+    finally:
+        conn.close()
 
 
 @app.get("/api/cards/{card_id}")
