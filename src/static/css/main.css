@@ -2601,6 +2601,7 @@ body {
 .camera-section:not(.hidden) .camera-controls,
 .camera-section:not(.hidden) .auto-detect-toggle {
     padding: 12px; background: #000;
+    overflow: visible; /* buttons must not be clipped in fullscreen */
 }
 
 /* Floating scan overlay in fullscreen camera mode */

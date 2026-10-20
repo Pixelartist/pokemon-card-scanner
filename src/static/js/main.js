@@ -657,8 +657,13 @@ window.__autoScan = {
     // Only auto-capture from the live camera; upload mode is one-shot.
     const cam = document.getElementById('camera-section');
     if (!cam || cam.classList.contains('hidden')) return;
-    if (!cameraStream) startCamera(); // re-arm if the user left camera mode
-    capturePhoto(true);
+    (async () => {
+      if (!cameraStream || !document.getElementById('camera-preview').videoWidth) {
+        await startCamera(); // wait for the stream — capturing first yields a blank frame
+        await new Promise(r => setTimeout(r, 500)); // let the first frame render
+      }
+      if (this.active) capturePhoto(true);
+    })();
   },
   async check(score) {
     if (score >= this.THRESHOLD) {
