@@ -15,11 +15,63 @@ const RQ = {
 };
 
 function rqEsc(s) {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 }
 
-// Mount a queue panel into `root` (element). opts.add(item) -> Promise|void, opts.onDone.
-function mountReviewQueue(root, opts = {}) {
+async function postMisread(payload) {
+  const token = window._getAuthToken ? window._getAuthToken() : null;
+  const headers = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  try {
+    const r = await fetch('/api/misreads', { method: 'POST', headers, body: JSON.stringify(payload) });
+    if (!r.ok) throw new Error(r.statusText);
+    return await r.json();
+  } catch (e) {
+    console.error('Failed to log misread:', e);
+    throw e;
+  }
+}
+
+export function _createCorrectionUI() {
+  const btn = document.createElement('button');
+  btn.className = 'correction';
+  btn.textContent = '✗ Not this?';
+  btn.title = 'Log a correction so we can train this hard case out of the model';
+  btn.onclick = async (e) => {
+    const row = e.target.closest('.queue-item');
+    if (!row) return;
+    const id = row.dataset.id;
+    const item = RQ.load().find(q => q.id === id);
+    if (!item) return;
+    if (!window.confirm('Log that this card ID is wrong and store the scan+crop so we can re-embed / harden this case?')) return;
+    const correctId = prompt('What card is this actually? (name or id)');
+    if (!correctId) return;
+    const status = row.querySelector('.qi-status') || row.querySelector('.qi-actions')?.children[1];
+    const working = status ? (status.textContent = 'Logging...') : null;
+    const payload = {
+      wrong_id: item.id,
+      wrong_name: item.name,
+      correct_id: correctId,
+      correct_name: correctId,
+      score: item.score,
+      source: item.source
+    };
+    if (item.scan) payload.scan_image_path = 'scans/' + item.scan;
+    if (item.crop) payload.crop_image_path = 'scans/' + item.crop;
+    try {
+      await postMisread(payload);
+      localStorage.setItem('last_misread_' + id, Date.now());
+      if (working) working.textContent = 'Logged';
+      window.showToast('Correction logged — thanks for improving the model!');
+      RQ.remove(id);
+    } catch (e) {
+      if (working) working.textContent = 'Failed';
+      alert('Could not log correction: ' + e.message + '\nRetrying...');
+    }
+  };
+  return btn;
+}
+export function mountReviewQueue(root, opts = {}) {
   function render() {
     const items = RQ.load();
     root.innerHTML = `
@@ -35,20 +87,54 @@ function mountReviewQueue(root, opts = {}) {
           </div>
           <div class="qi-actions">
             <button class="keep">Keep</button>
+            <button class="correction">✗ Not this?</button>
             <button class="discard">✕</button>
           </div>
-        </div>`).join('') : '<div class="empty">Nothing waiting for review.</div>')
-      + '</div>';
+        </div>
+      `).join('') : '<div class="empty">Nothing waiting for review.</div>') + `
+      </div>
+    `;
     if (opts.onChange) opts.onChange(items.length);
   }
-  root.addEventListener('click', async (e) => {
+  if (window._createCorrectionUI) {
+    const correctionHandler = window._createCorrectionUI();
+    if (correctionHandler) root.appendChild(correctionHandler);
+  }
+  window.addEventListener('click', async (e) => {
     const row = e.target.closest('.queue-item');
     if (!row) return;
     const id = row.dataset.id;
     if (e.target.closest('.keep')) {
       const item = RQ.load().find(q => q.id === id);
-      try { if (opts.add) await opts.add(item); RQ.remove(id); }
-      catch (err) { e.target.closest('.qi-actions').insertAdjacentHTML('beforeend', `<span class="qi-status">${rqEsc(err.message)}</span>`); return; }
+      try { if (opts.add) await opts.add(item); RQ.remove(id); } catch (err) { e.target.closest('.qi-actions')?.insertAdjacentHTML('beforeend', `<span class="qi-status">${rqEsc(err.message)}</span>`); return; }
+    } else if (e.target.closest('.correction')) {
+      const item = RQ.load().find(q => q.id === id);
+      if (!item) return;
+      if (!window.confirm(`Log that ${item.name} is wrong and store the scan+crop so we can re-embed / harden this case?`)) return;
+      const correctId = prompt('What card is this actually? (name or id)');
+      if (!correctId) return;
+      const status = row.querySelector('.qi-status') || row.querySelector('.qi-actions')?.children[1];
+      const working = status ? (status.textContent = 'Logging...') : null;
+      const payload = {
+        wrong_id: item.id,
+        wrong_name: item.name,
+        correct_id: correctId,
+        correct_name: correctId,
+        score: item.score,
+        source: item.source
+      };
+      if (item.scan) payload.scan_image_path = 'scans/' + item.scan;
+      if (item.crop) payload.crop_image_path = 'scans/' + item.crop;
+      try {
+        await postMisread(payload);
+        localStorage.setItem('last_misread_' + id, Date.now());
+        if (working) working.textContent = 'Logged';
+        window.showToast('Correction logged — thanks for improving the model!');
+        RQ.remove(id);
+      } catch (e) {
+        if (working) working.textContent = 'Failed';
+        alert('Could not log correction: ' + e.message + '\nRetrying...');
+      }
     } else if (e.target.closest('.discard')) {
       RQ.remove(id);
     } else return;
