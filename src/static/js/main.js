@@ -618,13 +618,17 @@ function displayScanResult(data, container) {
         score: c.similarity || 0,
         source: 'cloud',
       })) {
-        if (window.__reviewQueue) window.__reviewQueue.refresh();
+        if (window.refreshReviewQueues) window.refreshReviewQueues();
       }
+      updateScanOverlay(c);
       // Auto-capture loop: if the top match is confident, keep scanning
       // (only when the camera is active — upload mode is a one-shot)
       if (window.__autoScan && window.__autoScan.active) {
         window.__autoScan.check(c.similarity || 0);
       }
+    } else {
+      const el = document.getElementById('scan-overlay-result');
+      if (el) el.innerHTML = '<span class="so-empty">No confident match — move the card closer</span>';
     }
 }
 
@@ -642,20 +646,20 @@ window.__autoScan = {
       btn.textContent = this.active ? '⏹ Auto-Scan: ON' : '▶ Auto-Scan: OFF';
       btn.classList.toggle('active', this.active);
     }
-    if (this.active) this.run();
+    if (this.active) this.capture();
   },
-  async run() {
-    // One-shot: wait, then trigger a single identify. The result handler
-    // calls check() and, on a high-confidence match, calls run() again.
-    await new Promise(r => setTimeout(r, 1200));
-    if (this.active && currentImage) scanBtn.click();
+  // Capture a fresh frame and identify it. The result handler calls check()
+  // and, on a high-confidence match, calls capture() again.
+  capture() {
+    if (!this.active) return;
+    capturePhoto(true);
   },
   async check(score) {
     if (score >= this.THRESHOLD) {
       const pct = (score * 100).toFixed(1);
       showToast(`✓ Auto-captured high-confidence match (${pct}%)`);
       await new Promise(r => setTimeout(r, 1500));
-      this.run();
+      this.capture();
     }
   },
 };
@@ -1012,13 +1016,32 @@ async function loadStats() {
 
 // Shared review queue — appears under every scan result in the cloud app
 const rqRoot = document.getElementById('review-queue-root');
-if (rqRoot && typeof mountReviewQueue === 'function') {
-  window.__reviewQueue = mountReviewQueue(rqRoot, {
+const rqOverlay = document.getElementById('review-queue-overlay');
+window.__reviewQueues = [];
+if (typeof mountReviewQueue === 'function') {
+  const opts = {
     add(item) {
       // route "Keep" through the existing add-to-collection flow
       if (item.id) addToCollection(item.id);
     },
-  });
+  };
+  if (rqRoot) window.__reviewQueues.push(mountReviewQueue(rqRoot, opts));
+  if (rqOverlay) window.__reviewQueues.push(mountReviewQueue(rqOverlay, opts));
+}
+window.__reviewQueue = window.__reviewQueues[0];
+window.refreshReviewQueues = () => window.__reviewQueues.forEach(q => q.refresh());
+
+// Show the identification on the fullscreen camera glass
+function updateScanOverlay(c) {
+  const el = document.getElementById('scan-overlay-result');
+  if (!el || !c) return;
+  el.innerHTML = `
+    ${c.card?.images?.small || c.image_url ? `<img src="${c.card?.images?.small || c.image_url}" alt="">` : ''}
+    <div>
+      <div class="so-name">${c.name || c.id}</div>
+      <div class="so-meta">${[c.number, c.rarity, c.set?.name].filter(Boolean).join(' · ')}</div>
+    </div>
+    <div class="so-score">${Math.round((c.similarity || 0) * 100)}%</div>`;
 }
 
 async function initializeApp() {
@@ -1181,14 +1204,9 @@ async function startCamera() {
         // Show capture button
         document.getElementById('capture-btn').classList.remove('hidden');
 
-        // Start auto-detection if enabled
-        if (document.getElementById('auto-detect-toggle').checked) {
-            setTimeout(() => {
-                if (document.getElementById('auto-detect-toggle').checked) {
-                    startAutoDetect();
-                }
-            }, 1000);
-        }
+        // Live card-detection loop: draws the single green box while the
+        // camera runs. Auto-capture is handled by the Auto-Scan button.
+        setTimeout(() => startLiveDetection(), 1000);
 
     } catch (error) {
         console.error('Camera error:', error);
@@ -1217,51 +1235,54 @@ async function startCamera() {
 }
 
 function stopCamera() {
+    stopLiveDetection();
     if (cameraStream) {
         cameraStream.getTracks().forEach(track => track.stop());
         cameraStream = null;
     }
 }
 
-// Capture photo from camera
-document.getElementById('capture-btn')?.addEventListener('click', () => {
+// Capture photo from camera. `keepCamera` keeps the section visible and the
+// stream alive so the auto-scan loop can re-capture the next frame.
+async function capturePhoto(keepCamera = false) {
     const video = document.getElementById('camera-preview');
     const canvas = document.getElementById('camera-canvas');
     if (!video || !canvas) return;
-    
+
     const ctx = canvas.getContext('2d');
-    
-    // Set canvas size to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    
-    // Draw video frame to canvas
     ctx.drawImage(video, 0, 0);
-    
-    // Convert canvas to blob
-    canvas.toBlob((blob) => {
-        if (blob) {
-            currentImage = blob;
-            
-            // Show preview
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const previewImg = document.querySelector('#preview img');
-                const preview = document.getElementById('preview');
-                if (previewImg) previewImg.src = e.target.result;
-                if (preview) preview.classList.remove('hidden');
-            };
-            reader.readAsDataURL(blob);
-            
-            // Hide camera section
-            const cameraSection = document.getElementById('camera-section');
-            if (cameraSection) cameraSection.classList.add('hidden');
-            
-            // Stop camera
-            stopCamera();
+
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.9));
+    if (!blob) return;
+    currentImage = blob;
+
+    if (keepCamera) {
+        // Auto-scan: re-identify from the live frame without leaving camera mode
+        if (window.__autoScan && window.__autoScan.active) {
+            window.__autoScan.pending = true;
         }
-    }, 'image/jpeg', 0.9);
-});
+        scanBtn.click();
+        return;
+    }
+
+    // Normal capture: show preview and exit camera mode
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const previewImg = document.querySelector('#preview img');
+        const preview = document.getElementById('preview');
+        if (previewImg) previewImg.src = e.target.result;
+        if (preview) preview.classList.remove('hidden');
+    };
+    reader.readAsDataURL(blob);
+
+    const cameraSection = document.getElementById('camera-section');
+    if (cameraSection) cameraSection.classList.add('hidden');
+    stopCamera();
+}
+
+document.getElementById('capture-btn')?.addEventListener('click', () => capturePhoto(false));
 
 // Stop camera button
 document.getElementById('stop-camera-btn').addEventListener('click', () => {
@@ -1269,71 +1290,38 @@ document.getElementById('stop-camera-btn').addEventListener('click', () => {
     switchMode('upload');
 });
 
-// Auto-detect card functionality
-let autoDetectInterval = null;
-let isAutoDetecting = false;
+// Live card-detection loop (draw-only): polls /api/detect to draw/update the
+// single green bounding box while the camera is open. Auto-capture is driven
+// by the Auto-Scan button + CLIP confidence, not by this loop.
+let liveDetectionInterval = null;
 
-// Start auto-detection when camera is active
-function startAutoDetect() {
-    if (isAutoDetecting) return;
-    isAutoDetecting = true;
-    
-    autoDetectInterval = setInterval(async () => {
-        if (!document.getElementById('auto-detect-toggle').checked) {
-            stopAutoDetect();
-            return;
-        }
-
-        const result = await detectCardInFrame();
-
-        if (result && result.found && (result.confidence || result.score) > 0.6) {
-            // Card detected with high confidence - stop and capture
-            stopAutoDetect();
-            setTimeout(() => capturePhoto(), 300);
-        }
+function startLiveDetection() {
+    if (liveDetectionInterval) return;
+    liveDetectionInterval = setInterval(async () => {
+        const camVisible = !document.getElementById('camera-section').classList.contains('hidden');
+        if (!camVisible) { stopLiveDetection(); return; }
+        await detectCardInFrame();
     }, 4000); // Detection takes ~20s on the NAS CPU; polling faster just queues work
 }
 
-function stopAutoDetect() {
-    isAutoDetecting = false;
-    if (autoDetectInterval) {
-        clearInterval(autoDetectInterval);
-        autoDetectInterval = null;
+function stopLiveDetection() {
+    if (liveDetectionInterval) {
+        clearInterval(liveDetectionInterval);
+        liveDetectionInterval = null;
     }
-    
-    // Clear overlay
     const overlay = document.getElementById('detection-overlay');
     if (overlay) {
         const ctx = overlay.getContext('2d');
         ctx.clearRect(0, 0, overlay.width, overlay.height);
     }
-    
-    // Clear frame state
-    const cardFrame = document.getElementById('card-frame');
-    if (cardFrame) {
-        cardFrame.classList.remove('active', 'detected', 'misaligned');
-    }
-
+    const cf = document.getElementById('card-frame');
+    if (cf) { cf.style.display = ''; cf.classList.remove('active', 'detected', 'misaligned'); }
     const statusElement = document.getElementById('detection-status');
     if (statusElement) {
         statusElement.textContent = 'Point camera at a card';
         statusElement.className = 'detection-status';
     }
-    
-    const debugSection = document.getElementById('detection-debug');
-    if (debugSection) {
-        debugSection.classList.add('hidden');
-    }
 }
-
-// Toggle auto-detect
-document.getElementById('auto-detect-toggle').addEventListener('change', (e) => {
-    if (e.target.checked) {
-        startAutoDetect();
-    } else {
-        stopAutoDetect();
-    }
-});
 
 // Search functionality (only if elements exist)
 const searchBtn = document.getElementById('search-btn');
@@ -1730,141 +1718,91 @@ async function detectCardInFrame() {
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, 0, 0);
     
-    // Convert to blob for API call
-    canvas.toBlob(async (blob) => {
-        if (!blob) return;
-        
-        const formData = new FormData();
-        formData.append('image', blob, 'frame.jpg');
+    // Convert to blob for API call — return the promise so callers can
+    // `await` the detection result instead of always getting null.
+    return new Promise((resolve) => {
+        canvas.toBlob(async (blob) => {
+            if (!blob) { resolve(null); return; }
+            
+            const formData = new FormData();
+            formData.append('image', blob, 'frame.jpg');
 
-        try {
-            const response = await fetch('/api/detect', {
-                method: 'POST',
-                body: formData,
-                signal: AbortSignal.timeout(120000) // 120 second timeout for slow CPU
-            });
-            
-            const result = await response.json();
-            
-            if (result.found && result.bbox) {
-                const [x, y, w, h] = result.bbox;
-                const confidence = result.confidence || result.score || 0;
+            try {
+                const response = await fetch('/api/detect', {
+                    method: 'POST',
+                    body: formData,
+                    signal: AbortSignal.timeout(120000)
+                });
                 
-                // Clear overlay
-                const overlayCtx = overlay.getContext('2d');
+                const result = await response.json();
+                
                 overlay.width = video.videoWidth;
                 overlay.height = video.videoHeight;
-                overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+                const octx = overlay.getContext('2d');
+                octx.clearRect(0, 0, overlay.width, overlay.height);
                 
-                // Draw bounding box
-                overlayCtx.strokeStyle = confidence > 0.7 ? '#4ecca3' : confidence > 0.5 ? '#ffa500' : '#e94560';
-                overlayCtx.lineWidth = 4;
-                overlayCtx.strokeRect(x, y, w, h);
-                
-                // Draw corner markers
-                const markerSize = 20;
-                overlayCtx.lineWidth = 4;
-                
-                // Top-left
-                overlayCtx.beginPath();
-                overlayCtx.moveTo(x, y + markerSize);
-                overlayCtx.lineTo(x, y);
-                overlayCtx.lineTo(x + markerSize, y);
-                overlayCtx.stroke();
-                
-                // Top-right
-                overlayCtx.beginPath();
-                overlayCtx.moveTo(x + w - markerSize, y);
-                overlayCtx.lineTo(x + w, y);
-                overlayCtx.lineTo(x + w, y + markerSize);
-                overlayCtx.stroke();
-                
-                // Bottom-left
-                overlayCtx.beginPath();
-                overlayCtx.moveTo(x, y + h - markerSize);
-                overlayCtx.lineTo(x, y + h);
-                overlayCtx.lineTo(x + markerSize, y + h);
-                overlayCtx.stroke();
-                
-                // Bottom-right
-                overlayCtx.beginPath();
-                overlayCtx.moveTo(x + w - markerSize, y + h);
-                overlayCtx.lineTo(x + w, y + h);
-                overlayCtx.lineTo(x + w, y + h - markerSize);
-                overlayCtx.stroke();
-                
-                // Add confidence label
-                overlayCtx.fillStyle = confidence > 0.7 ? '#4ecca3' : confidence > 0.5 ? '#ffa500' : '#e94560';
-                overlayCtx.font = 'bold 24px Inter, sans-serif';
-                overlayCtx.fillText(`${Math.round(confidence * 100)}%`, x, y - 10);
-                
-                // Update status
-                if (statusElement) {
-                    statusElement.textContent = `Card detected: ${Math.round(confidence * 100)}% confidence`;
-                    statusElement.className = 'detection-status found';
-                }
-                
-                // Update frame position to match detected card
-                const cardFrame = document.getElementById('card-frame');
-                if (cardFrame) {
-                    const frameStyle = cardFrame.style;
-                    const scaleX = 100 / result.image_width;
-                    const scaleY = 100 / result.image_height;
-                    const left = (x + w / 2) * scaleX;
-                    const top = (y + h / 2) * scaleY;
-                    const width = w * scaleX;
-                    const height = h * scaleY;
+                if (result.found && result.bbox) {
+                    const [x, y, w, h] = result.bbox;
+                    const confidence = result.confidence || result.score || 0;
                     
-                    frameStyle.left = `${left}%`;
-                    frameStyle.top = `${top}%`;
-                    frameStyle.width = `${Math.min(width, 95)}%`;
-                    frameStyle.height = `${Math.min(height, 95)}%`;
-                    frameStyle.transform = 'translate(-50%, -50%)';
+                    // Single green rectangle: stroke + corner brackets + % label
+                    octx.strokeStyle = confidence > 0.7 ? '#4ecca3' : confidence > 0.5 ? '#ffa500' : '#e94560';
+                    octx.lineWidth = Math.max(3, overlay.width / 250);
+                    octx.strokeRect(x, y, w, h);
                     
-                    cardFrame.classList.add('detected');
-                    cardFrame.classList.remove('active', 'misaligned');
-                }
-                
-                // Show debug info
-                if (debugSection && result.debug_image) {
-                    debugSection.classList.remove('hidden');
-                    debugCanvas.src = 'data:image/png;base64,' + result.debug_image;
+                    const markerSize = Math.min(w, h) * 0.12;
+                    octx.beginPath();
+                    octx.moveTo(x, y + markerSize); octx.lineTo(x, y); octx.lineTo(x + markerSize, y);
+                    octx.moveTo(x + w - markerSize, y); octx.lineTo(x + w, y); octx.lineTo(x + w, y + markerSize);
+                    octx.moveTo(x + w, y + h - markerSize); octx.lineTo(x + w, y + h); octx.lineTo(x + w - markerSize, y + h);
+                    octx.moveTo(x, y + h - markerSize); octx.lineTo(x, y + h); octx.lineTo(x + markerSize, y + h);
+                    octx.stroke();
+                    
+                    octx.fillStyle = octx.strokeStyle;
+                    octx.font = `bold ${Math.max(16, overlay.width / 40)}px Inter, sans-serif`;
+                    octx.fillText(`${Math.round(confidence * 100)}%`, x + 8, y - 8);
                     
                     if (scoreElement) {
                         scoreElement.textContent = `Detection Score: ${Math.round(confidence * 100)}%`;
-                        scoreElement.className = 'detection-score ' + 
+                        scoreElement.className = 'detection-score ' +
                             (confidence > 0.7 ? 'high' : confidence > 0.5 ? 'medium' : 'low');
                     }
+                    
+                    // One rectangle only: the overlay already drew the box, so
+                    // hide the static alignment frame instead of moving it on top.
+                    const cardFrame = document.getElementById('card-frame');
+                    if (cardFrame) cardFrame.style.display = 'none';
+                    
+                    if (statusElement) {
+                        statusElement.textContent = `Card detected: ${Math.round(confidence * 100)}% confidence`;
+                        statusElement.className = 'detection-status found';
+                    }
+                    
+                    if (debugSection) debugSection.classList.add('hidden');
+                    
+                    resolve(result);
+                } else {
+                    if (scoreElement) scoreElement.textContent = '';
+                    
+                    if (statusElement) {
+                        statusElement.textContent = 'Point camera at a card';
+                        statusElement.className = 'detection-status detecting';
+                    }
+                    
+                    if (debugSection) debugSection.classList.add('hidden');
+                    
+                    // No card — show the static alignment frame again
+                    const cf = document.getElementById('card-frame');
+                    if (cf) cf.style.display = '';
+                    
+                    resolve(null);
                 }
-                
-                return result;
-            } else {
-                // No card detected
-                const overlayCtx = overlay.getContext('2d');
-                overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-                
-                // Update frame state - no card
-                const cardFrame = document.getElementById('card-frame');
-                if (cardFrame) {
-                    cardFrame.classList.remove('detected');
-                    cardFrame.classList.add('active');
-                }
-
-                if (statusElement) {
-                    statusElement.textContent = 'Point camera at a card';
-                    statusElement.className = 'detection-status detecting';
-                }
-                
-                if (debugSection) {
-                    debugSection.classList.add('hidden');
-                }
+            } catch (err) {
+                console.error('Detection error:', err);
+                resolve(null);
             }
-        } catch (err) {
-            console.error('Detection error:', err);
-        }
-    }, 'image/jpeg', 0.9);
-    
-    return null;
+        }, 'image/jpeg', 0.9);
+    });
 }
 
 // ============================================

@@ -2602,3 +2602,23 @@ body {
 .camera-section:not(.hidden) .auto-detect-toggle {
     padding: 12px; background: #000;
 }
+
+/* Floating scan overlay in fullscreen camera mode */
+.scan-overlay {
+    position: absolute; top: 10px; right: 10px; bottom: 10px; z-index: 6;
+    width: min(300px, 34vw); display: flex; flex-direction: column; gap: 10px;
+    pointer-events: none;
+}
+.scan-overlay .so-result, .scan-overlay .queue-panel { pointer-events: auto; }
+.so-result {
+    background: rgba(13,17,23,0.85); border: 1px solid var(--border, #30363d);
+    border-radius: 10px; padding: 10px; color: #fff;
+    font-size: 0.85rem; display: flex; align-items: center; gap: 10px;
+}
+.so-result img { width: 52px; height: 73px; object-fit: contain; border-radius: 6px; }
+.so-result .so-name { font-weight: 700; }
+.so-result .so-meta { font-size: 0.72rem; color: var(--text-muted, #8b949e); }
+.so-result .so-score { margin-left: auto; font-weight: 700; color: #3fb950; }
+.so-empty { color: var(--text-muted, #8b949e); }
+.scan-overlay .queue-panel { flex: 1; min-height: 0; background: rgba(13,17,23,0.85); display: flex; flex-direction: column; }
+.scan-overlay .queue-list { flex: 1; max-height: none; }

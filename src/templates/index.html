@@ -145,13 +145,16 @@
                                 <button id="stop-camera-btn" class="btn btn-secondary">Stop</button>
                             </div>
                             <div class="auto-detect-toggle">
-                                <label class="toggle-label">
-                                    <input type="checkbox" id="auto-detect-toggle" checked>
-                                    <span class="toggle-text">Auto-capture when card detected</span>
-                                </label>
                                 <div id="detection-status" class="detection-status">Point camera at a card</div>
                             </div>
                             <canvas id="camera-canvas" hidden></canvas>
+                            <!-- Floating overlay: live identification + review queue -->
+                            <div id="scan-overlay" class="scan-overlay">
+                                <div id="scan-overlay-result" class="so-result">
+                                    <span class="so-empty">Scanning…</span>
+                                </div>
+                                <div id="review-queue-overlay" class="queue-panel"></div>
+                            </div>
                         </div>
 
                         <!-- Preview -->
