@@ -480,6 +480,10 @@ if (scanBtn) {
         
         const resultDiv = document.getElementById('scan-result');
         resultDiv.innerHTML = '<div class="loading"><div class="spinner"></div><p>Identifying card...</p></div>';
+        const soEl = document.getElementById('scan-overlay-result');
+        if (soEl && !document.getElementById('camera-section').classList.contains('hidden')) {
+            soEl.innerHTML = '<span class="so-empty">Identifying…</span>';
+        }
         
         const formData = new FormData();
         formData.append('image', currentImage);
@@ -610,6 +614,10 @@ function displayScanResult(data, container) {
     // Auto-enqueue the top cloud match into the shared review queue
     if (data.decision === 'match' && data.candidates.length > 0) {
       const c = data.candidates[0];
+      // Always update the fullscreen glass with the latest identification,
+      // regardless of whether the card was already in the queue (RQ.add
+      // returns false on dedupe — that's not a reason to stop showing it).
+      updateScanOverlay(c);
       if (c.id && RQ.add({
         id: c.id,
         name: c.name || c.id,
@@ -620,7 +628,6 @@ function displayScanResult(data, container) {
       })) {
         if (window.refreshReviewQueues) window.refreshReviewQueues();
       }
-      updateScanOverlay(c);
       // Auto-capture loop: if the top match is confident, keep scanning
       // (only when the camera is active — upload mode is a one-shot)
       if (window.__autoScan && window.__autoScan.active) {
@@ -1698,6 +1705,25 @@ displayScanResult = async function(data, container) {
                     `;
                 });
                 container.innerHTML += '</div></div>';
+            }
+            
+            // Fullscreen glass + review queue + auto-scan: the override must
+            // not skip the hooks the base implementation had, or the camera
+            // overlay stays "Identifying…" while results land off-screen.
+            const c = card;
+            updateScanOverlay({ ...c, name: details.basic_info.name || c.name, similarity: c.similarity || 0 });
+            if (cardId && RQ.add({
+                id: cardId,
+                name: details.basic_info.name || c.name || cardId,
+                meta: [details.basic_info.number, details.basic_info.rarity, details.basic_info.set?.name].filter(Boolean).join(' · '),
+                img: detailImg,
+                score: c.similarity || 0,
+                source: 'cloud',
+            })) {
+                if (window.refreshReviewQueues) window.refreshReviewQueues();
+            }
+            if (window.__autoScan && window.__autoScan.active) {
+                window.__autoScan.check(c.similarity || 0);
             }
             
             return;
