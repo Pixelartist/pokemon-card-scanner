@@ -633,9 +633,9 @@ function displayScanResult(data, container) {
 }
 
 // ── Auto-scan loop (cloud) ────────────────────────────────────────
-// Triggered by the toggle button next to Capture. When the top CLIP
-// match is >= 88%, it re-captures after a brief pause so the user can
-// flip the card and keep scanning. Upload mode is single-shot.
+// Triggered by the toggle button. When the top CLIP match is >= 88% it
+// re-captures after a brief pause so the user can flip the card and keep
+// scanning. Upload mode is single-shot.
 window.__autoScan = {
   active: false,
   THRESHOLD: 0.88,
@@ -646,12 +646,18 @@ window.__autoScan = {
       btn.textContent = this.active ? '⏹ Auto-Scan: ON' : '▶ Auto-Scan: OFF';
       btn.classList.toggle('active', this.active);
     }
+    // Start the loop right away: the first capture must not wait for a
+    // previous score, or the button looks like it does nothing.
     if (this.active) this.capture();
   },
   // Capture a fresh frame and identify it. The result handler calls check()
   // and, on a high-confidence match, calls capture() again.
   capture() {
     if (!this.active) return;
+    // Only auto-capture from the live camera; upload mode is one-shot.
+    const cam = document.getElementById('camera-section');
+    if (!cam || cam.classList.contains('hidden')) return;
+    if (!cameraStream) startCamera(); // re-arm if the user left camera mode
     capturePhoto(true);
   },
   async check(score) {
