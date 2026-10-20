@@ -32,7 +32,7 @@ async function postMisread(payload) {
   }
 }
 
-export function _createCorrectionUI() {
+function _createCorrectionUI() {
   const btn = document.createElement('button');
   btn.className = 'correction';
   btn.textContent = '✗ Not this?';
@@ -71,7 +71,7 @@ export function _createCorrectionUI() {
   };
   return btn;
 }
-export function mountReviewQueue(root, opts = {}) {
+function mountReviewQueue(root, opts = {}) {
   function render() {
     const items = RQ.load();
     root.innerHTML = `
