@@ -538,10 +538,17 @@ window.__cardScanner = {
     if (!det || det.confidence < 30) return null;
     const { cropCardStraight } = await import('/static/js/card-detector-tfjs.js');
     const crop = cropCardStraight(source, det);
-    // 85 mirrors the local scanner's match threshold
-    const matches = await this.matcher.match(crop, 85, 5);
+    // Gate at 78 (not 85): real photos score well below reference-image
+    // similarity (~92), so the old cutoff silently dropped near-matches.
+    // check() still requires >= THRESHOLD for the auto-capture toast.
+    // bestSimilarity is returned even below the gate so the UI can show
+    // how close the near-miss was instead of failing silently.
+    const all = await this.matcher.match(crop, 0, 5);
+    const matches = all.filter(m => m.similarity >= 78);
+    const bestSimilarity = all.length ? all[0].similarity / 100 : 0;
     return {
       detection: det,
+      bestSimilarity,
       cropDataUrl: matches.length ? crop.toDataURL('image/jpeg', 0.92) : null,
       candidates: matches.map(m => ({
         id: m.id,
@@ -595,6 +602,7 @@ if (scanBtn) {
                     }
                     // Nothing matched locally — send this exact frame to the
                     // cloud identifier instead of an older captured blob.
+                    lastBrowserBest = res ? (res.bestSimilarity || 0) : 0;
                     currentImage = await new Promise(r => snap.toBlob(r, 'image/jpeg', 0.9));
                 } catch (e) {
                     console.warn('[Scanner] browser identify failed, using cloud:', e);
@@ -774,7 +782,9 @@ function displayScanResult(data, container) {
       }
     } else {
       const el = document.getElementById('scan-overlay-result');
-      if (el) el.innerHTML = '<span class="so-empty">No confident match — move the card closer</span>';
+      // Show the best browser-hash score so a near-miss is visible, not silent.
+      const bestPct = lastBrowserBest ? ` (best ${Math.round(lastBrowserBest * 100)}%)` : '';
+      if (el) el.innerHTML = `<span class="so-empty">No confident match${bestPct} — move the card closer</span>`;
       if (window.__autoScan && window.__autoScan.active) window.__autoScan.retry(2000);
     }
 }
@@ -804,7 +814,28 @@ window.__autoScan = {
   // or retry(), otherwise the loop dies silently.
   retry(ms = 2000) {
     if (!this.active) return;
+    this._startCountdown(ms);
     setTimeout(() => this.capture(), ms);
+  },
+  // After a successful match the scanner holds for `holdMs` so the user can
+  // swap cards; a live countdown is shown instead of a dead 2.5s pause.
+  hold(ms = 2500) {
+    if (!this.active) return;
+    this._startCountdown(ms);
+    setTimeout(() => this.capture(), ms);
+  },
+  // Live countdown on the scan overlay: "3… 2… 1… scanning next"
+  _startCountdown(ms) {
+    const overlay = document.getElementById('scan-overlay-result');
+    if (!overlay) return;
+    const end = Date.now() + ms;
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
+      overlay.innerHTML = `<span class="so-empty">${left > 0 ? 'Scanning next in ' + left + '…' : 'Scanning next…'}</span>`;
+      if (left <= 0) return;
+      setTimeout(tick, 250);
+    };
+    tick();
   },
   // Capture a fresh frame and identify it. The result handler calls check()
   // and, on a high-confidence match, calls capture() again.
@@ -838,9 +869,8 @@ window.__autoScan = {
     this.lastTime = now;
     const pct = (score * 100).toFixed(1);
     showToast(`✓ Auto-captured high-confidence match (${pct}%)`);
-    // Longer pause: short enough to feel flowing, long enough that the
-    // next frame is the NEXT card rather than the same one half-turned.
-    this.retry(2500);
+    // Hold so the user can swap cards; the countdown makes the wait visible.
+    this.hold(2500);
   },
 };
 
@@ -1474,6 +1504,7 @@ document.getElementById('stop-camera-btn').addEventListener('click', () => {
 // single green bounding box while the camera is open. Auto-capture is driven
 // by the Auto-Scan button + CLIP confidence, not by this loop.
 let liveDetectionInterval = null;
+let lastBrowserBest = 0; // best browser-hash similarity of the last scan (near-miss display)
 
 function startLiveDetection() {
     if (liveDetectionInterval) return;
@@ -1941,6 +1972,9 @@ async function detectCardInFrame() {
     if (det && det.points) {
         const confidence = (det.confidence || 0) / 100; // detector reports 0-100
         const pts = det.points;
+
+        // Record last YOLO detection time and clear any stale "no card" state
+        lastCardSeenAt = Date.now();
 
         octx.strokeStyle = confidence > 0.7 ? '#4ecca3' : confidence > 0.5 ? '#ffa500' : '#e94560';
         octx.lineWidth = Math.max(3, overlay.width / 250);
