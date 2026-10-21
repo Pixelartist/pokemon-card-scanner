@@ -527,6 +527,8 @@ if (scanBtn) {
             } else {
                 resultDiv.innerHTML = '<p class="error">Error scanning card: ' + error.message + '</p>';
             }
+            // Keep the auto-scan loop alive across transient scan failures.
+            if (window.__autoScan && window.__autoScan.active) window.__autoScan.retry(3000);
         }
     });
 }
@@ -554,17 +556,26 @@ function displayScanResult(data, container) {
             actionButton = '<button class="btn btn-primary" onclick="window.open(\'https://pokemontcgapi.com/account\', \'_blank\')">Verify Email</button>';
         }
         container.innerHTML = `<div class="card-result"><h3>Error</h3><p>${errorMsg}</p>${actionButton}</div>`;
+        // Persistent errors (API key, verification) — stop auto-scan loudly
+        // instead of dying silently or retry-looping on a broken config.
+        if (window.__autoScan && window.__autoScan.active) {
+            window.__autoScan.toggle();
+            showToast('Auto-scan stopped: ' + errorMsg.split('\n')[0]);
+        }
         return;
     }
     
     if (data.decision === 'no_match') {
         container.innerHTML = '<div class="card-result"><h3>No Match Found</h3><p>No matching card found. Try a clearer image, or use the manual search below to find and add your card.</p></div>';
         const panel = document.getElementById('manual-search-panel');
-        if (panel) {
+        if (panel && !(window.__autoScan && window.__autoScan.active)) {
             const inp = document.getElementById('manual-search-input');
             if (inp) inp.focus();
             panel.scrollIntoView({behavior: 'smooth', block: 'center'});
         }
+        // Keep the auto-scan loop alive — a no-match frame just means the
+        // card moved; try again shortly.
+        if (window.__autoScan && window.__autoScan.active) window.__autoScan.retry(2000);
         return;
     }
     
@@ -633,11 +644,12 @@ function displayScanResult(data, container) {
       // Auto-capture loop: if the top match is confident, keep scanning
       // (only when the camera is active — upload mode is a one-shot)
       if (window.__autoScan && window.__autoScan.active) {
-        window.__autoScan.check(c.similarity || 0);
+        window.__autoScan.check(c.similarity || 0, c.id);
       }
     } else {
       const el = document.getElementById('scan-overlay-result');
       if (el) el.innerHTML = '<span class="so-empty">No confident match — move the card closer</span>';
+      if (window.__autoScan && window.__autoScan.active) window.__autoScan.retry(2000);
     }
 }
 
@@ -648,6 +660,8 @@ function displayScanResult(data, container) {
 window.__autoScan = {
   active: false,
   THRESHOLD: 0.88,
+  lastId: null,
+  lastTime: 0,
   toggle() {
     this.active = !this.active;
     const btn = document.getElementById('auto-scan-btn');
@@ -657,7 +671,14 @@ window.__autoScan = {
     }
     // Start the loop right away: the first capture must not wait for a
     // previous score, or the button looks like it does nothing.
-    if (this.active) this.capture();
+    if (this.active) { this.lastId = null; this.capture(); }
+  },
+  // Re-capture after a delay while auto-scan is still on. Every terminal
+  // result path (match / no-match / error) must funnel through capture()
+  // or retry(), otherwise the loop dies silently.
+  retry(ms = 2000) {
+    if (!this.active) return;
+    setTimeout(() => this.capture(), ms);
   },
   // Capture a fresh frame and identify it. The result handler calls check()
   // and, on a high-confidence match, calls capture() again.
@@ -674,13 +695,26 @@ window.__autoScan = {
       if (this.active) capturePhoto(true);
     })();
   },
-  async check(score) {
-    if (score >= this.THRESHOLD) {
-      const pct = (score * 100).toFixed(1);
-      showToast(`✓ Auto-captured high-confidence match (${pct}%)`);
-      await new Promise(r => setTimeout(r, 1500));
-      this.capture();
+  async check(score, id) {
+    if (score < this.THRESHOLD) {
+      // Weak match — keep scanning instead of stalling forever.
+      this.retry(2000);
+      return;
     }
+    // Same card still sitting in front of the camera: don't toast it again,
+    // just wait for the user to swap cards and re-check quietly.
+    const now = Date.now();
+    if (id && id === this.lastId && now - this.lastTime < 8000) {
+      this.retry(1500);
+      return;
+    }
+    this.lastId = id || null;
+    this.lastTime = now;
+    const pct = (score * 100).toFixed(1);
+    showToast(`✓ Auto-captured high-confidence match (${pct}%)`);
+    // Longer pause: short enough to feel flowing, long enough that the
+    // next frame is the NEXT card rather than the same one half-turned.
+    this.retry(2500);
   },
 };
 
@@ -1727,7 +1761,7 @@ displayScanResult = async function(data, container) {
                 if (window.refreshReviewQueues) window.refreshReviewQueues();
             }
             if (window.__autoScan && window.__autoScan.active) {
-                window.__autoScan.check(c.similarity || 0);
+                window.__autoScan.check(c.similarity || 0, cardId || c.id);
             }
             
             return;
