@@ -1824,10 +1824,12 @@ async function detectCardInFrame() {
                 const scale = Math.min(dw / vw, dh / vh);
                 const dx = (dw - vw * scale) / 2;
                 const dy = (dh - vh * scale) / 2;
-                overlay.width = Math.round(vw * scale);
-                overlay.height = Math.round(vh * scale);
-                overlay.style.width = dw + 'px';
-                overlay.style.height = dh + 'px';
+                // Size the overlay canvas to the DISPLAYED rect so the CSS
+                // doesn't stretch it non-uniformly after drawing. The
+                // setTransform maps native video coords directly to display
+                // coords through the contain-fit math.
+                overlay.width = Math.round(dw);
+                overlay.height = Math.round(dh);
                 const octx = overlay.getContext('2d');
                 octx.clearRect(0, 0, overlay.width, overlay.height);
                 octx.setTransform(scale, 0, 0, scale, dx, dy);

@@ -233,6 +233,23 @@ async def scan_card(
         scan_relative_path = f"scans/{scan_filename}"
 
         client = get_client()
+        from services.card_detector import get_detector
+        detector = get_detector()
+        detection = await asyncio.to_thread(detector.detect_card, image_bytes)
+        if not detection.get("found") or not detection.get("bbox"):
+            return JSONResponse({
+                "decision": "no_match",
+                "decision_reason": "No card detected in the frame — point the camera at a card",
+                "candidates": [],
+                "meta": {
+                    "source": "card_detector",
+                    "detector_type": detection.get("detector_type", "numpy"),
+                    "confidence": detection.get("confidence", 0.0),
+                    "cards_indexed": 0,
+                },
+                "scan_image_path": scan_relative_path,
+            })
+
         # Run CLIP/inference work off the event loop so /health stays responsive
         result = await asyncio.to_thread(
             client.identify_card,

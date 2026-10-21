@@ -30,7 +30,7 @@ class CardDetector:
     
     # YOLOv8 configuration — absolute path so loading works regardless of CWD
     YOLOV8_MODEL_NAME = os.path.abspath(os.path.join(
-        os.path.dirname(__file__), "..", "..", "src", "models", "pokemon_card_yolo.pt"))
+        os.path.dirname(__file__), "..", "..", "src", "models", "best.pt"))
     YOLO_CONF_THRESHOLD = 0.5
     YOLO_IOU_THRESHOLD = 0.45
     
