@@ -1811,10 +1811,26 @@ async function detectCardInFrame() {
                 
                 const result = await response.json();
                 
-                overlay.width = video.videoWidth;
-                overlay.height = video.videoHeight;
+                // The API returns bbox in native-image pixels. The video
+                // element is displayed with object-fit:contain and may be
+                // stretched by flex, so we must size the overlay to match the
+                // *visible* rectangle and scale the bbox through the same
+                // contain-fit transform. Drawing at native resolution while
+                // the element is smaller/centered puts the box over empty
+                // space (the bug that made it look like it detected "nothing").
+                const vw = video.videoWidth, vh = video.videoHeight;
+                const rect = video.getBoundingClientRect();
+                const dw = rect.width, dh = rect.height;
+                const scale = Math.min(dw / vw, dh / vh);
+                const dx = (dw - vw * scale) / 2;
+                const dy = (dh - vh * scale) / 2;
+                overlay.width = Math.round(vw * scale);
+                overlay.height = Math.round(vh * scale);
+                overlay.style.width = dw + 'px';
+                overlay.style.height = dh + 'px';
                 const octx = overlay.getContext('2d');
                 octx.clearRect(0, 0, overlay.width, overlay.height);
+                octx.setTransform(scale, 0, 0, scale, dx, dy);
                 
                 if (result.found && result.bbox) {
                     const [x, y, w, h] = result.bbox;
