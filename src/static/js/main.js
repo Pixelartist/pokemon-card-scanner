@@ -474,8 +474,134 @@ async function loadLanguagePreference() {
 
 
 const scanBtn = document.getElementById('scan-btn');
+
+// ── Browser-side scanner (1vcian architecture) ────────────────────
+// YOLO11-Nano OBB detection + perceptual-hash matching run locally in
+// this page (same TF.js weights as 1vcian/Pokemon-TCGP-Card-Scanner).
+// window.__cardScanner.tryIdentify(source) returns { detection, candidates,
+// cropCanvas } when the local hash index matches, or null when the card
+// isn't in the local index — caller then falls back to the cloud /api/scan.
+window.__cardScanner = {
+  detector: null,
+  matcher: null,
+  ready: false,
+  loading: null,
+
+  init() {
+    if (this.loading) return this.loading;
+    this.loading = (async () => {
+      try {
+        const [detMod, hashMod] = await Promise.all([
+          import('/static/js/card-detector-tfjs.js'),
+          import('/static/js/perceptual-hash.js'),
+        ]);
+        this.detector = new detMod.PokemonCardDetector();
+        this.matcher = new hashMod.PerceptualHashMatcher();
+        const [ids, meta, hashes] = await Promise.all([
+          fetch('/static/card-ids.json').then(r => r.json()),
+          fetch('/static/cards_meta.json').then(r => r.json()),
+          fetch('/static/card-hashes.json').then(r => r.json()).catch(() => ({})),
+        ]);
+        this.matcher.loadIndex(ids.map((id, i) => ({
+          id,
+          name: meta[i]?.name || id,
+          set: meta[i]?.set,
+          number: meta[i]?.number,
+          rarity: meta[i]?.rarity,
+          image: meta[i]?.image,
+          hash: hashes[id] || null,
+        })));
+        await this.detector.loadModel('/static/model/model.json');
+        this.ready = true;
+        console.log('[Scanner] Browser-side detector + hash index ready');
+      } catch (e) {
+        console.warn('[Scanner] Browser-side init failed; cloud-only mode:', e);
+        this.ready = false;
+      }
+    })();
+    return this.loading;
+  },
+
+  // Detect a card in the source element (canvas/img). Returns the OBB
+  // detection with the highest confidence, or null.
+  async detect(source) {
+    if (!this.ready) return null;
+    const detections = await this.detector.detect(source);
+    if (!detections || !detections.length) return null;
+    return detections[0];
+  },
+
+  // Detect + straighten-crop + hash-match in one shot.
+  async tryIdentify(source) {
+    if (!this.ready) return null;
+    const det = await this.detect(source);
+    if (!det || det.confidence < 30) return null;
+    const { cropCardStraight } = await import('/static/js/card-detector-tfjs.js');
+    const crop = cropCardStraight(source, det);
+    // 85 mirrors the local scanner's match threshold
+    const matches = await this.matcher.match(crop, 85, 5);
+    return {
+      detection: det,
+      cropDataUrl: matches.length ? crop.toDataURL('image/jpeg', 0.92) : null,
+      candidates: matches.map(m => ({
+        id: m.id,
+        name: m.name,
+        number: m.number,
+        rarity: m.rarity,
+        similarity: (m.similarity || 0) / 100, // normalize to 0..1
+        image_url: m.image || '',
+        card: {
+          id: m.id, name: m.name, number: m.number, rarity: m.rarity,
+          set: { name: m.set }, images: { small: m.image, large: m.image },
+        },
+      })),
+    };
+  },
+};
+// Start loading as soon as the page is up; detection works ~2s after load.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => window.__cardScanner.init());
+} else {
+  window.__cardScanner.init();
+}
+
 if (scanBtn) {
     scanBtn.addEventListener('click', async function() {
+        const cameraOpen = !document.getElementById('camera-section').classList.contains('hidden');
+
+        // Fast path (1vcian architecture): while the camera is open, detect +
+        // hash-match the live frame right here in the browser — YOLO11 OBB
+        // finds the card, the OBB angle straightens the crop, the pHash index
+        // names it. No server round-trip; falls through to /api/scan when the
+        // local index has no match or the detector isn't ready yet.
+        if (cameraOpen && window.__cardScanner && window.__cardScanner.ready) {
+            const video = document.getElementById('camera-preview');
+            if (video && video.videoWidth) {
+                const snap = document.createElement('canvas');
+                snap.width = video.videoWidth;
+                snap.height = video.videoHeight;
+                snap.getContext('2d').drawImage(video, 0, 0);
+                try {
+                    const res = await window.__cardScanner.tryIdentify(snap);
+                    if (res && res.candidates.length) {
+                        displayScanResult({
+                            decision: 'match',
+                            candidates: res.candidates,
+                            scan_image_path: null,
+                            crop_image_path: null,
+                            meta: { source: 'browser_hash' },
+                        }, document.getElementById('scan-result'));
+                        return;
+                    }
+                    // Nothing matched locally — send this exact frame to the
+                    // cloud identifier instead of an older captured blob.
+                    currentImage = await new Promise(r => snap.toBlob(r, 'image/jpeg', 0.9));
+                } catch (e) {
+                    console.warn('[Scanner] browser identify failed, using cloud:', e);
+                }
+            }
+        }
+
         if (!currentImage) return;
         
         const resultDiv = document.getElementById('scan-result');
@@ -1351,11 +1477,16 @@ let liveDetectionInterval = null;
 
 function startLiveDetection() {
     if (liveDetectionInterval) return;
+    let running = false;
     liveDetectionInterval = setInterval(async () => {
         const camVisible = !document.getElementById('camera-section').classList.contains('hidden');
         if (!camVisible) { stopLiveDetection(); return; }
-        await detectCardInFrame();
-    }, 4000); // Detection takes ~20s on the NAS CPU; polling faster just queues work
+        // Browser-side YOLO11 OBB: inference is ~100-400ms locally instead of
+        // ~20s on the NAS CPU, so the green box tracks the card in near real-time.
+        if (running || !window.__cardScanner || !window.__cardScanner.ready) return;
+        running = true;
+        try { await detectCardInFrame(); } finally { running = false; }
+    }, 700);
 }
 
 function stopLiveDetection() {
@@ -1778,124 +1909,75 @@ displayScanResult = async function(data, container) {
 // Card detection functions
 async function detectCardInFrame() {
     const video = document.getElementById('camera-preview');
-    const canvas = document.getElementById('camera-canvas');
     const overlay = document.getElementById('detection-overlay');
-    const debugSection = document.getElementById('detection-debug');
-    const debugCanvas = document.getElementById('debug-canvas');
     const scoreElement = document.getElementById('detection-score');
     const statusElement = document.getElementById('detection-status');
-    
-    if (!video || !canvas || !overlay) return null;
-    
-    // Draw current video frame to canvas
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
-    
-    // Convert to blob for API call — return the promise so callers can
-    // `await` the detection result instead of always getting null.
-    return new Promise((resolve) => {
-        canvas.toBlob(async (blob) => {
-            if (!blob) { resolve(null); return; }
-            
-            const formData = new FormData();
-            formData.append('image', blob, 'frame.jpg');
+    if (!video || !overlay || !video.videoWidth) return null;
 
-            try {
-                const response = await fetch('/api/detect', {
-                    method: 'POST',
-                    body: formData,
-                    signal: AbortSignal.timeout(120000)
-                });
-                
-                const result = await response.json();
-                
-                // The API returns bbox in native-image pixels. The video
-                // element is displayed with object-fit:contain and may be
-                // stretched by flex, so we must size the overlay to match the
-                // *visible* rectangle and scale the bbox through the same
-                // contain-fit transform. Drawing at native resolution while
-                // the element is smaller/centered puts the box over empty
-                // space (the bug that made it look like it detected "nothing").
-                const vw = video.videoWidth, vh = video.videoHeight;
-                const rect = video.getBoundingClientRect();
-                const dw = rect.width, dh = rect.height;
-                const scale = Math.min(dw / vw, dh / vh);
-                const dx = (dw - vw * scale) / 2;
-                const dy = (dh - vh * scale) / 2;
-                // Size the overlay canvas to the DISPLAYED rect so the CSS
-                // doesn't stretch it non-uniformly after drawing. The
-                // setTransform maps native video coords directly to display
-                // coords through the contain-fit math.
-                overlay.width = Math.round(dw);
-                overlay.height = Math.round(dh);
-                const octx = overlay.getContext('2d');
-                octx.clearRect(0, 0, overlay.width, overlay.height);
-                octx.setTransform(scale, 0, 0, scale, dx, dy);
-                
-                if (result.found && result.bbox) {
-                    const [x, y, w, h] = result.bbox;
-                    const confidence = result.confidence || result.score || 0;
-                    
-                    // Single green rectangle: stroke + corner brackets + % label
-                    octx.strokeStyle = confidence > 0.7 ? '#4ecca3' : confidence > 0.5 ? '#ffa500' : '#e94560';
-                    octx.lineWidth = Math.max(3, overlay.width / 250);
-                    octx.strokeRect(x, y, w, h);
-                    
-                    const markerSize = Math.min(w, h) * 0.12;
-                    octx.beginPath();
-                    octx.moveTo(x, y + markerSize); octx.lineTo(x, y); octx.lineTo(x + markerSize, y);
-                    octx.moveTo(x + w - markerSize, y); octx.lineTo(x + w, y); octx.lineTo(x + w, y + markerSize);
-                    octx.moveTo(x + w, y + h - markerSize); octx.lineTo(x + w, y + h); octx.lineTo(x + w - markerSize, y + h);
-                    octx.moveTo(x, y + h - markerSize); octx.lineTo(x, y + h); octx.lineTo(x + markerSize, y + h);
-                    octx.stroke();
-                    
-                    octx.fillStyle = octx.strokeStyle;
-                    octx.font = `bold ${Math.max(16, overlay.width / 40)}px Inter, sans-serif`;
-                    octx.fillText(`${Math.round(confidence * 100)}%`, x + 8, y - 8);
-                    
-                    if (scoreElement) {
-                        scoreElement.textContent = `Detection Score: ${Math.round(confidence * 100)}%`;
-                        scoreElement.className = 'detection-score ' +
-                            (confidence > 0.7 ? 'high' : confidence > 0.5 ? 'medium' : 'low');
-                    }
-                    
-                    // One rectangle only: the overlay already drew the box, so
-                    // hide the static alignment frame instead of moving it on top.
-                    const cardFrame = document.getElementById('card-frame');
-                    if (cardFrame) cardFrame.style.display = 'none';
-                    
-                    if (statusElement) {
-                        statusElement.textContent = `Card detected: ${Math.round(confidence * 100)}% confidence`;
-                        statusElement.className = 'detection-status found';
-                    }
-                    
-                    if (debugSection) debugSection.classList.add('hidden');
-                    
-                    resolve(result);
-                } else {
-                    if (scoreElement) scoreElement.textContent = '';
-                    
-                    if (statusElement) {
-                        statusElement.textContent = 'Point camera at a card';
-                        statusElement.className = 'detection-status detecting';
-                    }
-                    
-                    if (debugSection) debugSection.classList.add('hidden');
-                    
-                    // No card — show the static alignment frame again
-                    const cf = document.getElementById('card-frame');
-                    if (cf) cf.style.display = '';
-                    
-                    resolve(null);
-                }
-            } catch (err) {
-                console.error('Detection error:', err);
-                resolve(null);
-            }
-        }, 'image/jpeg', 0.9);
-    });
+    // Browser-side YOLO11 OBB — the detection polygon is drawn through the
+    // same contain-fit transform the video uses, so the box always sits on
+    // the card regardless of CSS size/aspect (server /api/detect is gone
+    // from this path; it was a 20s NAS round-trip for a 0.2s local job).
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const rect = video.getBoundingClientRect();
+    const dw = rect.width, dh = rect.height;
+    const scale = Math.min(dw / vw, dh / vh);
+    const dx = (dw - vw * scale) / 2;
+    const dy = (dh - vh * scale) / 2;
+    overlay.width = Math.round(dw);
+    overlay.height = Math.round(dh);
+    const octx = overlay.getContext('2d');
+    octx.clearRect(0, 0, overlay.width, overlay.height);
+    octx.setTransform(scale, 0, 0, scale, dx, dy);
+
+    let det = null;
+    try {
+        det = await window.__cardScanner.detect(video);
+    } catch (err) {
+        console.error('Detection error:', err);
+        return null;
+    }
+
+    if (det && det.points) {
+        const confidence = (det.confidence || 0) / 100; // detector reports 0-100
+        const pts = det.points;
+
+        octx.strokeStyle = confidence > 0.7 ? '#4ecca3' : confidence > 0.5 ? '#ffa500' : '#e94560';
+        octx.lineWidth = Math.max(3, overlay.width / 250);
+        octx.beginPath();
+        octx.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length; i++) octx.lineTo(pts[i][0], pts[i][1]);
+        octx.closePath();
+        octx.stroke();
+
+        octx.fillStyle = octx.strokeStyle;
+        octx.font = `bold ${Math.max(16, overlay.width / 40)}px Inter, sans-serif`;
+        const minX = Math.min(...pts.map(p => p[0]));
+        const minY = Math.min(...pts.map(p => p[1]));
+        octx.fillText(`${Math.round(confidence * 100)}%`, minX + 8, Math.max(20, minY - 8));
+
+        if (scoreElement) {
+            scoreElement.textContent = `Detection Score: ${Math.round(confidence * 100)}%`;
+            scoreElement.className = 'detection-score ' +
+                (confidence > 0.7 ? 'high' : confidence > 0.5 ? 'medium' : 'low');
+        }
+        const cardFrame = document.getElementById('card-frame');
+        if (cardFrame) cardFrame.style.display = 'none';
+        if (statusElement) {
+            statusElement.textContent = `Card detected: ${Math.round(confidence * 100)}% confidence`;
+            statusElement.className = 'detection-status found';
+        }
+        return det;
+    }
+
+    if (scoreElement) scoreElement.textContent = '';
+    if (statusElement) {
+        statusElement.textContent = 'Point camera at a card';
+        statusElement.className = 'detection-status detecting';
+    }
+    const cf = document.getElementById('card-frame');
+    if (cf) cf.style.display = '';
+    return null;
 }
 
 // ============================================

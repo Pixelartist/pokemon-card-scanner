@@ -236,7 +236,7 @@ class PokemonTCGClient:
         # First try to get from offline database if available
         try:
             # Check if we have local database
-            db_path = Path("/opt/data/pokemon-card-scanner/data/pokemon_cards.db")
+            db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
             if db_path.exists() and os.path.getsize(db_path) > 0:
                 conn = sqlite3.connect(db_path)
                 conn.row_factory = sqlite3.Row

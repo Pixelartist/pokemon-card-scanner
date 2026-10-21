@@ -35,20 +35,33 @@ def dct_2d(pixels):
 
 
 def perceptual_hash(img):
-    img = img.convert("RGB").resize((HASH_SIZE, HASH_SIZE), Image.Resampling.LANCZOS)
+    # BILINEAR matches the browser canvas resampling (imageSmoothingQuality='high').
+    # LANCZOS/NEAREST produce different pixels -> completely different hashes.
+    img = img.convert("RGB").resize((HASH_SIZE, HASH_SIZE), Image.Resampling.BILINEAR)
     arr = np.asarray(img, dtype=np.float64)
 
+    # Compute DCT per channel
+    dcts = [dct_2d(arr[:, :, ch]) for ch in range(3)]
+    
+    # Mask: 6x6 freq region, excluding DC
+    mask = np.zeros((HASH_SIZE, HASH_SIZE), dtype=bool)
+    mask[:FREQ_SIZE, :FREQ_SIZE] = True
+    mask[0, 0] = False
+    
+    # Per-channel averages
+    avgs = [dct[mask].mean() for dct in dcts]
+    
+    # JS interleaves R,G,B per frequency cell (row-major y,x order)
     hash_bits = []
-    for ch in range(3):
-        dct = dct_2d(arr[:, :, ch])
-        mask = np.zeros((HASH_SIZE, HASH_SIZE), dtype=bool)
-        mask[:FREQ_SIZE, :FREQ_SIZE] = True
-        mask[0, 0] = False
-        avg = dct[mask].mean()
-        bits = (dct[mask] > avg).astype(int)
-        hash_bits.append(bits.flatten())
+    for y in range(FREQ_SIZE):
+        for x in range(FREQ_SIZE):
+            if x == 0 and y == 0:
+                continue
+            pos = y * HASH_SIZE + x
+            for ch in range(3):
+                hash_bits.append(1 if dcts[ch][y, x] > avgs[ch] else 0)
 
-    return "".join(str(b) for b in np.concatenate(hash_bits))
+    return "".join(str(b) for b in hash_bits)
 
 
 def main():

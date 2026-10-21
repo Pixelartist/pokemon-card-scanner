@@ -637,6 +637,12 @@
 
     <!-- Load electric border glow module (shared Canvas2D implementation) -->
     <script src="/static/js/electric-glow.js?t={{ timestamp }}"></script>
+    <!-- Browser-side card detection: TF.js + YOLO11-Nano OBB weights from
+         1vcian/Pokemon-TCGP-Card-Scanner. Detection + perceptual-hash match
+         run locally on the phone/PC — the server only identifies cards. -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+    <script type="module" src="/static/js/card-detector-tfjs.js?t={{ timestamp }}"></script>
+    <script type="module" src="/static/js/perceptual-hash.js?t={{ timestamp }}"></script>
     <script src="/static/js/main.js?t={{ timestamp }}"></script>
 </body>
 </html>

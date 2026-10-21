@@ -321,9 +321,7 @@ async def add_to_collection(card_id: str = Form(...),
         # Resolve card_id - handle both string ptcg_id and integer DB ID
         import sqlite3
         from pathlib import Path
-        db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         # Try to resolve as integer DB ID first
@@ -555,9 +553,7 @@ async def get_card_crop(card_id: str,
     """
     import sqlite3
     from pathlib import Path
-    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
     try:
         cursor = conn.cursor()
         candidates = [card_id]
@@ -725,10 +721,8 @@ async def get_set_cards(set_code: str):
     import sqlite3
     from pathlib import Path
     import json
-    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     # Get set info from local DB
@@ -1038,15 +1032,13 @@ async def search_cards(query: str, limit: int = 20):
     Searches both the local DB and the full CLIP card index (~21k cards)."""
     import sqlite3
     from pathlib import Path
-    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
 
     q = query.strip().lower()
     results = []
     seen = set()
 
     # 1) Database results
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = get_db_connection()
     cursor = conn.cursor()
     search_param = f"%{q}%"
     cursor.execute(
@@ -1138,7 +1130,6 @@ CREATE TABLE IF NOT EXISTS misreads (
 
 def _misreads_conn():
     conn = get_db_connection()
-    conn.row_factory = sqlite3.Row
     conn.execute(_MISREADS_DDL)  # idempotent, covers DBs created before the table existed
     return conn
 
@@ -1217,13 +1208,11 @@ async def get_card(card_id: str):
     """Get a single card by ID (supports both ptcg_id like "me05-015" and DB PK)."""
     import sqlite3
     from pathlib import Path
-    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
     
     # Try to resolve as integer DB ID first
     try:
         db_id = int(card_id)
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_db_connection()
         row = conn.execute("SELECT * FROM cards WHERE id = ?", (db_id,)).fetchone()
         conn.close()
         if row:
@@ -1401,11 +1390,9 @@ def _cache_get(card_id: str) -> Optional[Dict[str, Any]]:
     """Get cached card metadata from SQLite."""
     try:
         import sqlite3 as _sqlite3
-        db_path = Path("/opt/data/pokemon-card-scanner/data/pokemon_cards.db")
         if not db_path.exists():
             return None
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM card_metadata WHERE card_id = ?",
@@ -1445,10 +1432,9 @@ def _cache_set(card_id: str, data: Dict[str, Any]):
     """Store card metadata in SQLite cache."""
     try:
         import sqlite3 as _sqlite3
-        db_path = Path("/opt/data/pokemon-card-scanner/data/pokemon_cards.db")
         if not db_path.exists():
             return
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection()
         cursor = conn.cursor()
         import json as _json
         from datetime import datetime
@@ -1513,10 +1499,8 @@ async def get_card_details(card_id: str):
     if card_id.isdigit():
         import sqlite3
         from pathlib import Path
-        db_path = Path(__file__).resolve().parent.parent.parent / "data" / "pokemon_cards.db"
         try:
             conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT id, ptcg_id, name, number, rarity, set_name, hp, types, images "
                 "FROM cards WHERE id = ?", (int(card_id),)

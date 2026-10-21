@@ -215,3 +215,4 @@ export class PerceptualHashMatcher {
 }
 
 export const hashMatcher = new PerceptualHashMatcher();
+window.PerceptualHashMatcher = PerceptualHashMatcher;

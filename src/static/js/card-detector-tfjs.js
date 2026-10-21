@@ -1,6 +1,7 @@
-import * as tf from '@tensorflow/tfjs';
-
-export class PokemonCardDetector {
+// Browser-side YOLO11-Nano OBB card detector — same TF.js weights and
+// pre/post-processing as 1vcian/Pokemon-TCGP-Card-Scanner. Uses the global
+// `tf` from the CDN bundle; exposed as window.PokemonCardDetector.
+class PokemonCardDetector {
   constructor() {
     this.model = null;
     this.loading = null;
@@ -44,7 +45,7 @@ export class PokemonCardDetector {
         [0, 0],
       ]);
       return tf.image
-        .resizeBilinear(imgPadded as tf.Tensor3D, [modelWidth, modelHeight])
+        .resizeBilinear(imgPadded, [modelWidth, modelHeight])
         .div(255.0)
         .expandDims(0);
     });
@@ -180,4 +181,38 @@ export class PokemonCardDetector {
   }
 }
 
-export const detector = new PokemonCardDetector();
+export const detector = new PokemonCardDetector();export { PokemonCardDetector };
+
+window.PokemonCardDetector = PokemonCardDetector;
+
+/**
+ * Rotate-crop: cut the card out of `imageEl` and straighten it using the
+ * OBB angle (same math as 1vcian's extractCardImages). Returns a canvas
+ * with the card upright, ready for perceptual-hash matching.
+ */
+export function cropCardStraight(imageEl, detection) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const angle = detection.angle || 0;
+  const { centerX, centerY, width, height } = detection;
+  if (width && height && centerX != null && centerY != null) {
+    canvas.width = Math.max(1, Math.round(width));
+    canvas.height = Math.max(1, Math.round(height));
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(-angle);
+    ctx.translate(-centerX, -centerY);
+    ctx.drawImage(imageEl, 0, 0);
+    ctx.restore();
+  } else {
+    const [x1, y1] = detection.points[0];
+    const [x2, y2] = detection.points[2];
+    const w = Math.max(1, x2 - x1);
+    const h = Math.max(1, y2 - y1);
+    canvas.width = w;
+    canvas.height = h;
+    ctx.drawImage(imageEl, x1, y1, w, h, 0, 0, w, h);
+  }
+  return canvas;
+}
+window.cropCardStraight = cropCardStraight;
