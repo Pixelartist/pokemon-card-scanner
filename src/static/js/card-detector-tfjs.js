@@ -195,24 +195,19 @@ export function cropCardStraight(imageEl, detection) {
   const ctx = canvas.getContext('2d');
   const angle = detection.angle || 0;
   const { centerX, centerY, width, height } = detection;
-  if (width && height && centerX != null && centerY != null) {
-    canvas.width = Math.max(1, Math.round(width));
-    canvas.height = Math.max(1, Math.round(height));
-    ctx.save();
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate(-angle);
-    ctx.translate(-centerX, -centerY);
-    ctx.drawImage(imageEl, 0, 0);
-    ctx.restore();
-  } else {
-    const [x1, y1] = detection.points[0];
-    const [x2, y2] = detection.points[2];
-    const w = Math.max(1, x2 - x1);
-    const h = Math.max(1, y2 - y1);
-    canvas.width = w;
-    canvas.height = h;
-    ctx.drawImage(imageEl, x1, y1, w, h, 0, 0, w, h);
-  }
+  // The detector always reports the OBB (centerX/centerY/width/height).
+  // Use it directly — the old corner-sampling fallback below produced
+  // garbage crops (raw points[0]/points[2] corners, no centering, no
+  // rotation), which is why the displayed crop showed a table edge instead
+  // of the card while the name still matched.
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  ctx.save();
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(-angle);
+  ctx.translate(-centerX, -centerY);
+  ctx.drawImage(imageEl, 0, 0);
+  ctx.restore();
   return canvas;
 }
 window.cropCardStraight = cropCardStraight;

@@ -215,8 +215,17 @@ async def scan_card(
     image: UploadFile = File(...),
     set_hint: Optional[str] = Form(None),
     region: Optional[str] = Form(None),
+    browser_crop: Optional[UploadFile] = Form(None),
 ):
-    """Identify a Pokemon card from an uploaded image."""
+    """Identify a Pokemon card from an uploaded image.
+
+    The browser-side scanner (YOLO11 OBB + pHash) already computes a
+    straightened crop of the card before this endpoint is called. When the
+    caller sends it as `browser_crop`, the server stores THAT crop instead of
+    re-running its own detector on the raw frame — which historically
+    produced garbage 140x175 crops of table edges because the numpy fallback
+    mis-detected on frames that don't even contain a card.
+    """
     try:
         image_bytes = await image.read()
         if len(image_bytes) == 0:
@@ -259,9 +268,21 @@ async def scan_card(
             region=region,
         )
 
-        # Cut the card out of the photo (detector also runs off-loop). This is
-        # a convenience for later viewing — never fail the scan over it.
-        crop_relative_path = await asyncio.to_thread(crop_card_image, image_bytes, datetime.utcnow().strftime('%Y%m%d_%H%M%S%f'))
+        # Cut the card out of the photo. Prefer the straightened crop the
+        # browser already computed (YOLO11 OBB + pHash) — it's far more
+        # reliable than re-detecting on the raw frame, which produced garbage
+        # 140x175 crops of table edges. Fall back to server-side detection.
+        crop_relative_path = None
+        if browser_crop is not None:
+            crop_bytes = await browser_crop.read()
+            if len(crop_bytes) > 0:
+                crop_ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')
+                crop_path = CROP_DIR / f"crop_{crop_ts}.jpg"
+                with open(crop_path, "wb") as f:
+                    f.write(crop_bytes)
+                crop_relative_path = f"scans/crops/crop_{crop_ts}.jpg"
+        if crop_relative_path is None:
+            crop_relative_path = await asyncio.to_thread(crop_card_image, image_bytes, datetime.utcnow().strftime('%Y%m%d_%H%M%S%f'))
 
         # If we got candidates from offline matcher, they already have image_url and name
         # If from API, we need to hydrate with full card details

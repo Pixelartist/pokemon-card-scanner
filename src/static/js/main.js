@@ -546,10 +546,15 @@ window.__cardScanner = {
     const all = await this.matcher.match(crop, 0, 5);
     const matches = all.filter(m => m.similarity >= 78);
     const bestSimilarity = all.length ? all[0].similarity / 100 : 0;
+    const cropDataUrl = matches.length ? crop.toDataURL('image/jpeg', 0.92) : null;
+    // Cache the latest straightened crop so the scan button can ship it to
+    // /api/scan — the server stores it directly instead of re-detecting on
+    // the raw frame (which produced garbage 140x175 crops of table edges).
+    if (cropDataUrl) this._lastCropDataUrl = cropDataUrl;
     return {
       detection: det,
       bestSimilarity,
-      cropDataUrl: matches.length ? crop.toDataURL('image/jpeg', 0.92) : null,
+      cropDataUrl,
       candidates: matches.map(m => ({
         id: m.id,
         name: m.name,
@@ -621,6 +626,13 @@ if (scanBtn) {
         
         const formData = new FormData();
         formData.append('image', currentImage);
+        // Send the straightened card crop the browser already computed — the
+        // server stores it directly instead of re-detecting on the raw frame
+        // (which produced garbage 140x175 crops of table edges).
+        if (window.__cardScanner && window.__cardScanner._lastCropDataUrl) {
+            const blob = await (await fetch(window.__cardScanner._lastCropDataUrl)).blob();
+            formData.append('browser_crop', blob, 'crop.jpg');
+        }
         
         const setHint = document.getElementById('set-hint').value;
         const region = document.getElementById('region').value;
