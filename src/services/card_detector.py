@@ -30,7 +30,7 @@ class CardDetector:
     
     # YOLOv8 configuration — absolute path so loading works regardless of CWD
     YOLOV8_MODEL_NAME = os.path.abspath(os.path.join(
-        os.path.dirname(__file__), "..", "..", "src", "models", "best.pt"))
+        os.path.dirname(__file__), "..", "..", "src", "models", "pokemon_card_yolo.pt"))
     YOLO_CONF_THRESHOLD = 0.5
     YOLO_IOU_THRESHOLD = 0.45
     
@@ -44,11 +44,8 @@ class CardDetector:
         self.use_yolo = use_yolo
         self.yolo_available = False
         self.yolo_model = None
-        self.detector_type = "numpy"  # Current active detector
-        
-        # Try to load YOLOv8
-        if use_yolo:
-            self._try_load_yolo()
+        self.detector_type = "numpy"  # Numpy fallback is immediate; YOLO loads on first use
+        self._yolo_init_called = False  # Track if we've attempted YOLO load
     
     def _try_load_yolo(self):
         """Attempt to load YOLOv8 model with PyTorch compatibility."""
@@ -107,10 +104,17 @@ class CardDetector:
             pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             orig_w, orig_h = pil_image.size
 
-            # Try YOLOv8 first if available
+            # Try YOLOv8 first if available (load lazily on first use)
+            if self.use_yolo and not self._yolo_init_called:
+                self._yolo_init_called = True
+                self._try_load_yolo()
+
             if self.yolo_available:
                 yolo_result = self._detect_with_yolo(pil_image)
-                if yolo_result["found"]:
+                # Gate on the same MIN_CONFIDENCE the numpy path uses — YOLO's
+                # own conf=0.5 filter still lets a 0.51 box through, and a
+                # blank wall or hand edge is exactly what that box is.
+                if yolo_result["found"] and yolo_result["confidence"] >= self.MIN_CONFIDENCE:
                     logger.info(f"YOLOv8 detection successful: {yolo_result['confidence']:.2f}")
                     return self._merge_results(result, yolo_result, orig_w, orig_h)
 
@@ -179,8 +183,9 @@ class CardDetector:
                         w = x2 - x1
                         h = y2 - y1
 
-                        # Validate bounding box
-                        if w > 0 and h > 0:
+                        # Validate bounding box: cards are portrait; a landscape box is
+                        # the model grabbing hand+background (seen with yolo.pt).
+                        if w > 0 and h > 0 and h > w:
                             result["found"] = True
                             result["bbox"] = [x1, y1, w, h]
                             result["confidence"] = float(conf)
