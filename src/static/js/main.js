@@ -492,7 +492,7 @@ window.__cardScanner = {
     this.loading = (async () => {
       try {
         const [detMod, hashMod] = await Promise.all([
-          import('/static/js/card-detector-tfjs.js'),
+          import('/static/js/card-quickdraw.js'),
           import('/static/js/perceptual-hash.js'),
         ]);
         this.detector = new detMod.PokemonCardDetector();
@@ -511,7 +511,7 @@ window.__cardScanner = {
           image: meta[i]?.image,
           hash: hashes[id] || null,
         })));
-        await this.detector.loadModel('/static/model/model.json');
+        await this.detector.loadModel();
         this.ready = true;
         console.log('[Scanner] Browser-side detector + hash index ready');
       } catch (e) {
@@ -536,7 +536,7 @@ window.__cardScanner = {
     if (!this.ready) return null;
     const det = await this.detect(source);
     if (!det || det.confidence < 30) return null;
-    const { cropCardStraight } = await import('/static/js/card-detector-tfjs.js');
+    const { cropCardStraight } = await import('/static/js/card-quickdraw.js');
     const crop = cropCardStraight(source, det);
     // Gate at 78 (not 85): real photos score well below reference-image
     // similarity (~92), so the old cutoff silently dropped near-matches.
