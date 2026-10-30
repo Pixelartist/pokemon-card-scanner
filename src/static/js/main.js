@@ -546,7 +546,10 @@ window.__cardScanner = {
     const all = await this.matcher.match(crop, 0, 5);
     const matches = all.filter(m => m.similarity >= 78);
     const bestSimilarity = all.length ? all[0].similarity / 100 : 0;
-    const cropDataUrl = matches.length ? crop.toDataURL('image/jpeg', 0.92) : null;
+    // Always produce the crop data URL — even on low local confidence — so the
+    // cloud /api/scan always receives the clean straightened card instead of a
+    // full webcam frame the numpy fallback misreads as a shoulder.
+    const cropDataUrl = crop.toDataURL('image/jpeg', 0.92);
     // Cache the latest straightened crop so the scan button can ship it to
     // /api/scan — the server stores it directly instead of re-detecting on
     // the raw frame (which produced garbage 140x175 crops of table edges).
@@ -605,10 +608,14 @@ if (scanBtn) {
                         }, document.getElementById('scan-result'));
                         return;
                     }
-                    // Nothing matched locally — send this exact frame to the
-                    // cloud identifier instead of an older captured blob.
+                    // Nothing matched locally — send the browser-detected card
+                    // CROP (straightened by the OBB angle) to the cloud, not the
+                    // full frame. The server's numpy fallback finds shoulders,
+                    // not cards; the browser YOLO already knows where the card
+                    // is, so hand the server the clean crop it can actually match.
                     lastBrowserBest = res ? (res.bestSimilarity || 0) : 0;
-                    currentImage = await new Promise(r => snap.toBlob(r, 'image/jpeg', 0.9));
+                    const uploadSrc = (res && res.cropCanvas) || snap;
+                    currentImage = await new Promise(r => uploadSrc.toBlob(r, 'image/jpeg', 0.9));
                 } catch (e) {
                     console.warn('[Scanner] browser identify failed, using cloud:', e);
                 }

@@ -46,6 +46,10 @@ class CardDetector:
         self.yolo_model = None
         self.detector_type = "numpy"  # Numpy fallback is immediate; YOLO loads on first use
         self._yolo_init_called = False  # Track if we've attempted YOLO load
+        self._quickdraw_init_called = False
+        self.quickdraw_available = False
+        self.quickdraw_session = None
+        self.quickdraw_meta = None
     
     def _try_load_yolo(self):
         """Attempt to load YOLOv8 model with PyTorch compatibility."""
@@ -79,7 +83,124 @@ class CardDetector:
             logger.error(f"Failed to load YOLOv8: {e}")
             self.yolo_available = False
             self.detector_type = "numpy"
-    
+
+    def _try_load_quickdraw(self):
+        """Load the Quickdraw corner detector (ONNX)."""
+        try:
+            import onnxruntime as ort
+
+            model_path = os.path.abspath(os.path.join(
+                os.path.dirname(__file__), "..", "models", "quickdraw_detector.onnx"))
+            if not os.path.exists(model_path):
+                logger.info("Quickdraw detector model not found, skipping")
+                return
+            self.quickdraw_session = ort.InferenceSession(
+                model_path, providers=["CPUExecutionProvider"])
+            self.quickdraw_available = True
+            self.detector_type = "quickdraw"
+            logger.info("✓ Quickdraw corner detector loaded")
+        except ImportError:
+            logger.warning("onnxruntime not installed, skipping Quickdraw")
+        except Exception as e:
+            logger.error(f"Failed to load Quickdraw detector: {e}")
+
+    def _detect_with_quickdraw(self, pil_image: Image.Image) -> Dict:
+        """Detect card corners with the Quickdraw model (10-channel output:
+        channel 0 = logit on a 24x40 grid, channels 1-8 = corner offsets
+        (x0,y0,x1,y1) scaled by 64, channel 9 = flip logit)."""
+        result = {
+            "found": False, "bbox": None, "confidence": 0.0, "score": 0.0,
+            "debug_image": None, "detector_source": "quickdraw",
+        }
+        try:
+            import onnxruntime as ort
+
+            img_w, img_h = pil_image.size
+            MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+            # 192x320 for portrait frames (Quickdraw's native detection size).
+            # PIL BOX resize = box-average downscale, same filter as their JS
+            # resizeToTensor.
+            portrait = img_h >= img_w
+            iw, ih = (192, 320) if portrait else (320, 192)
+            arr = np.asarray(pil_image.resize((iw, ih), Image.BOX), dtype=np.float32) / 255.0
+            tensor = (arr.transpose(2, 0, 1)[None] - MEAN[None, :, None, None]) / STD[None, :, None, None]
+
+            out = self.quickdraw_session.run(None, {"image": tensor.astype(np.float32)})[0]
+            d = out[0]
+            gh, gw = d.shape[1], d.shape[2]
+            stride = 8.0  # grid cell size in input-pixel units
+            norm = 64.0
+            # Grid → input tensor pixels → source image pixels.
+            sc_x, sc_y = img_w / iw, img_h / ih
+
+            def sigmoid(v):
+                return 1.0 / (1.0 + np.exp(-v))
+
+            dets = []
+            for y in range(gh):
+                for x in range(gw):
+                    v = d[0, y, x]
+                    if v < -1.0:  # detLogit from their neural meta
+                        continue
+                    peak = True
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            if not dx and not dy:
+                                continue
+                            yy, xx = y + dy, x + dx
+                            if 0 <= yy < gh and 0 <= xx < gw and d[0, yy, xx] > v:
+                                peak = False
+                                break
+                        if not peak:
+                            break
+                    if not peak:
+                        continue
+                    q = []
+                    for k in range(4):
+                        px = d[1 + 2 * k, y, x] * norm + (x + 0.5) * stride
+                        py = d[2 + 2 * k, y, x] * norm + (y + 0.5) * stride
+                        q.append((px * sc_x, py * sc_y))
+                    flip = sigmoid(d[9, y, x])
+                    if flip > 0.5:
+                        q = [q[2], q[3], q[0], q[1]]
+                    dets.append((sigmoid(v), q))
+            if not dets:
+                return result
+
+            def quad_ok(q):  # Quickdraw's convex + min-area filter
+                a2 = 0.0
+                for i in range(4):
+                    ax, ay = q[i]; bx, by = q[(i + 1) % 4]; cx, cy = q[(i + 2) % 4]
+                    if (bx - ax) * (cy - by) - (by - ay) * (cx - bx) <= 0:
+                        return False
+                    a2 += ax * by - bx * ay
+                return abs(a2) / 2 > 600
+
+            dets = [t for t in dets if quad_ok(t[1])]
+            if not dets:
+                return result
+            dets.sort(key=lambda t: t[0], reverse=True)
+            score, q = dets[0]
+            xs = [p[0] for p in q]; ys = [p[1] for p in q]
+            x1b, y1b = int(min(xs)), int(min(ys))
+            wb, hb = int(max(xs) - min(xs)), int(max(ys) - min(ys))
+            if wb > 0 and hb > 0:
+                result["found"] = True
+                result["bbox"] = [x1b, y1b, wb, hb]
+                result["confidence"] = float(score)
+                result["score"] = float(score) * 0.95
+                result["quad"] = [[float(a), float(b)] for a, b in q]
+                result["image_width"] = img_w
+                result["image_height"] = img_h
+                result["debug_image"] = self._create_debug_overlay(
+                    pil_image, x1b, y1b, wb, hb, score, detector="Quickdraw")
+        except Exception as e:
+            logger.error(f"Quickdraw detection error: {e}")
+            import traceback; traceback.print_exc()
+        return result
+
     def detect_card(self, image_bytes: bytes) -> Dict:
         """
         Detect card in image using hybrid approach.
@@ -104,7 +225,20 @@ class CardDetector:
             pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             orig_w, orig_h = pil_image.size
 
-            # Try YOLOv8 first if available (load lazily on first use)
+            # Quickdraw corner detector is primary: it asks "where are the 4
+            # corners?" not "is this a card?", so a shoulder or hand edge cannot
+            # score as one. YOLOv8 stays as a fallback.
+            if not self._quickdraw_init_called:
+                self._quickdraw_init_called = True
+                self._try_load_quickdraw()
+
+            if self.quickdraw_available:
+                qd_result = self._detect_with_quickdraw(pil_image)
+                if qd_result["found"] and qd_result["confidence"] >= self.MIN_CONFIDENCE:
+                    logger.info(f"Quickdraw detection successful: {qd_result['confidence']:.2f}")
+                    return self._merge_results(result, qd_result, orig_w, orig_h)
+
+            # Try YOLOv8 next if available (load lazily on first use)
             if self.use_yolo and not self._yolo_init_called:
                 self._yolo_init_called = True
                 self._try_load_yolo()
@@ -433,9 +567,11 @@ class CardDetector:
             base["detector_type"] = "yolo" if "yolo" in str(detection.get("debug_image", "")).lower() or detection.get("detector_source") == "yolo" else "numpy"
             # Preserve detector source for clearer identification
             if detection.get("detector_source"):
-                base["detector_type"] = "yolo" if detection["detector_source"] == "yolo" else "numpy"
+                base["detector_type"] = detection["detector_source"]
             base["image_width"] = orig_w
             base["image_height"] = orig_h
+            if detection.get("quad"):
+                base["quad"] = detection["quad"]
 
         return base
     
