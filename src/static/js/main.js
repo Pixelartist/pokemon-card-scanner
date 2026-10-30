@@ -790,7 +790,9 @@ function displayScanResult(data, container) {
       // Auto-capture loop: if the top match is confident, keep scanning
       // (only when the camera is active — upload mode is a one-shot)
       if (window.__autoScan && window.__autoScan.active) {
-        window.__autoScan.check(c.similarity || 0, c.id);
+        if (window.__autoScan._ready) {
+          window.__autoScan.check(c.similarity || 0, c.id);
+        }
       }
     } else {
       const el = document.getElementById('scan-overlay-result');
@@ -810,6 +812,35 @@ window.__autoScan = {
   THRESHOLD: 0.88,
   lastId: null,
   lastTime: 0,
+  // Consensus gate (Quickdraw FrameConsensus pattern): require 2 stable
+  // detections before auto-capturing again. Single-frame noise — hands,
+  // table edges, blank walls — won't trigger a false scan.
+  _votes: 0,
+  _lastQuad: null,
+  _lastTime: 0,
+  _ready: false,
+
+  noteDetection(quad) {
+    const now = Date.now();
+    if (now - this._lastTime > 1500) { this._votes = 0; this._ready = false; }
+    this._lastTime = now;
+    if (this._lastQuad && this._quadsSimilar(quad, this._lastQuad)) {
+      this._votes++;
+    } else {
+      this._votes = 1;
+      this._ready = false;  // card moved = new card; demand fresh consensus
+      this._lastQuad = quad;
+    }
+    if (this._votes >= 2) this._ready = true;
+  },
+
+  _quadsSimilar(a, b) {
+    const ca = [(a[0][0] + a[2][0]) / 2, (a[0][1] + a[2][1]) / 2];
+    const cb = [(b[0][0] + b[2][0]) / 2, (b[0][1] + b[2][1]) / 2];
+    const da = Math.hypot(a[0][0] - a[2][0], a[0][1] - a[2][1]) || 1;
+    return Math.abs(da - Math.hypot(b[0][0] - b[2][0], b[0][1] - b[2][1])) < da * 0.3
+        && Math.hypot(ca[0] - cb[0], ca[1] - cb[1]) < da * 0.15;
+  },
   toggle() {
     this.active = !this.active;
     const btn = document.getElementById('auto-scan-btn');
@@ -819,7 +850,7 @@ window.__autoScan = {
     }
     // Start the loop right away: the first capture must not wait for a
     // previous score, or the button looks like it does nothing.
-    if (this.active) { this.lastId = null; this.capture(); }
+    if (this.active) { this.lastId = null; this._votes = 0; this._ready = false; this.capture(); }
   },
   // Re-capture after a delay while auto-scan is still on. Every terminal
   // result path (match / no-match / error) must funnel through capture()
@@ -841,6 +872,9 @@ window.__autoScan = {
     const overlay = document.getElementById('scan-overlay-result');
     if (!overlay) return;
     const end = Date.now() + ms;
+    // The live detection loop writes this element too; tell it to stand down
+    // until the countdown finishes or the two would fight and flicker.
+    window.__countdownUntil = end;
     const tick = () => {
       const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
       overlay.innerHTML = `<span class="so-empty">${left > 0 ? 'Scanning next in ' + left + '…' : 'Scanning next…'}</span>`;
@@ -879,6 +913,7 @@ window.__autoScan = {
     }
     this.lastId = id || null;
     this.lastTime = now;
+    this._ready = false;
     const pct = (score * 100).toFixed(1);
     showToast(`✓ Auto-captured high-confidence match (${pct}%)`);
     // Hold so the user can swap cards; the countdown makes the wait visible.
@@ -1539,9 +1574,12 @@ function stopLiveDetection() {
     }
     const overlay = document.getElementById('detection-overlay');
     if (overlay) {
-        const ctx = overlay.getContext('2d');
-        ctx.clearRect(0, 0, overlay.width, overlay.height);
+        overlay.setAttribute('hidden', '');
+        const poly = document.getElementById('detectionPolygon');
+        if (poly) poly.setAttribute('points', '');
     }
+    if (boxState.raf) { cancelAnimationFrame(boxState.raf); boxState.raf = 0; }
+    boxState.shown = null; boxState.from = null; boxState.to = null;
     const cf = document.getElementById('card-frame');
     if (cf) { cf.style.display = ''; cf.classList.remove('active', 'detected', 'misaligned'); }
     const statusElement = document.getElementById('detection-status');
@@ -1934,7 +1972,7 @@ displayScanResult = async function(data, container) {
             })) {
                 if (window.refreshReviewQueues) window.refreshReviewQueues();
             }
-            if (window.__autoScan && window.__autoScan.active) {
+            if (window.__autoScan && window.__autoScan.active && window.__autoScan._ready) {
                 window.__autoScan.check(c.similarity || 0, cardId || c.id);
             }
             
@@ -1950,32 +1988,100 @@ displayScanResult = async function(data, container) {
 
 
 // Card detection functions
+// Temporal tracking (Quickdraw pattern): once a card has been located, run
+// the detector on a crop around the last quad instead of the full frame —
+// effectively higher resolution on the card, faster inference, and a far more
+// stable box while the user settles the card. Every 4th tick still probes the
+// full frame so a new card can be picked up; a failed crop detection
+// invalidates the track so the next tick falls back to full-frame.
+const TRACK_MAX_GAP = 400;   // ms; a track older than this is dropped
+const TRACK_PAD = 1.6;       // crop = card bbox expanded by this factor
+const TRACK_FULL_EVERY = 4;  // keep probing full-frame at 1/N of ticks
+const REFINE_ZOOM = 1.45;   // Quickdraw: re-detect at 1.45x on a full-frame probe
+let _trackQuad = null, _trackTs = 0, _trackTick = 0;
+const _trackCanvas = document.createElement('canvas');
+
+function _updateTrack(det) {
+    if (det && det.points && (det.confidence || 0) > 50) {
+        _trackQuad = det.points.map(p => [p[0], p[1]]);
+        _trackTs = Date.now();
+    } else {
+        _trackQuad = null;
+    }
+}
+
+async function _refineQuad(video, quad, vw, vh) {
+    // Quickdraw's 1.45x re-detect: tighter crop = more pixels on the card,
+    // which is what makes a small/tilted card readable. Only on full-frame
+    // probes (every 4th tick), so inference stays bounded.
+    const xs = quad.map(p => p[0]), ys = quad.map(p => p[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const hw = Math.max(64, (Math.max(...xs) - Math.min(...xs)) * REFINE_ZOOM / 2);
+    const hh = Math.max(64, (Math.max(...ys) - Math.min(...ys)) * REFINE_ZOOM / 2);
+    const x0 = Math.max(0, Math.round(cx - hw)), y0 = Math.max(0, Math.round(cy - hh));
+    const x1 = Math.min(vw, Math.round(cx + hw)), y1 = Math.min(vh, Math.round(cy + hh));
+    _trackCanvas.width = x1 - x0; _trackCanvas.height = y1 - y0;
+    _trackCanvas.getContext('2d').drawImage(video, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+    let det = null;
+    try { det = await window.__cardScanner.detect(_trackCanvas); } catch (e) { det = null; }
+    if (det && det.points) det.points = det.points.map(p => [p[0] + x0, p[1] + y0]);
+    return det;
+}
+
+async function detectTracked(video) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const fresh = _trackQuad && (Date.now() - _trackTs) < TRACK_MAX_GAP;
+    if (fresh && (_trackTick++ % TRACK_FULL_EVERY) !== 0) {
+        const xs = _trackQuad.map(p => p[0]), ys = _trackQuad.map(p => p[1]);
+        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+        const hw = Math.max(64, (Math.max(...xs) - Math.min(...xs)) * TRACK_PAD / 2);
+        const hh = Math.max(64, (Math.max(...ys) - Math.min(...ys)) * TRACK_PAD / 2);
+        const x0 = Math.max(0, Math.round(cx - hw)), y0 = Math.max(0, Math.round(cy - hh));
+        const x1 = Math.min(vw, Math.round(cx + hw)), y1 = Math.min(vh, Math.round(cy + hh));
+        _trackCanvas.width = x1 - x0; _trackCanvas.height = y1 - y0;
+        _trackCanvas.getContext('2d').drawImage(video, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+        let det = null;
+        try { det = await window.__cardScanner.detect(_trackCanvas); } catch (e) { det = null; }
+        if (det && det.points) det.points = det.points.map(p => [p[0] + x0, p[1] + y0]);
+        _updateTrack(det);
+        if (det) return det;
+        return null; // track lost; next tick full-frames
+    }
+    const det = await window.__cardScanner.detect(video);
+    _updateTrack(det);
+    // Full-frame probe: refine at 1.45x when the card is small in frame
+    // (Quickdraw pattern — a big card needs no second pass, a small/tilted
+    // one reads far better on a tight crop). Keep the sharper read only if
+    // it didn't lose confidence.
+    if (det && det.points && (det.confidence || 0) > 50) {
+        const ys0 = det.points.map(p => p[1]);
+        const cardH = Math.max(...ys0) - Math.min(...ys0);
+        if (cardH < vh * 0.6) {
+            const refined = await _refineQuad(video, det.points, vw, vh);
+            if (refined && refined.points && (refined.confidence || 0) >= (det.confidence || 0)) {
+                _updateTrack(refined);
+                return refined;
+            }
+        }
+    }
+    return det;
+}
+
 async function detectCardInFrame() {
     const video = document.getElementById('camera-preview');
     const overlay = document.getElementById('detection-overlay');
     const scoreElement = document.getElementById('detection-score');
     const statusElement = document.getElementById('detection-status');
-    if (!video || !overlay || !video.videoWidth) return null;
+    if (!video || !video.videoWidth) return null;
 
-    // Browser-side YOLO11 OBB — the detection polygon is drawn through the
-    // same contain-fit transform the video uses, so the box always sits on
-    // the card regardless of CSS size/aspect (server /api/detect is gone
-    // from this path; it was a 20s NAS round-trip for a 0.2s local job).
-    const vw = video.videoWidth, vh = video.videoHeight;
-    const rect = video.getBoundingClientRect();
-    const dw = rect.width, dh = rect.height;
-    const scale = Math.min(dw / vw, dh / vh);
-    const dx = (dw - vw * scale) / 2;
-    const dy = (dh - vh * scale) / 2;
-    overlay.width = Math.round(dw);
-    overlay.height = Math.round(dh);
-    const octx = overlay.getContext('2d');
-    octx.clearRect(0, 0, overlay.width, overlay.height);
-    octx.setTransform(scale, 0, 0, scale, dx, dy);
+    // Browser-side YOLO11 OBB — detection polygon is now drawn via SVG
+    // (#detection-overlay) with glide easing, so no canvas drawing needed here.
 
     let det = null;
     try {
-        det = await window.__cardScanner.detect(video);
+        det = await detectTracked(video);
     } catch (err) {
         console.error('Detection error:', err);
         return null;
@@ -1985,33 +2091,40 @@ async function detectCardInFrame() {
         const confidence = (det.confidence || 0) / 100; // detector reports 0-100
         const pts = det.points;
 
+        // Gate the display at the same 50% the auto-capture uses. The
+        // detector's NMS scoreThreshold is 0.1, so a blank wall, a hand or a
+        // table edge comes back as a "detection" at 10-40% — drawing that box
+        // and reporting "Card detected" for it is the bug. Below threshold we
+        // fall through to the no-card branch and clear the overlay instead.
+        if (confidence <= 0.5) {
+            if (scoreElement) scoreElement.textContent = '';
+            if (statusElement) {
+                statusElement.textContent = 'Point camera at a card';
+                statusElement.className = 'detection-status detecting';
+            }
+            const cf = document.getElementById('card-frame');
+            if (cf) cf.style.display = '';
+            updateOverlayDetection(null, false);
+            return null;
+        }
+
         // Record last YOLO detection time and clear any stale "no card" state
         lastCardSeenAt = Date.now();
 
-        octx.strokeStyle = confidence > 0.7 ? '#4ecca3' : confidence > 0.5 ? '#ffa500' : '#e94560';
-        octx.lineWidth = Math.max(3, overlay.width / 250);
-        octx.beginPath();
-        octx.moveTo(pts[0][0], pts[0][1]);
-        for (let i = 1; i < pts.length; i++) octx.lineTo(pts[i][0], pts[i][1]);
-        octx.closePath();
-        octx.stroke();
-
-        octx.fillStyle = octx.strokeStyle;
-        octx.font = `bold ${Math.max(16, overlay.width / 40)}px Inter, sans-serif`;
-        const minX = Math.min(...pts.map(p => p[0]));
-        const minY = Math.min(...pts.map(p => p[1]));
-        octx.fillText(`${Math.round(confidence * 100)}%`, minX + 8, Math.max(20, minY - 8));
-
+        const cardFrame = document.getElementById('card-frame');
+        if (cardFrame) cardFrame.style.display = 'none';
         if (scoreElement) {
             scoreElement.textContent = `Detection Score: ${Math.round(confidence * 100)}%`;
             scoreElement.className = 'detection-score ' +
                 (confidence > 0.7 ? 'high' : confidence > 0.5 ? 'medium' : 'low');
         }
-        const cardFrame = document.getElementById('card-frame');
-        if (cardFrame) cardFrame.style.display = 'none';
         if (statusElement) {
             statusElement.textContent = `Card detected: ${Math.round(confidence * 100)}% confidence`;
             statusElement.className = 'detection-status found';
+        }
+        updateOverlayDetection(det, confidence > 0.7);
+        if (window.__autoScan && window.__autoScan.active) {
+            window.__autoScan.noteDetection(pts);
         }
         return det;
     }
@@ -2023,7 +2136,106 @@ async function detectCardInFrame() {
     }
     const cf = document.getElementById('card-frame');
     if (cf) cf.style.display = '';
+    updateOverlayDetection(null, false);
     return null;
+}
+
+// Push the live detection readout onto the floating overlay glass so the user
+// gets feedback of what the camera is looking at while it runs, not only
+// after a scan completes.
+const GLIDE_MS = 70;
+const boxState = { shown: null, from: null, to: null, start: 0, raf: 0, view: '' };
+
+function drawBox(quad) {
+    boxState.shown = quad;
+    const points = quad.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+    document.getElementById('detectionPolygon').setAttribute('points', points);
+}
+
+function glideTo(quad, width, height) {
+    const overlay = document.getElementById('detection-overlay');
+    const view = `0 0 ${width} ${height}`;
+    if (view !== boxState.view) {
+        overlay.setAttribute('viewBox', view);
+        boxState.view = view;
+        boxState.shown = null;
+    }
+    overlay.removeAttribute('hidden');
+    const from = boxState.shown;
+    if (from) {
+        let shift = 0, best = Infinity;
+        for (let k = 0; k < 4; k++) {
+            let d = 0;
+            for (let i = 0; i < 4; i++) d += Math.hypot(quad[(i + k) % 4].x - from[i].x, quad[(i + k) % 4].y - from[i].y);
+            if (d < best) { best = d; shift = k; }
+        }
+        if (shift) quad = quad.map((_, i) => quad[(i + shift) % 4]);
+        const size = Math.hypot(from[0].x - from[2].x, from[0].y - from[2].y) || 1;
+        if (best / 4 < size * 0.6) {
+            boxState.from = from;
+            boxState.to = quad;
+            boxState.start = performance.now();
+            if (!boxState.raf) boxState.raf = requestAnimationFrame(stepGlide);
+            return;
+        }
+    }
+    if (boxState.raf) { cancelAnimationFrame(boxState.raf); boxState.raf = 0; }
+    drawBox(quad);
+}
+
+function stepGlide() {
+    const t = Math.min(1, Math.max(0, (performance.now() - boxState.start) / GLIDE_MS));
+    const k = 1 - (1 - t) * (1 - t); // ease-out
+    const interp = boxState.from.map((p, i) => ({
+        x: p.x + (boxState.to[i].x - p.x) * k,
+        y: p.y + (boxState.to[i].y - p.y) * k
+    }));
+    drawBox(interp);
+    boxState.raf = t < 1 && !document.getElementById('detection-overlay').hasAttribute('hidden')
+        ? requestAnimationFrame(stepGlide) : 0;
+}
+
+function qualityHint(quality = {}, cardDetected = false, quad = null) {
+    if (quality.brightness < 35) return 'A little more light will help';
+    if (quality.glare > 0.24) return 'Tilt the card away from reflections';
+    if (!cardDetected) return 'Show the artwork and title · edges can overlap';
+    if (quad && Math.min(...quad.map((p, i) => Math.hypot(p.x - quad[(i + 1) % 4].x, p.y - quad[(i + 1) % 4].y))) < 70) return 'Move a little closer to the card';
+    if (quality.sharpness < 5) return 'Hold still for a moment';
+    return 'Reading your card…';
+}
+
+function updateOverlayDetection(det, accepted = false) {
+    const soEl = document.getElementById('scan-overlay-result');
+    const overlay = document.getElementById('detection-overlay');
+    if (!soEl || !overlay) return;
+    if (document.getElementById('camera-section').classList.contains('hidden')) return;
+    if (Date.now() < (window.__countdownUntil || 0)) return;
+    if (!det || !det.points) {
+        soEl.innerHTML = '<span class="so-empty">Point camera at a card</span>';
+        overlay.setAttribute('hidden', '');
+        return;
+    }
+    const confidence = Math.round(det.confidence || 0);
+    const pts = det.points.map(p => ({ x: p[0], y: p[1] }));
+    const vw = document.getElementById('camera-preview').videoWidth;
+    const vh = document.getElementById('camera-preview').videoHeight;
+    const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+    const bx0 = Math.min(...xs), bx1 = Math.max(...xs);
+    const by0 = Math.min(...ys), by1 = Math.max(...ys);
+    const inside = bx0 > vw * 0.04 && by0 > vh * 0.04 && bx1 < vw * 0.96 && by1 < vh * 0.96;
+    const centred = Math.abs((bx0 + bx1) / 2 - vw / 2) < vw * 0.18
+        && Math.abs((by0 + by1) / 2 - vh / 2) < vh * 0.18;
+    const sized = (bx1 - bx0) * (by1 - by0) > vw * vh * 0.04;
+    const cls = confidence > 70 ? 'so-found' : 'so-maybe';
+    const hint = !inside || !sized ? 'Hold the whole card in view'
+        : !centred ? 'Move the card to the centre'
+        : accepted ? 'Card confirmed' : 'Card in view';
+    soEl.innerHTML =
+        `<span class="${cls}">${confidence}% confidence</span>` +
+        `<span class="so-hint">${hint}</span>`;
+    // Update SVG polygon with glide
+    glideTo(pts, vw, vh);
+    overlay.classList.toggle('confirmed', accepted);
 }
 
 // ============================================

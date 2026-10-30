@@ -128,7 +128,12 @@
                             <span class="version-badge cloud">CLOUD</span>
                             <div class="camera-wrapper">
                                 <video id="camera-preview" autoplay playsinline></video>
-                                <canvas id="detection-overlay"></canvas>
+                                <!-- Live detection outline (Quickdraw-style glide) -->
+                                <svg id="detection-overlay" class="detection-overlay" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice" aria-hidden="true" hidden>
+                                  <polygon id="detectionPolygon" vector-effect="non-scaling-stroke"/>
+                                </svg>
+                                <!-- Static viewfinder corner brackets -->
+                                <div class="viewfinder" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
                                 <!-- Card alignment frame -->
                                 <div id="card-frame" class="card-frame">
                                     <div class="frame-corner top-left"></div>

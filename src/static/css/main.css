@@ -846,6 +846,60 @@ body {
     position: relative;
 }
 
+/* Live detection overlay (Quickdraw-style SVG with glide) */
+.detection-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    pointer-events: none;
+}
+.detection-overlay polygon {
+    fill: #ffc62914;
+    stroke: var(--accent);
+    stroke-width: 3;
+    stroke-linejoin: miter;
+    transition: all 0.12s;
+}
+.camera-fs .detection-overlay polygon {
+    stroke-width: 4;
+}
+.detection-overlay.confirmed polygon {
+    fill: #3ef08a22;
+    stroke: var(--success);
+    stroke-width: 4;
+}
+.detection-overlay.code-reading polygon {
+    fill: #ffc62914;
+    stroke: var(--accent);
+    stroke-width: 4;
+    stroke-dasharray: 14 10;
+}
+
+/* Static viewfinder corner brackets */
+.viewfinder {
+    position: absolute;
+    inset: 15% 14%;
+    z-index: 2;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+.camera-fs .viewfinder {
+    opacity: 0.9;
+}
+.viewfinder i {
+    position: absolute;
+    width: 30px;
+    height: 30px;
+    border: 0 solid var(--accent);
+}
+.viewfinder i:nth-child(1) { top: 0; left: 0; border-width: 4px 0 0 4px; }
+.viewfinder i:nth-child(2) { top: 0; right: 0; border-width: 4px 4px 0 0; }
+.viewfinder i:nth-child(3) { bottom: 0; left: 0; border-width: 0 0 4px 4px; }
+.viewfinder i:nth-child(4) { bottom: 0; right: 0; border-width: 0 4px 4px 0; }
+
 /* Search Box */
 .search-area {
     background: var(--bg-secondary);
@@ -2624,7 +2678,6 @@ body {
 .so-empty { color: var(--text-muted, #8b949e); }
 .so-found { color: #4ecca3; font-weight: 700; }
 .so-maybe { color: #ffa500; font-weight: 700; }
-.so-low { color: #e94560; font-weight: 700; }
 .so-hint { color: var(--text-muted, #8b949e); font-size: 0.72rem; margin-left: auto; }
 .scan-overlay .queue-panel { flex: 1; min-height: 0; background: rgba(13,17,23,0.85); display: flex; flex-direction: column; }
 .scan-overlay .queue-list { flex: 1; min-height: 0; max-height: none; }
