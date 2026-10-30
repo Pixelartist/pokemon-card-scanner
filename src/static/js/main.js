@@ -1904,7 +1904,7 @@ displayScanResult = async function(data, container) {
                                 <span>${details.basic_info.set?.name || details.basic_info.set || 'Unknown Set'}</span>
                             </div>
                             <div class="card-types-badge">
-                                ${(details.basic_info.types || []).map(t => `<span class="type-badge">${t}</span>`).join('')}
+                                ${(Array.isArray(details.basic_info.types) ? details.basic_info.types : (details.basic_info.types ? [details.basic_info.types] : [])).map(t => `<span class="type-badge">${t}</span>`).join('')}
                             </div>
                             ${details.basic_info.hp ? `<div style="margin-top: 10px;">HP: ${details.basic_info.hp}</div>` : ''}
                             <div class="card-actions" style="margin-top: 20px;">
@@ -2002,7 +2002,8 @@ let _trackQuad = null, _trackTs = 0, _trackTick = 0;
 const _trackCanvas = document.createElement('canvas');
 
 function _updateTrack(det) {
-    if (det && det.points && (det.confidence || 0) > 50) {
+    if (det && det.points && det.points.length >= 4 && (det.confidence || 0) > 50
+        && det.points.every(p => isFinite(p[0]) && isFinite(p[1]))) {
         _trackQuad = det.points.map(p => [p[0], p[1]]);
         _trackTs = Date.now();
     } else {
@@ -2087,16 +2088,13 @@ async function detectCardInFrame() {
         return null;
     }
 
-    if (det && det.points) {
+    if (det && det.points && isFinite(det.confidence)) {
         const confidence = (det.confidence || 0) / 100; // detector reports 0-100
         const pts = det.points;
-
-        // Gate the display at the same 50% the auto-capture uses. The
-        // detector's NMS scoreThreshold is 0.1, so a blank wall, a hand or a
-        // table edge comes back as a "detection" at 10-40% — drawing that box
-        // and reporting "Card detected" for it is the bug. Below threshold we
-        // fall through to the no-card branch and clear the overlay instead.
-        if (confidence <= 0.5) {
+        // NaN fails every comparison (NaN <= 0.5 is false), so a NaN
+        // confidence or coordinate must be rejected explicitly or it slips
+        // through the gate below and poisons the polygon + tracker.
+        if (confidence <= 0.5 || pts.length < 4 || pts.some(p => !isFinite(p[0]) || !isFinite(p[1]))) {
             if (scoreElement) scoreElement.textContent = '';
             if (statusElement) {
                 statusElement.textContent = 'Point camera at a card';
@@ -2153,6 +2151,7 @@ function drawBox(quad) {
 }
 
 function glideTo(quad, width, height) {
+    if (!quad || quad.length < 4 || quad.some(p => !isFinite(p.x) || !isFinite(p.y))) return;
     const overlay = document.getElementById('detection-overlay');
     const view = `0 0 ${width} ${height}`;
     if (view !== boxState.view) {
@@ -2160,6 +2159,7 @@ function glideTo(quad, width, height) {
         boxState.view = view;
         boxState.shown = null;
     }
+    if (!isFinite(width) || !isFinite(height) || width <= 0 || height <= 0) return;
     overlay.removeAttribute('hidden');
     const from = boxState.shown;
     if (from) {
@@ -2216,9 +2216,16 @@ function updateOverlayDetection(det, accepted = false) {
         return;
     }
     const confidence = Math.round(det.confidence || 0);
-    const pts = det.points.map(p => ({ x: p[0], y: p[1] }));
-    const vw = document.getElementById('camera-preview').videoWidth;
-    const vh = document.getElementById('camera-preview').videoHeight;
+    const pts = (det.points || []).map(p => ({ x: p[0], y: p[1] }));
+    if (pts.length < 4 || pts.some(p => !isFinite(p.x) || !isFinite(p.y))) {
+        // Bad YOLO output (NaN coords) — clear the overlay instead of
+        // feeding NaN into the SVG polygon.
+        soEl.innerHTML = '<span class="so-empty">Point camera at a card</span>';
+        overlay.setAttribute('hidden', '');
+        return;
+    }
+    const vw = document.getElementById('camera-preview').videoWidth || 1;
+    const vh = document.getElementById('camera-preview').videoHeight || 1;
     const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
     const bx0 = Math.min(...xs), bx1 = Math.max(...xs);
     const by0 = Math.min(...ys), by1 = Math.max(...ys);
