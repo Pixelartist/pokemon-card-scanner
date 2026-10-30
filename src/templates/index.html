@@ -11,6 +11,7 @@
     <link rel="icon" type="image/png" href="/static/images/favicon-32.png" sizes="32x32">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/main.css?t={{ timestamp }}">
+    <link rel="stylesheet" href="/static/css/holo-effects.css?t={{ timestamp }}">
     <!-- StPageFlip for realistic book binding effect -->
     <script src="https://cdn.jsdelivr.net/npm/page-flip@2.0.7/dist/js/page-flip.browser.js"></script>
 <script src="/static/js/review-queue.js"></script>
@@ -148,13 +149,16 @@
                                 <div id="detection-status" class="detection-status">Point camera at a card</div>
                             </div>
                             <canvas id="camera-canvas" hidden></canvas>
-                            <!-- Floating overlay: live identification + review queue -->
-                            <div id="scan-overlay" class="scan-overlay">
-                                <div id="scan-overlay-result" class="so-result">
-                                    <span class="so-empty">Scanning…</span>
-                                </div>
-                                <div id="review-queue-overlay" class="queue-panel"></div>
+                        </div>
+
+                        <!-- Floating overlay: live identification + review queue
+                             Kept outside #camera-section so camera error paths
+                             that replace innerHTML don't destroy the queue. -->
+                        <div id="scan-overlay" class="scan-overlay">
+                            <div id="scan-overlay-result" class="so-result">
+                                <span class="so-empty">Scanning…</span>
                             </div>
+                            <div id="review-queue-overlay" class="queue-panel"></div>
                         </div>
 
                         <!-- Preview -->

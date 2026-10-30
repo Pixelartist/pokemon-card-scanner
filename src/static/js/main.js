@@ -2064,7 +2064,26 @@ function normalizeCollectionItem(raw) {
         set_id: c.ptcg_id ? c.ptcg_id.split('-')[0] : '',
         set_info: c.set_name || '',
         glow_tier: raw.glow_tier || '',
+        rarity: c.rarity || raw.rarity || '',
+        is_reverse_holo: !!raw.is_reverse_holo,
+        types: c.types || [],
     };
+}
+
+// Map our (multilingual + symbol) DB rarity values to the poke-holo.simey.me
+// data-rarity effect keys that holo-effects.css selects on.
+function classifyHoloEffect(card) {
+    const r = (card.rarity || '').trim().toLowerCase();
+    if (card.is_reverse_holo) return 'reverse holo';
+    if (r.includes('vmax')) return 'rare holo vmax';
+    if (r.includes('vstar')) return 'rare holo vstar';
+    if (r.includes('crown') || r.includes('secret') || r === '☆☆☆' || r === '✵✵') return 'rare secret';
+    if (r.includes('radiant')) return 'radiant rare';
+    if (r.includes('rainbow') || r === '✵') return 'rare rainbow';
+    if (r.includes('ultra') || r.includes('illustration') || r === '☆' || r === '☆☆') return 'rare ultra';
+    if (/ selten v$|rare holo v$|\bdoppelselten\b|◊◊◊◊/.test(r)) return 'rare holo v';
+    if (/holograf|rare holo|lv\.x/.test(r)) return 'rare holo';
+    return 'common';
 }
 
 function buildBinderPages(cards) {
@@ -2318,24 +2337,67 @@ function createGalleryItem(card) {
     const item = document.createElement('div');
     item.className = 'gallery-item';
     if (card.glow_tier) item.setAttribute('data-glow-tier', card.glow_tier);
-    
-    const cardName = card.card_name || card.name || 'Unknown';
-    const imgUrl = card.image_url || card.scanned_image_url || '';
+
+    const cardName = (card.card_name || card.name || 'Unknown').replace(/"/g, '&quot;');
+    const imageUrl = card.image_url || card.scanned_image_url || '';
     const setId = card.set_id || '';
     const setInfo = card.set_info || '';
-    
+    const cardId = card.ptcg_id || card.card_id || card.id;
+    const effect = classifyHoloEffect(card);
+    // first element type -> color class used by the holo effects (darkness naming)
+    const typeCls = (card.types && card.types[0] ? String(card.types[0]) : '')
+        .toLowerCase().replace(/^dark$/, 'darkness').replace(/\s+/g, '');
+
     item.innerHTML = `
-        <img src="${imgUrl}" alt="${cardName}" loading="lazy">
+        <div class="holo-card ${typeCls}" data-rarity="${effect}">
+            <div class="holo-card__translater">
+                <div class="holo-card__rotator">
+                    <img src="${imageUrl}" alt="${cardName}" loading="lazy">
+                    <div class="holo-card__shine"></div>
+                    <div class="holo-card__glare"></div>
+                </div>
+            </div>
+        </div>
         <div class="gallery-item-info">
             <div class="gallery-item-name">${cardName}</div>
             <div class="gallery-item-meta">${setId || setInfo || 'Unknown Set'}</div>
         </div>
     `;
-    
-    item.addEventListener('click', () => {
-        showCardDetail(card.ptcg_id || card.card_id || card.id, item);
+
+    // Pointer tracking, ported from the poke-holo.simey.me card JS:
+    // all effects key off these custom properties.
+    const holo = item.querySelector('.holo-card');
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    item.addEventListener('mousemove', (e) => {
+        const r = holo.getBoundingClientRect();
+        const x = clamp(((e.clientX - r.left) / r.width) * 100, 0, 100);
+        const y = clamp(((e.clientY - r.top) / r.height) * 100, 0, 100);
+        const s = holo.style;
+        s.setProperty('--pointer-x', `${x}%`);
+        s.setProperty('--pointer-y', `${y}%`);
+        s.setProperty('--pointer-from-center', clamp(Math.sqrt((y - 50) ** 2 + (x - 50) ** 2) / 50, 0, 1));
+        s.setProperty('--pointer-from-top', (y / 100).toFixed(3));
+        s.setProperty('--pointer-from-left', (x / 100).toFixed(3));
+        s.setProperty('--background-x', `${x}%`);
+        s.setProperty('--background-y', `${y}%`);
+        // simey maps --rotate-x -> rotateY and --rotate-y -> rotateX (see base rules)
+        s.setProperty('--rotate-x', `${((x - 50) / 50 * 15).toFixed(2)}deg`);
+        s.setProperty('--rotate-y', `${((y - 50) / 50 * -15).toFixed(2)}deg`);
     });
-    
+    item.addEventListener('mouseleave', () => {
+        holo.removeAttribute('style');
+    });
+
+    // Click: spin the card, then open the detail modal (delegates to showEnhancedCardDetail)
+    item.addEventListener('click', () => {
+        if (!cardId) { showCardDetail(null, item); return; }
+        const rotator = holo.querySelector('.holo-card__rotator');
+        rotator.animate(
+            [{ transform: 'rotateY(0deg)' }, { transform: 'rotateY(360deg)' }],
+            { duration: 600, easing: 'cubic-bezier(0.4,0,0.2,1)' }
+        ).onfinish = () => showEnhancedCardDetail(cardId);
+    });
+
     return item;
 }
 
