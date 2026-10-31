@@ -196,9 +196,15 @@ def init_db():
 
 
 def get_db_connection():
-    """Get a database connection."""
-    conn = sqlite3.connect(DATABASE_URL)
+    """Get a database connection with WAL mode and optimized pragmas."""
+    conn = sqlite3.connect(DATABASE_URL, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -200000")  # 200 MB page cache
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA mmap_size = 268435456")  # 256 MB mmap
     return conn
 
 

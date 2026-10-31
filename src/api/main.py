@@ -1,10 +1,7 @@
 """FastAPI application for Pokemon Card Scanner."""
 import os
 import sqlite3
-import sys
 import logging
-import tempfile
-import shutil
 import time
 import asyncio
 from pathlib import Path
@@ -15,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Load environment variables
@@ -128,6 +126,18 @@ if os.path.exists(card_images_dir):
 german_images_dir = os.path.join(BASE_DIR, "..", "data", "german_cards", "images")
 if os.path.exists(german_images_dir):
     app.mount("/static/german_cards/images", StaticFiles(directory=german_images_dir), name="german_images")
+    # TCG Pocket images downloaded from marcelpanse/tcg-pocket-collection-tracker
+    pocket_images_dir = Path("/opt/data/pokemon-card-scanner/data/images/pocket")
+    pocket_images_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/static/pocket", StaticFiles(directory=pocket_images_dir), name="pocket_images")
+    # TCGdex English-side vintage card images (base, gym, neo, ecard, ex, dp, pl, bw, hgss, pop)
+    tcgdex_images_dir = Path("/opt/data/pokemon-card-scanner/data/images/tcgdex")
+    if tcgdex_images_dir.exists():
+        app.mount("/static/tcgdex", StaticFiles(directory=tcgdex_images_dir), name="tcgdex_images")
+    # Placeholder images for cards without scans
+    placeholder_dir = Path("/opt/data/pokemon-card-scanner/src/static/images")
+    placeholder_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/static/images", StaticFiles(directory=placeholder_dir), name="placeholder_images")
 
 # Mount static files (JS, CSS, etc.) - MUST be after /static/clip_images
 if os.path.exists(static_dir):
@@ -242,47 +252,40 @@ async def scan_card(
         scan_relative_path = f"scans/{scan_filename}"
 
         client = get_client()
-        from services.card_detector import get_detector
-        detector = get_detector()
-        detection = await asyncio.to_thread(detector.detect_card, image_bytes)
-        if not detection.get("found") or not detection.get("bbox"):
-            return JSONResponse({
-                "decision": "no_match",
-                "decision_reason": "No card detected in the frame — point the camera at a card",
-                "candidates": [],
-                "meta": {
-                    "source": "card_detector",
-                    "detector_type": detection.get("detector_type", "numpy"),
-                    "confidence": detection.get("confidence", 0.0),
-                    "cards_indexed": 0,
-                },
-                "scan_image_path": scan_relative_path,
-            })
+
+        # Prefer the straightened crop the browser computed (YOLO11 OBB):
+        # CLIP must embed the CARD, not the hand/background behind it —
+        # full-frame embeddings produced confidently-wrong matches.
+        crop_bytes = b""
+        if browser_crop is not None:
+            crop_bytes = await browser_crop.read()
+
+        if crop_bytes:
+            crop_ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')
+            crop_path = CROP_DIR / f"crop_{crop_ts}.jpg"
+            with open(crop_path, "wb") as f:
+                f.write(crop_bytes)
+            crop_relative_path = f"scans/crops/crop_{crop_ts}.jpg"
+        else:
+            from services.card_detector import get_detector
+            detector = get_detector()
+            detection = await asyncio.to_thread(detector.detect_card, image_bytes)
+            crop_relative_path = await asyncio.to_thread(crop_card_image, image_bytes, datetime.utcnow().strftime('%Y%m%d_%H%M%S%f'))
+            # Identify on the card crop when the server found one too.
+            if detection.get("found") and crop_relative_path:
+                try:
+                    crop_bytes = (SCAN_DIR.parent / crop_relative_path).read_bytes()
+                except OSError:
+                    crop_bytes = b""
 
         # Run CLIP/inference work off the event loop so /health stays responsive
         result = await asyncio.to_thread(
             client.identify_card,
-            image_bytes=image_bytes,
+            image_bytes=crop_bytes or image_bytes,
             top_k=5,
             set_hint=set_hint,
             region=region,
         )
-
-        # Cut the card out of the photo. Prefer the straightened crop the
-        # browser already computed (YOLO11 OBB + pHash) — it's far more
-        # reliable than re-detecting on the raw frame, which produced garbage
-        # 140x175 crops of table edges. Fall back to server-side detection.
-        crop_relative_path = None
-        if browser_crop is not None:
-            crop_bytes = await browser_crop.read()
-            if len(crop_bytes) > 0:
-                crop_ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')
-                crop_path = CROP_DIR / f"crop_{crop_ts}.jpg"
-                with open(crop_path, "wb") as f:
-                    f.write(crop_bytes)
-                crop_relative_path = f"scans/crops/crop_{crop_ts}.jpg"
-        if crop_relative_path is None:
-            crop_relative_path = await asyncio.to_thread(crop_card_image, image_bytes, datetime.utcnow().strftime('%Y%m%d_%H%M%S%f'))
 
         # If we got candidates from offline matcher, they already have image_url and name
         # If from API, we need to hydrate with full card details
@@ -290,7 +293,7 @@ async def scan_card(
             meta = result.get("meta", {})
             source = meta.get("source", "api")
 
-            if source not in ("clip_matcher", "offline_matcher"):
+            if source not in ("clip_matcher", "offline_matcher", "quickdraw_matcher"):
                 candidate_ids = [c["id"] for c in result["candidates"]]
                 cards = client.get_cards_batch(candidate_ids)
                 card_map = {c["id"]: c for c in cards}
@@ -736,202 +739,117 @@ async def get_sets():
     return {"sets": []}
 
 
+_SET_ID_CACHE: dict = {}
+_META_IMG_INDEX: dict = {}   # ptcg_id -> image url, built once
+_db_conn = None
+
+
+def _get_db():
+    """One shared SQLite connection (WAL + pragmas set in get_db_connection)."""
+    global _db_conn
+    while True:
+        if _db_conn is None:
+            import logging
+            logging.info("Creating new DB connection")
+            _db_conn = get_db_connection()
+        else:
+            import logging
+            logging.info(f"Reusing DB connection: {id(_db_conn)}")
+        try:
+            _db_conn.execute("SELECT 1")
+            return _db_conn
+        except Exception as e:
+            import logging
+            logging.error(f"DB connection is closed: {e}")
+            _db_conn = None
+            # loop and retry
+
+
+def _get_set_id(set_code: str):
+    return _SET_ID_CACHE.get(set_code) or _SET_ID_CACHE.get(set_code.lower())
+
+
+def _cache_set_id(set_code: str, set_id: int):
+    _SET_ID_CACHE[set_code] = set_id
+    _SET_ID_CACHE[set_code.lower()] = set_id
+
+
+def _meta_index():
+    """Lazily build ptcg_id -> image index from cards_meta.json (was a per-card O(N) rescan)."""
+    if not _META_IMG_INDEX:
+        try:
+            from pathlib import Path
+            import json as _json
+            meta_path = Path(__file__).resolve().parent.parent.parent / "src" / "static" / "cards_meta.json"
+            if meta_path.exists():
+                with open(meta_path) as f:
+                    for m in _json.load(f):
+                        if m.get("set") and m.get("number") and m.get("image"):
+                            _META_IMG_INDEX[f"{m['set']}-{m['number']}"] = m["image"]
+        except Exception as e:
+            import logging
+            logging.warning(f"cards_meta index build failed: {e}")
+    return _META_IMG_INDEX
+
+
+def _resolve_placeholder(ptcg_id: str) -> str:
+    img = _meta_index().get(ptcg_id)
+    return img or "/static/images/placeholder.png"
+
+
 @app.get("/api/sets/{set_code}/cards")
 async def get_set_cards(set_code: str):
     """Get all cards in a set with basic info."""
-    import sqlite3
-    from pathlib import Path
-    import json
-
-    conn = get_db_connection()
+    conn = _get_db()
     cursor = conn.cursor()
 
-    # Get set info from local DB
-    cursor.execute("SELECT * FROM sets WHERE ptcg_id = ?", (set_code,))
-    set_row = cursor.fetchone()
+    # Get set info from local DB (cached in memory)
+    set_id = _get_set_id(set_code)
+    if set_id is None:
+        set_row = cursor.execute(
+            "SELECT * FROM sets WHERE ptcg_id = ?", (set_code,)
+        ).fetchone()
+        if not set_row:
+            set_row = cursor.execute(
+                "SELECT * FROM sets WHERE LOWER(ptcg_id) = LOWER(?)", (set_code,)
+            ).fetchone()
+        if set_row:
+            set_id = set_row["id"]
+            _cache_set_id(set_code, set_id)
+    else:
+        set_row = cursor.execute(
+            "SELECT * FROM sets WHERE id = ?", (set_id,)
+        ).fetchone()
 
     if not set_row:
-        # Try case-insensitive match
-        cursor.execute("SELECT * FROM sets WHERE LOWER(ptcg_id) = LOWER(?)", (set_code,))
-        set_row = cursor.fetchone()
+        # Set not found in local DB — try external API fallback
+        return await _get_set_cards_fallback(set_code)
 
-    # If set not found in local DB, try fetching from API
-    if not set_row:
-        try:
-            client = get_client()
-            # First, get set info from API
-            sets = client.get_sets()
-            set_info = None
-            for s in sets:
-                if s.get('id') == set_code or s.get('code') == set_code:
-                    set_info = s
-                    break
-            
-            if set_info:
-                # Fetch cards from API for this set
-                import requests
-                from services.ptcg_client import _get_api_key
-                api_key = _get_api_key()
-                headers = {"X-Api-Key": api_key}
-                
-                # Fetch cards from API
-                all_cards = []
-                limit = 250
-                cursor = None
-                while True:
-                    params = {'set': set_code, 'limit': limit}
-                    if cursor:
-                        params['cursor'] = cursor
-                    
-                    resp = requests.get(
-                        "https://api.pokemontcgapi.com/v1/cards",
-                        headers=headers,
-                        params=params,
-                        timeout=30
-                    )
-                    if resp.status_code != 200:
-                        break
-                    data = resp.json()
-                    cards_page = data.get('data', [])
-                    if not cards_page:
-                        break
-                    all_cards.extend(cards_page)
-                    if len(cards_page) < limit:
-                        break
-                    # Get cursor for next page
-                    links = data.get('links', {})
-                    next_link = links.get('next')
-                    if not next_link:
-                        break
-                    # Parse cursor from next link URL
-                    from urllib.parse import urlparse, parse_qs
-                    parsed = urlparse(next_link)
-                    query_params = parse_qs(parsed.query)
-                    cursor = query_params.get('cursor', [None])[0]
-                    if not cursor:
-                        break
-                
-                # Sort cards by number
-                all_cards.sort(key=lambda x: x.get('number', ''))
-                
-                conn.close()
-                return {
-                    "set": {
-                        "id": set_info.get('id'),
-                        "ptcg_id": set_info.get('code'),
-                        "name": set_info.get('name'),
-                        "series": set_info.get('series'),
-                        "release_date": set_info.get('release_date'),
-                        "total_cards": set_info.get('total'),
-                    },
-                    "cards": all_cards,
-                    "total": len(all_cards),
-                    "source": "api"
-                }
-        except Exception as e:
-            import logging
-            logging.error(f"API fetch failed for set {set_code}: {e}")
-            logging.exception(e)
-        
-        # Set not found in DB or API - try to get from card catalog as fallback
-        try:
-            from pathlib import Path
-            import json
-            
-            catalog_path = Path(__file__).resolve().parent.parent.parent / "data" / "card_catalog.json"
-            if catalog_path.exists():
-                with open(catalog_path) as f:
-                    catalog = json.load(f)
-                
-                # Filter cards for this set
-                cards = []
-                set_info = None
-                
-                for card in catalog.get('cards', []):
-                    if card.get('set_code') == set_code:
-                        cards.append(card)
-                        # Build set info from first card
-                        if not set_info:
-                            # Try to get set name from TCGdex cache
-                            set_name = card.get('set_name', '')
-                            set_series = card.get('series', '')  # TCGdex might not have this in catalog
-                            set_release_date = card.get('releaseDate', '')  # TCGdex might not have this
-                            
-                            # If we don't have set info in card, try TCGdex cache
-                            if not set_name:
-                                tcgdex_cache_path = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "tcgdex" / "sets_en.json"
-                                if tcgdex_cache_path.exists():
-                                    with open(tcgdex_cache_path) as tf:
-                                        tcgdex_data = json.load(tf)
-                                        for s in tcgdex_data.get('sets', []):
-                                            if s.get('id') == set_code:
-                                                set_name = s.get('name', set_code)
-                                                set_series = s.get('series', '')
-                                                set_release_date = s.get('releaseDate', '')
-                                                break
-                            
-                            set_info = {
-                                'id': len(catalog.get('cards', [])),  # placeholder
-                                'ptcg_id': set_code,
-                                'name': set_name or set_code.upper(),
-                                'series': set_series,
-                                'release_date': set_release_date,
-                                'total_cards': len(cards),
-                                'printed_total': len(cards)  # approximation
-                            }
-                
-                if cards:
-                    # Sort cards by number (handle special characters like !, *, etc.)
-                    def card_sort_key(card):
-                        num = card.get('number', '')
-                        # Extract leading numbers for sorting
-                        import re
-                        match = re.match(r'(\d+)', str(num))
-                        if match:
-                            return (0, int(match.group(1)), str(num))  # (type, numeric part, original)
-                        else:
-                            return (1, 0, str(num))  # non-numeric goes after
-                    
-                    cards.sort(key=card_sort_key)
-                    
-                    conn.close()
-                    return {
-                        "set": set_info,
-                        "cards": cards,
-                        "total": len(cards),
-                        "source": "card_catalog"
-                    }
-        except Exception as e:
-            import logging
-            logging.error(f"Card catalog fallback failed for set {set_code}: {e}")
-            logging.exception(e)
-        
-        # Set not found in DB, API, or card catalog
-        conn.close()
-        raise HTTPException(status_code=404, detail=f"Set '{set_code}' not found")
-
-    # Get all cards in this set, ordered by number
-    cursor.execute("""
-        SELECT c.ptcg_id, c.name, c.number, c.rarity, c.types, c.images
-        FROM cards c
-        WHERE c.set_id = ?
-        ORDER BY c.number
-    """, (set_row["id"],))
+    # Optimized query: select only needed columns, pre-extract images
+    cursor.execute(
+        """SELECT c.ptcg_id, c.name, c.number, c.rarity,
+                  json_extract(c.images, '$.small') as small,
+                  json_extract(c.images, '$.large') as large
+           FROM cards c
+           WHERE c.set_id = ?
+           ORDER BY CAST(c.number AS INTEGER)""",
+        (set_id,),
+    )
 
     cards = []
     for row in cursor.fetchall():
-        card_data = dict(row)
-        # Normalize images
-        images = card_data.get("images")
-        if isinstance(images, str):
-            try:
-                images = json.loads(images)
-            except:
-                images = {}
-        card_data["images"] = _normalize_local_row_images(images, card_data.get("ptcg_id") or "") or {}
-        cards.append(card_data)
-
-    conn.close()
+        small = row["small"] or row["large"] or ""
+        large = row["large"] or row["small"] or ""
+        if not small:
+            small = _resolve_placeholder(row["ptcg_id"])
+            large = _resolve_placeholder(row["ptcg_id"])
+        cards.append({
+            "ptcg_id": row["ptcg_id"],
+            "name": row["name"],
+            "number": row["number"],
+            "rarity": row["rarity"],
+            "images": {"small": small, "large": large},
+        })
 
     return {
         "set": {
@@ -943,13 +861,242 @@ async def get_set_cards(set_code: str):
             "total_cards": set_row["total_cards"],
         },
         "cards": cards,
-        "total": len(cards)
+        "total": len(cards),
     }
+
+
+async def _get_set_cards_fallback(set_code: str):
+    """Fetch cards from external API or card catalog when set not in local DB."""
+    try:
+        client = get_client()
+        sets = client.get_sets()
+        set_info = None
+        for s in sets:
+            if s.get('id') == set_code or s.get('code') == set_code:
+                set_info = s
+                break
+
+        if set_info:
+            import requests
+            from services.ptcg_client import _get_api_key
+            api_key = _get_api_key()
+            headers = {"X-Api-Key": api_key}
+
+            all_cards = []
+            limit = 250
+            cursor = None
+            while True:
+                params = {'set': set_code, 'limit': limit}
+                if cursor:
+                    params['cursor'] = cursor
+
+                resp = requests.get(
+                    "https://api.pokemontcgapi.com/v1/cards",
+                    headers=headers,
+                    params=params,
+                    timeout=30
+                )
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                cards_page = data.get('data', [])
+                if not cards_page:
+                    break
+                all_cards.extend(cards_page)
+                if len(cards_page) < limit:
+                    break
+                links = data.get('links', {})
+                next_link = links.get('next')
+                if not next_link:
+                    break
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(next_link)
+                query_params = parse_qs(parsed.query)
+                cursor = query_params.get('cursor', [None])[0]
+                if not cursor:
+                    break
+
+            all_cards.sort(key=lambda x: x.get('number', ''))
+            return {
+                "set": {
+                    "id": set_info.get('id'),
+                    "ptcg_id": set_info.get('code'),
+                    "name": set_info.get('name'),
+                    "series": set_info.get('series'),
+                    "release_date": set_info.get('release_date'),
+                    "total_cards": set_info.get('total'),
+                },
+                "cards": all_cards,
+                "total": len(all_cards),
+                "source": "api"
+            }
+    except Exception as e:
+        import logging
+        logging.error(f"API fetch failed for set {set_code}: {e}")
+        logging.exception(e)
+
+    # Fallback: card catalog
+    try:
+        from pathlib import Path
+        import json
+
+        catalog_path = Path(__file__).resolve().parent.parent.parent / "data" / "card_catalog.json"
+        if catalog_path.exists():
+            with open(catalog_path) as f:
+                catalog = json.load(f)
+
+            cards = []
+            set_info = None
+
+            for card in catalog.get('cards', []):
+                if card.get('set_code') == set_code:
+                    cards.append(card)
+                    if not set_info:
+                        set_name = card.get('set_name', '')
+                        set_series = card.get('series', '')
+                        set_release_date = card.get('releaseDate', '')
+
+                        if not set_name:
+                            tcgdex_cache_path = Path(__file__).resolve().parent.parent.parent / "data" / "cache" / "tcgdex" / "sets_en.json"
+                            if tcgdex_cache_path.exists():
+                                with open(tcgdex_cache_path) as tf:
+                                    tcgdex_data = json.load(tf)
+                                    for s in tcgdex_data.get('sets', []):
+                                        if s.get('id') == set_code:
+                                            set_name = s.get('name', set_code)
+                                            set_series = s.get('series', '')
+                                            set_release_date = s.get('releaseDate', '')
+                                            break
+
+                        set_info = {
+                            'id': len(catalog.get('cards', [])),
+                            'ptcg_id': set_code,
+                            'name': set_name or set_code.upper(),
+                            'series': set_series,
+                            'release_date': set_release_date,
+                            'total_cards': len(cards),
+                            'printed_total': len(cards)
+                        }
+
+            if cards:
+                def card_sort_key(card):
+                    num = card.get('number', '')
+                    import re
+                    match = re.match(r'(\d+)', str(num))
+                    if match:
+                        return (0, int(match.group(1)), str(num))
+                    else:
+                        return (1, 0, str(num))
+
+                cards.sort(key=card_sort_key)
+
+                normalized_cards = []
+                for card in cards:
+                    ptcg_id = f"{card.get('set_code')}-{card.get('number')}"
+                    image_url = "/static/images/placeholder.png"
+                    try:
+                        meta_path = Path(__file__).resolve().parent.parent.parent / "src" / "static" / "cards_meta.json"
+                        if meta_path.exists():
+                            with open(meta_path) as mf:
+                                meta_data = json.load(mf)
+                                for m in meta_data:
+                                    if m.get('set') == card.get('set_code') and m.get('number') == card.get('number'):
+                                        img = m.get('image', '')
+                                        if img:
+                                            image_url = img
+                                        break
+                    except:
+                        pass
+
+                    normalized_card = {
+                        'ptcg_id': ptcg_id,
+                        'name': card.get('name', ''),
+                        'number': card.get('number', ''),
+                        'rarity': card.get('rarity', ''),
+                        'types': card.get('types', []),
+                        'images': {
+                            'small': image_url,
+                            'large': image_url
+                        }
+                    }
+                    normalized_cards.append(normalized_card)
+
+                return {
+                    "set": set_info,
+                    "cards": normalized_cards,
+                    "total": len(normalized_cards),
+                    "source": "card_catalog"
+                }
+    except Exception as e:
+        import logging
+        logging.error(f"Card catalog fallback failed for set {set_code}: {e}")
+        logging.exception(e)
+
+    raise HTTPException(status_code=404, detail=f"Set '{set_code}' not found")
 
 
 def _normalize_local_row_images(images, ptcg_id: str = ""):
     from services.collection import _normalize_images
-    return _normalize_images(images, ptcg_id)
+    from pathlib import Path
+    import json
+    
+    # Try original normalization first
+    normalized = _normalize_images(images, ptcg_id)
+    
+    # If images is catalog format (language keys) or empty, try cards_meta.json
+    if not normalized or (isinstance(normalized, dict) and all(not v for v in normalized.values()) if isinstance(normalized, dict) else False):
+        # Check cards_meta.json for image
+        try:
+            meta_path = Path(__file__).resolve().parent.parent.parent / "src" / "static" / "cards_meta.json"
+            if meta_path.exists():
+                with open(meta_path) as f:
+                    meta_data = json.load(f)
+                    # Find card in meta
+                    for m in meta_data:
+                        if m.get('set') and m.get('number'):
+                            meta_ptcg = f"{m['set']}-{m['number']}"
+                            if meta_ptcg == ptcg_id:
+                                img = m.get('image', '')
+                                if img:
+                                    return {
+                                        'small': img,
+                                        'large': img
+                                    }
+                                    break
+        except Exception:
+            pass
+    
+    # If still empty, return placeholder
+    if not normalized or (isinstance(normalized, dict) and not normalized.get('small') and not normalized.get('large')):
+        if ptcg_id:
+            # Check if it's a catalog-style images dict
+            if isinstance(images, dict) and 'en' in images:
+                # Catalog format - try to build from cards_meta
+                try:
+                    meta_path = Path(__file__).resolve().parent.parent.parent / "src" / "static" / "cards_meta.json"
+                    if meta_path.exists():
+                        with open(meta_path) as f:
+                            meta_data = json.load(f)
+                            for m in meta_data:
+                                if m.get('set') and m.get('number'):
+                                    meta_ptcg = f"{m['set']}-{m['number']}"
+                                    if meta_ptcg == ptcg_id:
+                                        img = m.get('image', '')
+                                        if img:
+                                            return {
+                                                'small': img,
+                                                'large': img
+                                            }
+                                        break
+                except:
+                    pass
+        # Fallback to placeholder
+        return {
+            'small': '/static/images/placeholder.png',
+            'large': '/static/images/placeholder.png'
+        }
+    
+    return normalized or {}
 
 
 def _normalize_prices_for_frontend(prices: dict) -> dict:
@@ -1032,18 +1179,14 @@ def _resolve_tcgdex_image_url(image_url: str, ptcg_id: str = "") -> str:
     return f"{image_url}.png"
 
 
+from services.clip_matcher import resolve_card_image_url
+
 def _resolve_local_card_image(ptcg_id: str, img_url: str) -> str:
-    """Prefer locally-served card images; fall back to the remote URL."""
+    """Prefer locally-served card images; fall back to resolve_card_image_url."""
     if ptcg_id:
-        base = Path(__file__).resolve().parent.parent.parent / "data"
-        candidates = [
-            (base / "clip_images" / f"{ptcg_id}.jpg", f"/static/clip_images/{ptcg_id}.jpg"),
-            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.png", f"/static/card_images/tcgdex/en/{ptcg_id}.png"),
-            (base / "images" / "tcgdex" / "en" / f"{ptcg_id}.jpg", f"/static/card_images/tcgdex/en/{ptcg_id}.jpg"),
-        ]
-        for full, url in candidates:
-            if full.exists():
-                return url
+        resolved = resolve_card_image_url(ptcg_id, img_url)
+        if resolved:
+            return resolved
     return img_url or ""
 
 
@@ -1780,6 +1923,47 @@ async def build_index(max_cards: int = 500):
     return {"status": "started" if ok else "already_running"}
 
 
+@app.get("/api/quickdraw/status")
+async def quickdraw_status():
+    """Quickdraw fingerprint index status."""
+    from services.quickdraw_matcher import get_quickdraw_matcher
+
+    matcher = get_quickdraw_matcher()
+    return {
+        "matcher": "quickdraw",
+        "index_available": matcher.index_path.exists(),
+        "loaded": matcher.status()["available"],
+        "cards_indexed": matcher.status()["cards_indexed"],
+    }
+
+
+@app.post("/api/quickdraw/build")
+async def quickdraw_build():
+    """Build the Quickdraw fingerprint index (background thread)."""
+    from services.quickdraw_matcher import get_quickdraw_matcher
+
+    matcher = get_quickdraw_matcher()
+    started = matcher.build_in_background()
+    return {"status": "started" if started else "already_running_or_loaded"}
+
+
+@app.post("/api/quickdraw/match")
+async def quickdraw_match(image: UploadFile = File(...), top_k: int = Query(5)):
+    """Direct Quickdraw-style fingerprint match — pure CPU, no model, ~10-50ms."""
+    from services.quickdraw_matcher import get_quickdraw_matcher
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Empty image")
+
+    matcher = get_quickdraw_matcher()
+    if not matcher.load_index():
+        raise HTTPException(status_code=503, detail="Quickdraw index not built — POST /api/quickdraw/build")
+
+    result = await asyncio.to_thread(matcher.recognize, image_bytes, top_k)
+    return JSONResponse(result)
+
+
 @app.get("/api/index/status")
 async def index_status():
     """Get CLIP index build progress."""
@@ -1973,29 +2157,35 @@ async def startup_event():
     """On startup, sync some basic data."""
     global _warmup_task
     logger.info("Pokemon Card Scanner starting up...")
-    # Warm heavy models in a background task so the port binds immediately
-    # (avoids proxy 502s during the ~40s model load) and the first real
-    # request doesn't pay the load cost.
-    async def _warm_models():
-        try:
-            from services.card_detector import get_detector
-            await asyncio.to_thread(get_detector)
-            logger.info("✓ Card detector warmed")
-        except Exception as e:
-            logger.warning(f"Detector warm-up failed: {e}")
-        try:
-            from services.clip_matcher import get_clip_matcher
-            matcher = get_clip_matcher()
+    # Warm CLIP index (fast binary load ~1s)
+    try:
+        from services.clip_matcher import get_clip_matcher
+        matcher = get_clip_matcher()
 
-            def _warm_clip():
-                matcher.load_index()
-                matcher._load_model()  # the ~40s CLIP load, done before first scan
-            await asyncio.to_thread(_warm_clip)
-            logger.info("✓ CLIP matcher warmed")
-        except Exception as e:
-            logger.warning(f"CLIP warm-up failed: {e}")
+        def _warm_clip():
+            matcher.load_index_fast()  # fast binary load (~1s) + norm matrix if persisted
 
-    _warmup_task = asyncio.create_task(_warm_models())
+        await asyncio.to_thread(_warm_clip)
+        logger.info("✓ CLIP matcher warmed")
+    except Exception as e:
+        logger.warning(f"CLIP warm-up failed: {e}")
+    # Note: YOLO detector is loaded lazily on first scan request, not at startup.
+    # This saves ~5s+ of startup time for negligible user impact (first scan waits ~5s).
+
+    logger.info("Startup complete - ready to serve requests")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """On shutdown, close the shared DB connection."""
+    global _db_conn
+    if _db_conn is not None:
+        logger.info("Closing DB connection on shutdown")
+        try:
+            _db_conn.close()
+        except Exception as e:
+            logger.warning(f"Error closing DB connection: {e}")
+        _db_conn = None
 
 
 # Global exception handlers to prevent HTML error pages
@@ -2007,11 +2197,33 @@ async def http_exception_handler(request, exc):
     )
 
 
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint - shows server readiness including model status."""
+    from services.clip_matcher import get_clip_matcher
+    from services.card_detector import get_detector
+    matcher = get_clip_matcher()
+    clip_health = matcher.health_check()
+    try:
+        detector = get_detector()
+        detector_status = "ready" if detector else "not_loaded"
+    except Exception as e:
+        detector_status = f"error: {e}"
+
+    return {
+        "status": "healthy",
+        "detector": detector_status,
+        "clip_matcher": clip_health,
+    }
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
+    # exc.errors() can carry bytes (raw input slices) -> plain json.dumps raises,
+    # and an exception inside this handler takes the whole server down.
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors(), "error": "Validation Error"}
+        content={"detail": jsonable_encoder(exc.errors()), "error": "Validation Error"}
     )
 
 

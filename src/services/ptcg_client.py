@@ -131,14 +131,12 @@ class PokemonTCGClient:
             logger.error(f"Identification error: {e}")
             return {"error": str(e), "decision": "no_match", "candidates": []}
 
-    def _identify_offline(self, image_bytes: bytes, top_k: int = 5) -> Dict[str, Any]:
-        """Fallback: identify card using offline matchers with comprehensive error handling and diagnostics."""
-        
-        # Try CLIP matcher with enhanced error handling
+    def _identify_via_clip(self, image_bytes: bytes, top_k: int = 5) -> Optional[Dict[str, Any]]:
+        """Try the CLIP matcher; returns None if unavailable or failed."""
         try:
             from .clip_matcher import get_clip_matcher
             matcher = get_clip_matcher()
-            
+
             if matcher.has_usable_index():
                 try:
                     result = matcher.match_card(image_bytes, top_k=top_k)
@@ -150,13 +148,52 @@ class PokemonTCGClient:
                         logger.warning(f"CLIP matcher returned invalid result format: {result}")
                 except Exception as e:
                     logger.warning(f"CLIP matcher execution failed: {e}")
-                    # Continue to fast matcher fallback
             else:
                 logger.debug("CLIP matcher index not available")
-                
+
         except Exception as e:
             logger.debug(f"CLIP matcher setup failed: {e}")
-            # Continue to fast matcher fallback
+        return None
+
+    def _identify_offline(self, image_bytes: bytes, top_k: int = 5) -> Dict[str, Any]:
+        """Fallback: identify card using offline matchers with comprehensive error handling and diagnostics."""
+
+        # Try Quickdraw matcher FIRST: pure-CPU integral-image fingerprints,
+        # ~10-50ms against the full 13k-card local catalogue. If it returns a
+        # confident match we skip the heavy CLIP model entirely; low scores
+        # fall through to CLIP for semantic verification.
+        try:
+            from .quickdraw_matcher import get_quickdraw_matcher
+            matcher = get_quickdraw_matcher()
+
+            if matcher.load_index():
+                try:
+                    result = matcher.recognize(image_bytes, top_k=top_k)
+                    if isinstance(result, dict) and result.get('candidates'):
+                        decision = result.get('decision', 'no_match')
+                        logger.info(f"Quickdraw matcher: {len(result['candidates'])} candidates, decision={decision}")
+                        if decision != 'no_match':
+                            return result
+                        # Low confidence: keep as fallback but let CLIP try to beat it
+                        qd_fallback = result
+                        clip_result = self._identify_via_clip(image_bytes, top_k)
+                        if clip_result is not None:
+                            clip_top = max((c.get('similarity', 0) for c in clip_result.get('candidates', [])), default=0)
+                            qd_top = max((c.get('similarity', 0) for c in qd_fallback.get('candidates', [])), default=0)
+                            return clip_result if clip_top > qd_top else qd_fallback
+                        return qd_fallback
+                except Exception as e:
+                    logger.warning(f"Quickdraw matcher execution failed: {e}")
+            else:
+                logger.debug("Quickdraw matcher index not available")
+
+        except Exception as e:
+            logger.debug(f"Quickdraw matcher setup failed: {e}")
+
+        # Try CLIP matcher with enhanced error handling
+        clip_result = self._identify_via_clip(image_bytes, top_k)
+        if clip_result is not None:
+            return clip_result
 
         # Try Fast matcher with enhanced error handling
         try:

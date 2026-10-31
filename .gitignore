@@ -42,3 +42,7 @@ cache/
 .DS_Store
 *.log
 .worktrees/
+
+# Card image blobs (17k files) — served from disk, rebuilt by scripts; pushing them breaks GitHub (HTTP 500)
+src/static/german_cards/images/
+NUL/

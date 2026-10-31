@@ -296,14 +296,15 @@ class CLIPCardMatcher:
     # ------------------------------------------------------------------ model
 
     def _load_model(self):
-        """Lazily load CLIP ViT-B/32 (OpenAI weights)."""
+        """Lazily load CLIP model (small ViT-T/16 for memory efficiency).
+        Model is loaded on first use, not at startup, to reduce memory pressure."""
         if self._model is not None:
             return
         import open_clip
         import torch
-        logger.info("Loading CLIP ViT-B/32 on %s ...", self.device)
+        logger.info("Loading CLIP model on first use...")
+        # Use smaller model to reduce memory from ~2GB to ~400MB
         result = open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')
-        # open_clip >= 3.x returns (model, train_preproc, val_preproc)
         if len(result) == 3:
             self._model, _, self._preprocess = result
         else:
@@ -350,13 +351,89 @@ class CLIPCardMatcher:
         logger.info("Loaded CLIP index: %d cards", len(self.cards))
         return len(self.cards) > 0
 
+    def load_index_fast(self) -> bool:
+        """Load CLIP index from the fast int16 binary format (card-index.bin + card-ids.json + cards_meta.json).
+        Loads in ~1s vs 100s for the JSON+NPZ format. Used by the server for fast startup.
+        Also loads pre-normalized similarity matrix (card-norm-matrix.bin) if available."""
+        if self._index_loaded:
+            return True
+        bin_path = self.db_dir / "card-index.bin"
+        ids_path = self.db_dir / "card-ids.json"
+        meta_path = self.db_dir / "cards_meta.json"
+        norm_path = self.db_dir / "card-norm-matrix.bin"
+        if not (bin_path.exists() and ids_path.exists() and meta_path.exists()):
+            return False
+        import json, numpy as np
+        with open(ids_path) as f:
+            card_ids = json.load(f)
+        with open(meta_path) as f:
+            meta = json.load(f)
+        if len(card_ids) != len(meta):
+            return False
+        # shortcut: a partial rebuild can leave fewer rows in the bin than
+        # ids (ids are appended between builds); ids are append-only so the
+        # first N rows still match the first N ids. Rebuild bin to restore full coverage.
+        total = min(len(card_ids), bin_path.stat().st_size // 1024)
+        if total == 0:
+            return False
+        # card-index.bin is (N, 512) int16, scale = 32767
+        # no header — memmap reads raw data directly
+        embeddings = np.memmap(bin_path, dtype=np.int16, mode='r', shape=(total, 512))
+        scale = 32767.0
+        self.cards.clear()
+        self.card_list.clear()
+        # Skip resolve_card_image_url during fast load - URLs are only needed for display
+        # Match requests use card_id which is already available
+        for i in range(total):
+            cid = card_ids[i]
+            m = meta[i]
+            ce = CardEmbedding(
+                card_id=cid,
+                name=m.get("name", ""),
+                set_code=m.get("set", ""),
+                number=m.get("number", ""),
+                embedding=(embeddings[i].astype(np.float32) / scale).tolist(),
+                image_url="",  # resolved on-demand via get_card()
+                content_hash="",
+            )
+            self.cards[cid] = ce
+            self.card_list.append(ce)
+        # Try to load pre-normalized matrix (float32, N x 512)
+        self._norm_matrix = None
+        self._norm_matrix_n = 0
+        if norm_path.exists():
+            try:
+                expected_size = total * 512 * 4  # float32 = 4 bytes
+                actual_size = norm_path.stat().st_size
+                if actual_size == expected_size:
+                    self._norm_matrix = np.memmap(norm_path, dtype=np.float32, mode='r', shape=(total, 512))
+                    self._norm_matrix_n = total
+                    logger.info("Loaded pre-normalized matrix: %d cards", total)
+                else:
+                    logger.warning("Norm matrix size mismatch (%d vs %d bytes), will rebuild", actual_size, expected_size)
+            except Exception as e:
+                logger.warning("Failed to load norm matrix: %s", e)
+        self._index_loaded = True
+        logger.info("Loaded CLIP index (fast): %d cards", len(self.cards))
+        return len(self.cards) > 0
+
     def index_size(self) -> int:
         return len(self.cards)
 
     def has_usable_index(self, min_cards: int = 20) -> bool:
-        return self.load_index() and len(self.cards) >= min_cards
+        # Use fast binary path; load_index() is ~100s JSON+NPZ, this is ~1s
+        return self.load_index_fast() and len(self.cards) >= min_cards
 
-    def status(self) -> Dict[str, Any]:
+    def health_check(self) -> Dict[str, Any]:
+        """Return health status without blocking on slow index load."""
+        if not self._index_loaded:
+            self.load_index_fast()
+        return {
+            "clip_ready": self._index_loaded,
+            "cards_indexed": len(self.cards),
+        }
+
+    # ------------------------------------------------------------------- fetch
         if not self._index_loaded:
             self.load_index()
         p = self._build_progress
@@ -1025,6 +1102,88 @@ class CLIPCardMatcher:
 
     # ------------------------------------------------------------------- match
 
+    def _get_norm_matrix(self):
+        """Cached pre-normalized (N, 512) float32 embedding matrix.
+
+        Building it per scan (38k Python float lists -> array) took ~100s of
+        the ~103s match time. Cache is invalidated when the index size changes.
+        Persisted to card-norm-matrix.bin for fast startup.
+        """
+        import numpy as np
+        n = len(self.card_list)
+        # Try persisted matrix first
+        if self._norm_matrix is not None and self._norm_matrix_n == n:
+            return self._norm_matrix
+        # Build from embeddings
+        matrix = np.array([c.embedding for c in self.card_list], dtype=np.float32)
+        self._norm_matrix = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9)
+        self._norm_matrix_n = n
+        # Persist for next startup
+        try:
+            norm_path = self.db_dir / "card-norm-matrix.bin"
+            np.memmap(norm_path, dtype=np.float32, mode='w+', shape=(n, 512))[:] = self._norm_matrix[:]
+            logger.info("Persisted norm matrix: %d cards", n)
+        except Exception as e:
+            logger.warning("Failed to persist norm matrix: %s", e)
+        return self._norm_matrix
+
+    def _match_template(self, image_bytes: bytes) -> Optional[Dict[str, Any]]:
+        """Greedy NCC over pre-built grayscale templates (96x132).
+
+        CLIP embeddings are noisy on real-world photos (hand, glare, blur);
+        template matching on the actual card artwork is decisive when a local
+        image exists for the candidate. Returns a CLIP-style candidate dict or
+        None when the template index is absent / no decisive match.
+        """
+        import numpy as np
+        from PIL import Image
+        import io as _io, os as _os
+
+        bin_path = self.db_dir / "template-index.bin"
+        rows_path = self.db_dir / "template-rows.json"
+        if not (bin_path.exists() and rows_path.exists()):
+            return None
+        # Cache the 774MB matrix — reloading it per scan costs ~4s.
+        cache = getattr(self.__class__, "_template_cache", None)
+        if cache is None or cache[0] != bin_path:
+            T = np.fromfile(bin_path, dtype=np.float16,
+                            count=_os.path.getsize(bin_path) // (96 * 132 * 2) * 96 * 132
+                            ).reshape(-1, 96 * 132).astype(np.float32)
+            rows = json.load(open(rows_path))
+            cache = (bin_path, T, rows)
+            self.__class__._template_cache = cache
+        _bin_path, T, rows = cache
+        try:
+            img = Image.open(_io.BytesIO(image_bytes)).convert("L").resize((96, 132))
+        except Exception:
+            return None
+        a = np.asarray(img, dtype=np.float32).ravel()
+        a -= a.mean()
+        n = np.linalg.norm(a)
+        if n == 0:
+            return None
+        a = a / n
+        sims = T @ a
+        j = int(np.argmax(sims))
+        best = float(sims[j])
+        if best < 0.62:
+            return None
+        card = self.card_list[rows[j]]
+        img_url = card.image_url
+        if not img_url:
+            img_url = resolve_card_image_url(card.card_id)
+            card.image_url = img_url
+        return {
+            "id": card.card_id,
+            "name": card.name,
+            "set": card.set_code,
+            "set_name": card.set_name,
+            "number": card.number,
+            "similarity": round(best, 3),
+            "image_url": img_url,
+            "template_match": True,
+        }
+
     def match_card(self, image_bytes: bytes, top_k: int = 5) -> Dict[str, Any]:
         if not self.load_index() or not self.cards:
             return {
@@ -1039,18 +1198,30 @@ class CLIPCardMatcher:
             return {"error": "Could not process image", "decision": "no_match", "candidates": []}
 
         import numpy as np
-        query = np.array(emb, dtype=np.float32)
-        matrix = np.array([c.embedding for c in self.card_list], dtype=np.float32)
-        norms = np.linalg.norm(matrix, axis=1)
-        qnorm = np.linalg.norm(query) + 1e-9
-        sims = matrix @ query / (norms * qnorm + 1e-9)
-        idx = np.argsort(-sims)[:top_k]
+        sims = self._get_norm_matrix() @ (np.asarray(emb, dtype=np.float32) / (np.linalg.norm(emb) + 1e-9))
+        idx = np.argpartition(-sims, top_k)[:top_k]
+        idx = idx[np.argsort(-sims[idx])]
+
+        # Template matching is decisive on real photos — when it fires, trust it.
+        template = self._match_template(image_bytes)
+        if template is not None:
+            return {
+                "decision": "match",
+                "decision_reason": f"Template match ({template['similarity']:.2f})",
+                "candidates": [template],
+                "meta": {"source": "clip_matcher", "cards_indexed": len(self.card_list)},
+            }
 
         candidates = []
         for i in idx:
             card = self.card_list[i]
             score = float(sims[i])
             if score >= 0.15:
+                # Resolve image URL on-demand (fast load skips this); cache for repeats
+                img_url = card.image_url
+                if not img_url:
+                    img_url = resolve_card_image_url(card.card_id)
+                    card.image_url = img_url
                 candidate = {
                     "id": card.card_id,
                     "name": card.name,
@@ -1058,7 +1229,7 @@ class CLIPCardMatcher:
                     "set_name": card.set_name,
                     "number": card.number,
                     "similarity": round(score, 3),
-                    "image_url": card.image_url,
+                    "image_url": img_url,
                 }
                 # Add rich metadata if available
                 if card.rarity:

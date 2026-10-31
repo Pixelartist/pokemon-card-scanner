@@ -1,5 +1,5 @@
 // Review queue shared by cloud app (/) and local scanner (/scanner/) —
-// same origin, one localStorage key. Item: {id,name,meta,img,score,source,at}
+// same origin, one localStorage key. Item: {id,name,meta,img,score,source,at,scan,crop}
 const RQ_KEY = 'psc_review_queue';
 const RQ = {
   load() { try { return JSON.parse(localStorage.getItem(RQ_KEY)) || []; } catch { return []; } },
@@ -19,9 +19,8 @@ function rqEsc(s) {
 }
 
 async function postMisread(payload) {
-  const token = window._getAuthToken ? window._getAuthToken() : null;
-  const headers = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
+  const token = window._getAuthToken || window.getAuthToken;
+  const headers = token ? { Authorization: `Bearer ${token()}` } : {};
   try {
     const r = await fetch('/api/misreads', { method: 'POST', headers, body: JSON.stringify(payload) });
     if (!r.ok) throw new Error(r.statusText);
@@ -32,54 +31,169 @@ async function postMisread(payload) {
   }
 }
 
-function _createCorrectionUI() {
-  const btn = document.createElement('button');
-  btn.className = 'correction';
-  btn.textContent = '✗ Not this?';
-  btn.title = 'Log a correction so we can train this hard case out of the model';
-  btn.onclick = async (e) => {
-    const row = e.target.closest('.queue-item');
-    if (!row) return;
-    const id = row.dataset.id;
-    const item = RQ.load().find(q => q.id === id);
-    if (!item) return;
-    if (!window.confirm('Log that this card ID is wrong and store the scan+crop so we can re-embed / harden this case?')) return;
-    const correctId = prompt('What card is this actually? (name or id)');
-    if (!correctId) return;
-    const status = row.querySelector('.qi-status') || row.querySelector('.qi-actions')?.children[1];
-    const working = status ? (status.textContent = 'Logging...') : null;
-    const payload = {
-      wrong_id: item.id,
-      wrong_name: item.name,
-      correct_id: correctId,
-      correct_name: correctId,
-      score: item.score,
-      source: item.source
-    };
-    if (item.scan) payload.scan_image_path = 'scans/' + item.scan;
-    if (item.crop) payload.crop_image_path = 'scans/' + item.crop;
-    try {
-      await postMisread(payload);
-      localStorage.setItem('last_misread_' + id, Date.now());
-      if (working) working.textContent = 'Logged';
-      window.showToast('Correction logged — thanks for improving the model!');
-      RQ.remove(id);
-    } catch (e) {
-      if (working) working.textContent = 'Failed';
-      alert('Could not log correction: ' + e.message + '\nRetrying...');
+// --------------------------------------------------------------------------- Modal
+const MODAL_ID = 'rq-modal';
+
+function rqOpenCorrection(item) {
+  if (document.getElementById(MODAL_ID)) return;
+  const body = document.body;
+  const overlay = document.createElement('div');
+  overlay.className = 'rq-modal-backdrop';
+  overlay.id = MODAL_ID;
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.innerHTML = `
+    <div class="rqm-panel">
+      <div class="rqm-header">
+        <div class="rqm-title">Not this card?</div>
+        <button class="rqm-close" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="rqm-body">
+        <div class="rqm-column">
+          <div class="rqm-label">Your capture</div>
+          <div class="rqm-capture">
+            ${item.scan
+              ? `<img src="/data/${rqEsc(item.scan)}" alt="Original scan">`
+              : '<div class="rqm-missing">No capture</div>'}
+          </div>
+          ${item.crop
+            ? `<div class="rqm-crop-wrap">
+                <div class="rqm-label">Card crop</div>
+                <div class="rqm-capture rqm-crop">
+                  <img src="/data/${rqEsc(item.crop)}" alt="Card crop">
+                </div>
+               </div>`
+            : ''}
+        </div>
+        <div class="rqm-column">
+          <div class="rqm-label">Model guessed</div>
+          <div class="rqm-guess">
+            ${item.img
+              ? `<img src="${rqEsc(item.img)}" alt="${rqEsc(item.name)}">`
+              : '<div class="rqm-missing">No image</div>'}
+            <div class="rqm-guess-name">${rqEsc(item.name)}</div>
+            <div class="rqm-guess-meta">${rqEsc(item.meta || '')}${item.score ? ' · ' + Math.round(item.score * 100) + '%' : ''}</div>
+          </div>
+          <div class="rqm-search">
+            <div class="rqm-label">What is it actually?</div>
+            <input type="text" class="rqm-input" id="rqm-input"
+                   placeholder="Type card name or set…" autocomplete="off">
+            <div class="rqm-results" id="rqm-results"></div>
+          </div>
+        </div>
+      </div>
+      <div class="rqm-footer">
+        <button class="rqm-btn-cancel" type="button">Cancel</button>
+        <button class="rqm-btn-save" type="button" disabled>Save correction</button>
+      </div>
+    </div>`;
+  body.appendChild(overlay);
+  overlay.querySelector('.rqm-close').addEventListener('click', () => rqCloseCorrection());
+  overlay.querySelector('.rqm-btn-cancel').addEventListener('click', () => rqCloseCorrection());
+  overlay.addEventListener('click', e => { if (e.target === overlay) rqCloseCorrection(); });
+  document.addEventListener('keydown', rqCloseOnEscape);
+  const input = overlay.querySelector('#rqm-input');
+  input.focus();
+  const saveBtn = overlay.querySelector('.rqm-btn-save');
+  let selected = null;
+  input.addEventListener('input', () => rqSearchCorrect(input.value, overlay, saveBtn));
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && selected) {
+      e.preventDefault();
+      saveBtn.click();
+    } else if (e.key === 'Escape') {
+      rqCloseCorrection();
     }
-  };
-  return btn;
+  });
+  function rqCloseOnEscape(e) { if (e.key === 'Escape') rqCloseCorrection(); }
+  function rqSearchCorrect(q, el, btn) {
+    const results = el.querySelector('.rqm-results');
+    if (!q || q.length < 2) { results.innerHTML = ''; btn.disabled = true; selected = null; return; }
+    results.innerHTML = '<div class="rqm-loading">Searching…</div>';
+    fetch(`/api/cards/search?query=${encodeURIComponent(q)}&limit=6`)
+      .then(r => r.json())
+      .then(data => {
+        results.innerHTML = '';
+        if (!data.results || data.results.length === 0) {
+          results.innerHTML = '<div class="rqm-none">No matches found</div>';
+          btn.disabled = true;
+          return;
+        }
+        data.results.forEach(card => {
+          const row = document.createElement('div');
+          row.className = 'rqm-row';
+          const img = card.images?.large || card.images?.small || '';
+          row.innerHTML = img
+            ? `<img src="${rqEsc(img)}" class="rqm-row-img" alt="">`
+            : '<span class="rqm-row-noimg"></span>';
+          row.innerHTML += `<div class="rqm-row-info"><span class="rqm-row-name">${rqEsc(card.name)}</span><span class="rqm-row-meta">${rqEsc(card.number)} · ${rqEsc(card.set_name || card.set || '')}</span></div>`;
+          row.addEventListener('click', () => {
+            selected = card;
+            [...results.querySelectorAll('.rqm-row')].forEach(r => r.classList.remove('rqm-row-hl'));
+            row.classList.add('rqm-row-hl');
+            input.value = card.name + (card.set_name ? ' ' + card.set_name : '');
+            btn.disabled = false;
+          });
+          results.appendChild(row);
+        });
+      })
+      .catch(() => {
+        results.innerHTML = '<div class="rqm-none">Search failed</div>';
+        btn.disabled = true;
+      });
+  }
+  saveBtn.addEventListener('click', async () => {
+    if (!selected) return;
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      await postMisread({
+        wrong_id: item.id,
+        wrong_name: item.name,
+        correct_id: selected.ptcg_id || selected.id || item.id,
+        correct_name: selected.name,
+        score: item.score,
+        source: item.source,
+        scan_image_path: item.scan,
+        crop_image_path: item.crop,
+      });
+      localStorage.setItem('last_misread_' + item.id, Date.now());
+      rqCloseCorrection();
+      window.showToast('Correction logged — thanks for improving the model!');
+      if (window.refreshReviewQueues) window.refreshReviewQueues();
+    } catch (e) {
+      saveBtn.disabled = false;
+      alert('Could not log correction: ' + e.message);
+    }
+  });
 }
+
+function rqCloseCorrection() {
+  const m = document.getElementById(MODAL_ID);
+  if (!m) return;
+  document.removeEventListener('keydown', rqCloseOnEscape);
+  function rqCloseOnEscape() {}
+  m.remove();
+}
+
+// --------------------------------------------------------------------------- Mount
 function mountReviewQueue(root, opts = {}) {
   function render() {
     const items = RQ.load();
+    const latest = items[0];
+    // Up to 3 chip previews for the collapsed camera mode bar
+    const chips = items.slice(0, 3).map(q =>
+      `<div class="queue-chip" data-id="${rqEsc(q.id)}" title="${rqEsc(q.name)}">` +
+      `${q.img ? `<img src="${rqEsc(q.img)}" alt="">` : '<div class="qi-thumb-empty" style="width:60px;height:82px"></div>'}` +
+      `<div class="chip-name">${rqEsc(q.name)}</div></div>`
+    ).join('');
     root.innerHTML = `
       <div class="queue-header">
         <span>Review Queue <span class="queue-count${items.length ? '' : ' zero'}">${items.length}</span></span>
+        ${latest ? `<span class="qi-latest">${latest.img ? `<img src="${rqEsc(latest.img)}" alt="">` : ''}<span class="qi-name">${rqEsc(latest.name)}</span></span>` : ''}
       </div>
-      <div class="queue-list">` + (items.length ? items.map(q => `
-        <div class="queue-item" data-id="${rqEsc(q.id)}">
+      <div class="queue-chips">${chips}</div>
+      <div class="queue-list">` + (items.length ? items.map(q => `\n        <div class="queue-item" data-id="${rqEsc(q.id)}">
           ${q.img ? `<img src="${rqEsc(q.img)}" alt="">` : '<div class="qi-thumb-empty"></div>'}
           <div class="qi-info">
             <div class="qi-name">${rqEsc(q.name)}</div>
@@ -96,53 +210,58 @@ function mountReviewQueue(root, opts = {}) {
     `;
     if (opts.onChange) opts.onChange(items.length);
   }
-  if (window._createCorrectionUI) {
-    const correctionHandler = window._createCorrectionUI();
-    if (correctionHandler) root.appendChild(correctionHandler);
-  }
+
+  // In camera-fs collapsed mode, clicking a chip opens the overlay expanded
+  // and scrolls to that card's row. Also prevents the header toggle.
+  root.addEventListener('click', (e) => {
+    const chip = e.target.closest('.queue-chip');
+    if (chip) {
+      e.stopPropagation();
+      root.closest('#scan-overlay')?.classList.add('expanded');
+      setTimeout(() => {
+        const row = root.querySelector(`.queue-item[data-id="${chip.dataset.id}"]`);
+        if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      return;
+    }
+    if (e.target === root || e.target.closest('.queue-header')) {
+      if (!e.target.closest('.queue-item')) {
+        root.closest('#scan-overlay')?.classList.toggle('expanded');
+      }
+    }
+  });
+  // Refresh every mounted queue (sidebar + camera overlay) so no instance
+  // keeps a stale row after a mutation performed through another one.
+  const refreshAll = () => (window.refreshReviewQueues ? window.refreshReviewQueues() : render());
   window.addEventListener('click', async (e) => {
     const row = e.target.closest('.queue-item');
-    if (!row) return;
+    // This mount only handles rows inside its own container; otherwise the
+    // first-mounted queue would swallow clicks meant for the other one and
+    // only re-render itself, leaving the clicked queue visually unchanged.
+    if (!row || !root.contains(row)) return;
     const id = row.dataset.id;
+    const item = RQ.load().find(q => q.id === id);
+    if (!item) return;
     if (e.target.closest('.keep')) {
-      const item = RQ.load().find(q => q.id === id);
-      try { if (opts.add) await opts.add(item); RQ.remove(id); } catch (err) { e.target.closest('.qi-actions')?.insertAdjacentHTML('beforeend', `<span class="qi-status">${rqEsc(err.message)}</span>`); return; }
-    } else if (e.target.closest('.correction')) {
-      const item = RQ.load().find(q => q.id === id);
-      if (!item) return;
-      if (!window.confirm(`Log that ${item.name} is wrong and store the scan+crop so we can re-embed / harden this case?`)) return;
-      const correctId = prompt('What card is this actually? (name or id)');
-      if (!correctId) return;
-      const status = row.querySelector('.qi-status') || row.querySelector('.qi-actions')?.children[1];
-      const working = status ? (status.textContent = 'Logging...') : null;
-      const payload = {
-        wrong_id: item.id,
-        wrong_name: item.name,
-        correct_id: correctId,
-        correct_name: correctId,
-        score: item.score,
-        source: item.source
-      };
-      if (item.scan) payload.scan_image_path = 'scans/' + item.scan;
-      if (item.crop) payload.crop_image_path = 'scans/' + item.crop;
+      // Removal is deferred to onAdded — fires once the card is really in the collection
       try {
-        await postMisread(payload);
-        localStorage.setItem('last_misread_' + id, Date.now());
-        if (working) working.textContent = 'Logged';
-        window.showToast('Correction logged — thanks for improving the model!');
-        RQ.remove(id);
-      } catch (e) {
-        if (working) working.textContent = 'Failed';
-        alert('Could not log correction: ' + e.message + '\nRetrying...');
+        if (opts.add) await opts.add(item, () => { RQ.remove(id); refreshAll(); });
+        else { RQ.remove(id); }
       }
+      catch (err) { e.target.closest('.qi-actions')?.insertAdjacentHTML('beforeend', `<span class="qi-status">${rqEsc(err.message)}</span>`); return; }
+    } else if (e.target.closest('.correction')) {
+      rqOpenCorrection(item);
+      return;
     } else if (e.target.closest('.discard')) {
       RQ.remove(id);
     } else return;
-    render();
+    refreshAll();
   });
   render();
   return { refresh: render };
 }
 
 window.RQ = RQ;
+window.rqOpenCorrection = rqOpenCorrection;
+window.rqCloseCorrection = rqCloseCorrection;
 window.mountReviewQueue = mountReviewQueue;
