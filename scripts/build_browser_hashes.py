@@ -59,6 +59,14 @@ for m in meta:
 # Also build card_id -> image for direct matches (some meta entries have card_id-like names)
 meta_by_id = {m.get("name", ""): m.get("image", "") for m in meta}
 
+# German images are named after their card id (de_sv01-075.png -> "de_sv01-075"),
+# so the filename is the join key. GERMAN_SET_MAP above never fires: cards_meta.json
+# stores set *codes* ("sv01"), not the German set names it was keyed by.
+for m in meta:
+    img = m.get("image") or ""
+    if "/german_cards/images/" in img:
+        meta_by_set_num.setdefault(img.rsplit("/", 1)[-1].removesuffix(".png"), img)
+
 def get_image_url(card_id: str) -> str | None:
     # Try set-number pattern first (handles German cards with different set names)
     # card_id format is usually "set-number"
