@@ -1,7 +1,11 @@
-# Build output — regenerate with scripts/export_clip_index.py
+# Stale CLIP index — the browser matcher uses perceptual hashes (card-hashes.json),
+# so nothing reads this any more. Kept ignored; see scripts/export_clip_index.py.
 public/card-index.bin
-public/card-ids.json
-public/cards_meta.json
+
+# cards_meta.json and card-ids.json are NOT built here: they are symlinks to the
+# canonical copies in src/static (tracked). Committing real files here is how the
+# scanner ended up serving a 38k-card snapshot while the app had 42k.
+
 # Local image mount symlinks
 public/card_images
 public/clip_images
