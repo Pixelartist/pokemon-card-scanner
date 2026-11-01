@@ -175,12 +175,26 @@ async function capture() {
 
 async function runMatch(imageElement) {
   try {
-    const matches = await hashMatcher.match(imageElement, 85, 5);
-    if (!matches || matches.length === 0) {
+    // threshold 0, not 85: filtering inside match() throws the ranked guesses
+    // away before the UI can show or queue them, so a 72% detection reported
+    // "No match found" and vanished. Rank everything, then decide.
+    const raw = await hashMatcher.match(imageElement, 0, 8);
+    if (!raw || raw.length === 0) {
       resultsList.innerHTML = '<div class="empty">No match found</div>';
       return false;
     }
-    resultsTitle.textContent = 'Top matches';
+    // EN/DE scans of one card hash identically, so a correct hit is routinely
+    // its own runner-up. Collapse twins before measuring the lead.
+    const matches = [];
+    for (const m of raw) {
+      const key = m.id.replace(/^de_/, '');
+      if (!matches.some(u => u.id.replace(/^de_/, '') === key)) matches.push(m);
+    }
+    const lead = matches.length > 1 ? matches[0].similarity - matches[1].similarity : 100;
+    const confident = matches[0].similarity >= 78 && lead >= 8;
+
+    resultsTitle.textContent = confident ? 'Top matches'
+      : `Unsure — best guess ${matches[0].similarity.toFixed(0)}% (lead ${lead.toFixed(0)})`;
     resultsList.innerHTML = matches.map(({ id, name, set, number, rarity, image, similarity }) => {
       const cls = similarity > 85 ? '' : similarity > 70 ? 'silver' : 'bronze';
       return `
@@ -195,21 +209,26 @@ async function runMatch(imageElement) {
     }).join('');
 
     lastTopScore = matches[0].similarity / 100;
-    if (lastTopScore >= 0.88) setStatus(`Auto-captured: ${Math.round(lastTopScore * 100)}% match`);
+    if (confident && lastTopScore >= 0.88) setStatus(`Auto-captured: ${Math.round(lastTopScore * 100)}% match`);
 
-    // Auto-enqueue top match into shared review queue
+    // Enqueue — quickdraw contract: an unnamed detection is still a detected
+    // card, so it lands in the queue flagged unknown instead of disappearing.
     const top = matches[0];
-    if (top.id && window.RQ.add({
-      id: top.id,
-      name: top.name || top.id,
-      meta: [top.set, top.number].filter(Boolean).join(' · '),
+    const entry = confident
+      ? { id: top.id, name: top.name || top.id,
+          meta: [top.set, top.number].filter(Boolean).join(' · ') }
+      : { id: `unknown:${top.id}:${Math.round((top.similarity / 100) * 40)}`,
+          name: `Unidentified — looks like ${top.name || top.id}`,
+          meta: [`best ${top.similarity.toFixed(0)}%`] };
+    if (window.RQ && window.RQ.add({
+      ...entry,
       img: top.image || '',
       score: top.similarity / 100,
-      source: 'local',
+      source: confident ? 'local' : 'near_miss',
     })) {
       if (window.__localQueue) window.__localQueue.refresh();
     }
-    return true;
+    return confident;
   } catch (e) {
     resultsList.innerHTML = `<div class="err">Error: ${e.message}</div>`;
     return false;
