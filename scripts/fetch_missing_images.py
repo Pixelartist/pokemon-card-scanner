@@ -40,17 +40,27 @@ def main():
     ap.add_argument("--lang", default="en", choices=["en", "de"])
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int, help="cap downloads (smoke test)")
+    ap.add_argument("--fill-urls", action="store_true",
+                    help="give entries with an empty `image` the conventional TCGdex path")
     args = ap.parse_args()
 
     meta = json.loads(META.read_text())
     want = {s.strip() for s in args.sets.split(",")} if args.sets else None
 
     missing = defaultdict(list)  # set code -> [meta entry]
+    relist = []                   # entries whose empty `image` we can synthesise
     for m in meta:
         code = str(m.get("set") or "").strip()
         if not code or (want and code not in want):
             continue
         img = m.get("image") or ""
+        if not img and args.fill_urls:
+            # meta rows for these sets were written without an image URL; the
+            # convention the rest of the index follows is deterministic, so
+            # reconstruct it and let the download decide if it exists.
+            m["image"] = f"/static/card_images/tcgdex/{args.lang}/{code}-{m['number']}.png"
+            relist.append(m)
+            img = m["image"]
         p = real_path(img) if img else None
         if p is not None and p.exists() and p.stat().st_size > 1000:
             continue
@@ -94,10 +104,19 @@ def main():
                     stats["skip"] += 1
                     return
                 serie = setserie.get(code, code)
+                # meta has a few uppercase set codes (SV10) while TCGdex uses
+                # lowercase (sv10); the on-disk filename keeps meta's spelling.
+                cands = [(serie, code)]
+                if code != code.lower():
+                    s2 = setserie.get(code.lower(), code.lower())
+                    cands.append((s2, code.lower()))
                 async with sem:
                     data = None
-                    for ext in ("high.png", "normal.png"):
-                        data = await get(f"https://assets.tcgdex.net/{args.lang}/{serie}/{code}/{num}/{ext}")
+                    for ser, cd in cands:
+                        for ext in ("high.png", "normal.png"):
+                            data = await get(f"https://assets.tcgdex.net/{args.lang}/{ser}/{cd}/{num}/{ext}")
+                            if data is not None:
+                                break
                         if data is not None:
                             break
                     if data is None:
@@ -111,13 +130,19 @@ def main():
             # serie segment of the asset URL comes from the set detail
             # (TCGdex returns serie as an object: {"id": "sv", ...})
             setserie = {}
+            async def lookup(cd):
+                d = await c.get(f"{API}/{args.lang}/sets/{cd}")
+                if d.status_code != 200:
+                    return cd
+                s = d.json().get("serie")
+                return s.get("id") if isinstance(s, dict) else (s or cd)
+
             for code in missing:
-                d = await c.get(f"{API}/{args.lang}/sets/{code}")
-                serie = code
-                if d.status_code == 200:
-                    s = d.json().get("serie")
-                    serie = s.get("id") if isinstance(s, dict) else (s or code)
-                setserie[code] = serie
+                setserie[code] = await lookup(code)
+                # meta has a few uppercase codes (SV10) TCGdex stores lowercase;
+                # the asset URL needs the *lowercase* code with its real serie.
+                if code != code.lower():
+                    setserie.setdefault(code.lower(), await lookup(code.lower()))
 
             for code, rows in sorted(missing.items()):
                 if args.limit:
@@ -128,9 +153,18 @@ def main():
                 print(f"  {code:<10} {len(rows):>4}  ok={stats['ok']} fail={stats['fail']}", flush=True)
 
             print(f"\ndownloaded={stats['ok']}  failed={stats['fail']}  skipped(existing)={stats['skip']}")
-            print(f"{stats['ok']} images ready under data/images/tcgdex/{args.lang}/")
+            return stats
 
-    asyncio.run(run())
+    stats = asyncio.run(run())
+    if stats and relist:
+        done = {id(m) for m in relist
+                if (rp := real_path(m["image"])) is not None and rp.exists()}
+        for m in relist:                       # keep `image` empty if nothing landed
+            if id(m) not in done:
+                m["image"] = ""
+        if done:
+            META.write_text(json.dumps(meta, ensure_ascii=False))
+            print(f"re-populated `image` on {len(done)} meta rows")
 
 
 if __name__ == "__main__":

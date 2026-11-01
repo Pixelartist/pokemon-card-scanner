@@ -147,10 +147,20 @@ with sync_playwright() as p:
     if not all(v.get("match") for v in check.values()):
         raise SystemExit("ABORT: browser hash not deterministic between calls")
 
+    # Seed from the committed index, then overlay the partial checkpoint so an
+    # interrupted run continues where it stopped. Without the OUT seed every
+    # re-run recomputes all ~40k hashes (2.7h) to add a few thousand.
     hashes = {}
+    if OUT.exists():
+        hashes.update(json.loads(OUT.read_text()))
+        print(f"seeding: {len(hashes)} hashes from {OUT.name}")
     if PARTIAL.exists():
-        hashes = json.loads(PARTIAL.read_text())
-        print(f"resuming: {len(hashes)} hashes from {PARTIAL.name}")
+        part = json.loads(PARTIAL.read_text())
+        if len(part) > len(hashes):        # partial from an older/smaller index
+            hashes = part
+        else:
+            hashes.update(part)
+        print(f"overlay: {len(part)} from {PARTIAL.name}")
     BATCH = 32
     pending = [e for e in todo if e[0] not in hashes]
     t0 = time.time()
