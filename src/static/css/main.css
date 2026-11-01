@@ -2685,7 +2685,14 @@ body {
 /* Camera fullscreen: overlay moves to a wider bottom panel when camera is active.
    Shows up to 3 cards with big images so a human can identify each card at a glance.
    Click header to expand/collapse the list. */
-#camera-section.hidden + #scan-overlay { display: none; } /* upload mode: no overlay */
+/* Upload mode keeps the review tray too (quickdraw never hides its session
+   tray based on capture mode — it is a worklist, not camera chrome). The live
+   ID readout is meaningless without a feed, so only that is hidden; the tray
+   docks statically under the drop zone instead of floating over it. */
+#camera-section.hidden + #scan-overlay {
+    position: static; width: auto; margin-top: 16px; pointer-events: auto;
+}
+#camera-section.hidden + #scan-overlay .so-result { display: none; }
 body.camera-fs #scan-overlay {
     position: fixed; top: 10px; right: 12px; bottom: auto; left: auto;
     width: min(300px, 26vw); z-index: 1001;

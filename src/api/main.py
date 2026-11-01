@@ -153,7 +153,10 @@ if os.path.exists(static_dir):
 # Mount browser-local scanner at /scanner (reuses existing /static/card_images)
 scanner_dir = "/opt/data/pokemon-card-scanner/.worktrees/local-scanner/node-scanner/public"
 if os.path.exists(scanner_dir):
-    app.mount("/scanner", StaticFiles(directory=scanner_dir, html=True), name="scanner")
+    # follow_symlink: the scanner's index/metadata and image dirs are symlinks to
+    # the canonical copies in src/static and data, so /scanner can never serve a
+    # drifted snapshot of the card index.
+    app.mount("/scanner", StaticFiles(directory=scanner_dir, html=True, follow_symlink=True), name="scanner")
 
 # Use Jinja2 directly for template rendering
 import jinja2
@@ -1659,6 +1662,60 @@ def _fetch_card_metadata_from_tcgdex(card_id: str) -> Optional[Dict[str, Any]]:
 @app.get("/api/cards/{card_id}/details")
 async def get_card_details(card_id: str):
     """Get detailed card information including evolution chain and legalities."""
+    # Quickdraw pattern: resolve local first (DB → cards_meta.json → CLIP) before API.
+    # Check local DB by ptcg_id first — covers Pocket, promos, German, etc.
+    if not card_id.isdigit():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT id, ptcg_id, name, number, rarity, set_name, hp, types, images "
+                "FROM cards WHERE ptcg_id = ?", (card_id,)
+            ).fetchone()
+            conn.close()
+            if row:
+                import json as _json
+                images = row["images"]
+                if isinstance(images, str):
+                    try:
+                        images = _json.loads(images)
+                    except Exception:
+                        images = None
+                types = row["types"]
+                if isinstance(types, str):
+                    try:
+                        types = _json.loads(types)
+                    except Exception:
+                        types = [types] if types else None
+                details = {
+                    "basic_info": {
+                        "id": str(row["id"]),
+                        "name": row["name"],
+                        "number": row["number"],
+                        "rarity": row["rarity"] or None,
+                        "hp": row["hp"] or None,
+                        "types": types,
+                        "artist": None,
+                        "set": {"name": row["set_name"], "code": row["set_name"]},
+                        "images": _normalize_local_row_images(images, card_id),
+                    },
+                    "legalities": None,
+                    "prices": None,
+                    "source": "local_db",
+                }
+                # Fetch prices (cached; falls back to stale cache on API failure)
+                try:
+                    from services.price_cache import get_prices_cached
+                    prices = get_prices_cached(row["ptcg_id"])
+                    if prices:
+                        details["prices"] = _normalize_prices_for_frontend(prices)
+                except Exception as e:
+                    logger.debug(f"Price fetch skipped for local card {row['ptcg_id']}: {e}")
+                return details
+        except Exception:
+            pass
+
     # If the ID is numeric, treat it as a local DB PK and resolve to ptcg_id
     if card_id.isdigit():
         import sqlite3

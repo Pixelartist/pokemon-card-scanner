@@ -18,6 +18,82 @@ function rqEsc(s) {
   return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 }
 
+// ----------------------------------------------------------------- Card images
+// Ported from quickdraw.cards `setCardImage()` (app.js): build a de-duplicated
+// list of candidate URLs, point the <img> at the first, and step to the next on
+// every `error` until a placeholder lands — a queue row can then never show a
+// broken-image icon. A token per element guards late async resolutions, the same
+// way their `cardImageToken` does, because a re-render replaces the element but
+// not the fetch already in flight for it.
+const RQ_PLACEHOLDER = '/static/images/placeholder.png';
+const rqImageCache = new Map(); // card id -> local image url ('' = known missing)
+
+function rqImageSources(item) {
+  const out = [];
+  if (item.img) out.push(item.img);
+  const local = rqImageCache.get(item.id);
+  if (local) out.push(local);
+  out.push(RQ_PLACEHOLDER);
+  return out.filter((u, i, all) => u && all.indexOf(u) === i);
+}
+
+// Local-first resolution: prefer the in-page card index (the scanner already
+// holds every card's image path after loadIndex), then fall back to
+// /api/cards/{id}/details, which checks our own SQLite rows and cards_meta.json
+// before any upstream API. That ordering is what makes thumbnails resolve for
+// Pocket/German/promo cards the upstream APIs don't list at all.
+async function rqResolveLocalImage(id) {
+  if (rqImageCache.has(id)) return rqImageCache.get(id);
+  let url = '';
+  if (typeof window.rqCardImageLookup === 'function') {
+    try {
+      const fromIndex = window.rqCardImageLookup(id);
+      if (fromIndex && fromIndex.startsWith('/')) url = fromIndex;
+    } catch { /* index lookup is best-effort */ }
+  }
+  if (!url) {
+    try {
+      const r = await fetch(`/api/cards/${encodeURIComponent(id)}/details`);
+      if (r.ok) {
+        const imgs = (await r.json())?.basic_info?.images || {};
+        const found = imgs.large || imgs.small || '';
+        // Only accept a path we serve ourselves; an upstream absolute URL is
+        // exactly what goes stale, so it must not displace the local one.
+        if (found && found.startsWith('/')) url = found;
+      }
+    } catch { /* offline — the cascade still ends on the placeholder */ }
+  }
+  rqImageCache.set(id, url);
+  return url;
+}
+
+function rqSetImage(imgEl, item) {
+  if (!imgEl || !item) return;
+  const token = {};
+  imgEl.__rqToken = token;
+  const apply = (list) => {
+    let next = 0;
+    imgEl.onerror = () => {
+      if (next < list.length) imgEl.src = list[next++];
+      else imgEl.onerror = null;
+    };
+    imgEl.src = list[next++];
+  };
+  apply(rqImageSources(item));
+  if (rqImageCache.has(item.id)) return; // already resolved, or known-missing
+  rqResolveLocalImage(item.id).then((local) => {
+    if (!local || imgEl.__rqToken !== token) return;
+    if (imgEl.getAttribute('src') === local) return;
+    apply(rqImageSources({ ...item, img: local }));
+  });
+}
+
+// Point every queue image we just rendered at its resolved source.
+function rqPaintImages(root, items) {
+  const byId = new Map(items.map(q => [q.id, q]));
+  root.querySelectorAll('img[data-qid]').forEach(el => rqSetImage(el, byId.get(el.dataset.qid)));
+}
+
 async function postMisread(payload) {
   const token = window._getAuthToken || window.getAuthToken;
   const headers = token ? { Authorization: `Bearer ${token()}` } : {};
@@ -181,20 +257,23 @@ function mountReviewQueue(root, opts = {}) {
   function render() {
     const items = RQ.load();
     const latest = items[0];
+    // The tray collapses to a count pill when there is nothing to review, so it
+    // never covers the camera framing box.
+    root.classList.toggle('empty', items.length === 0);
     // Up to 3 chip previews for the collapsed camera mode bar
     const chips = items.slice(0, 3).map(q =>
       `<div class="queue-chip" data-id="${rqEsc(q.id)}" title="${rqEsc(q.name)}">` +
-      `${q.img ? `<img src="${rqEsc(q.img)}" alt="">` : '<div class="qi-thumb-empty" style="width:60px;height:82px"></div>'}` +
+      `<img data-qid="${rqEsc(q.id)}" alt="">` +
       `<div class="chip-name">${rqEsc(q.name)}</div></div>`
     ).join('');
     root.innerHTML = `
       <div class="queue-header">
         <span>Review Queue <span class="queue-count${items.length ? '' : ' zero'}">${items.length}</span></span>
-        ${latest ? `<span class="qi-latest">${latest.img ? `<img src="${rqEsc(latest.img)}" alt="">` : ''}<span class="qi-name">${rqEsc(latest.name)}</span></span>` : ''}
+        ${latest ? `<span class="qi-latest"><img data-qid="${rqEsc(latest.id)}" alt=""><span class="qi-name">${rqEsc(latest.name)}</span></span>` : ''}
       </div>
       <div class="queue-chips">${chips}</div>
       <div class="queue-list">` + (items.length ? items.map(q => `\n        <div class="queue-item" data-id="${rqEsc(q.id)}">
-          ${q.img ? `<img src="${rqEsc(q.img)}" alt="">` : '<div class="qi-thumb-empty"></div>'}
+          <img data-qid="${rqEsc(q.id)}" alt="">
           <div class="qi-info">
             <div class="qi-name">${rqEsc(q.name)}</div>
             <div class="qi-meta">${rqEsc(q.meta || '')}${q.score ? ' · ' + Math.round(q.score * 100) + '%' : ''} · ${rqEsc(q.source || '')}</div>
@@ -208,6 +287,7 @@ function mountReviewQueue(root, opts = {}) {
       `).join('') : '<div class="empty">Nothing waiting for review.</div>') + `
       </div>
     `;
+    rqPaintImages(root, items);
     if (opts.onChange) opts.onChange(items.length);
   }
 
