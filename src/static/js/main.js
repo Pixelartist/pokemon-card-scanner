@@ -502,15 +502,35 @@ window.__cardScanner = {
           fetch('/static/cards_meta.json').then(r => r.json()),
           fetch('/static/card-hashes.json').then(r => r.json()).catch(() => ({})),
         ]);
-        this.matcher.loadIndex(ids.map((id, i) => ({
+        // Hydrate by id, not by array position: card-ids.json and
+        // cards_meta.json are the same length but not in the same order (and
+        // disagree on set-code case, e.g. sv10 vs SV10), so zipping them by
+        // index showed the wrong card name and thumbnail for tens of thousands
+        // of entries — the hash still matched, but the answer was mislabelled.
+        const byKey = new Map();
+        for (const m of meta) {
+            const k = `${m.set}-${m.number}`.toLowerCase();
+            if (!byKey.has(k)) byKey.set(k, m);
+        }
+        const lookup = (id) => {
+            const k = id.toLowerCase();
+            // German index ids are "de_<set>-<n>" while meta stores them
+            // unprefixed, so a plain key miss does not mean the card is unknown.
+            return byKey.get(id) || byKey.get(k) ||
+                (k.startsWith("de_") ? byKey.get(k.slice(3)) : undefined);
+        };
+        this.matcher.loadIndex(ids.map((id) => {
+          const m = lookup(id);
+          return {
           id,
-          name: meta[i]?.name || id,
-          set: meta[i]?.set,
-          number: meta[i]?.number,
-          rarity: meta[i]?.rarity,
-          image: meta[i]?.image,
+          name: m?.name || id,
+          set: m?.set,
+          number: m?.number,
+          rarity: m?.rarity,
+          image: m?.image,
           hash: hashes[id] || null,
-        })));
+        };
+        }));
         await this.detector.loadModel();
         this.ready = true;
         console.log('[Scanner] Browser-side detector + hash index ready');

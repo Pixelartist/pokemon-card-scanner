@@ -59,6 +59,14 @@ for m in meta:
 # Also build card_id -> image for direct matches (some meta entries have card_id-like names)
 meta_by_id = {m.get("name", ""): m.get("image", "") for m in meta}
 
+# card id ("set-number") -> its own image URL. meta rows are keyed this way
+# everywhere else in the app, so this is the unambiguous lookup.
+meta_by_cardid = {}
+for m in meta:
+    code = str(m.get("set") or "").strip()
+    if code and m.get("image"):
+        meta_by_cardid.setdefault(f"{code}-{m['number']}", m["image"])
+
 # German images are named after their card id (de_sv01-075.png -> "de_sv01-075"),
 # so the filename is the join key. GERMAN_SET_MAP above never fires: cards_meta.json
 # stores set *codes* ("sv01"), not the German set names it was keyed by.
@@ -79,14 +87,82 @@ def get_image_url(card_id: str) -> str | None:
         url = meta_by_id[card_id]
         if url:
             return url
+    # meta's own image for this exact card id. Must come BEFORE the English
+    # fallback: thousands of newer cards live under card_images/tcgdex/en/
+    # (or pocket/, clip_images/), and falling through to official/en/{id}.png
+    # hashed them from a file that does not exist.
+    if card_id in meta_by_cardid:
+        url = meta_by_cardid[card_id]
+        if url:
+            return url
     # Fallback: construct English official path
     # Most English cards follow /static/card_images/official/en/{card_id}.png
     if not card_id.startswith("de_") and "-" in card_id:
         return f"/static/card_images/official/en/{card_id}.png"
     return None
 
-todo = [(i, get_image_url(i)) for i in ids if get_image_url(i)]
-print(f"{len(ids)} card ids, {len(todo)} with image urls (after fallback)")
+todo = []   # built below, once on_disk/probe_image exist
+
+
+def old_get_image_url(card_id: str) -> str | None:
+    """The resolver as it shipped before the meta_by_cardid fix: EN ids always
+    fell through to official/en/{id}.png, ignoring meta's own image."""
+    if card_id in meta_by_set_num and meta_by_set_num[card_id]:
+        return meta_by_set_num[card_id]
+    if card_id in meta_by_id and meta_by_id[card_id]:
+        return meta_by_id[card_id]
+    if not card_id.startswith("de_") and "-" in card_id:
+        return f"/static/card_images/official/en/{card_id}.png"
+    return None
+
+
+MOUNTS = {
+    "/static/card_images/": BASE / "data" / "images",
+    "/static/german_cards/images/": BASE / "data" / "german_cards" / "images",
+}
+
+# Image roots the API serves, for ids that have no meta row at all (the TCG
+# Pocket sets). Their art is already on disk under data/images/pocket/en-US/
+# but nothing pointed the resolver there, so ~2k cards sat unhashable while
+# their scans sat in the same data/images tree.
+PROBE_ROOTS = [
+    ("/static/pocket/en-US/", BASE / "data" / "images" / "pocket" / "en-US"),
+    ("/static/card_images/pocket/en-US/", BASE / "data" / "images" / "pocket" / "en-US"),
+    ("/static/card_images/tcgdex/en/", BASE / "data" / "images" / "tcgdex" / "en"),
+    ("/static/card_images/official/en/", BASE / "data" / "images" / "official" / "en"),
+]
+PROBE_EXTS = (".webp", ".png", ".jpg")
+
+
+def probe_image(card_id: str) -> str | None:
+    """URL of an existing image file for an id that has no meta row."""
+    for prefix, directory in PROBE_ROOTS:
+        for ext in PROBE_EXTS:
+            p = directory / f"{card_id}{ext}"
+            if p.exists() and p.stat().st_size > 1000:
+                return prefix + card_id + ext
+    return None
+
+
+def on_disk(url: str | None):
+    for prefix, base in MOUNTS.items():
+        if url and url.startswith(prefix):
+            p = base / url[len(prefix):]
+            return p if p.exists() and p.stat().st_size > 1000 else None
+    return None
+
+
+def resolve(card_id: str) -> str | None:
+    """Best image URL for an id: meta's, if that file is actually there;
+    otherwise any existing scan found under the served image roots."""
+    u = get_image_url(card_id)
+    if u and on_disk(u):
+        return u
+    return probe_image(card_id)
+
+
+todo = [(i, u) for i in ids if (u := resolve(i))]
+print(f"{len(ids)} card ids, {len(todo)} with an image file on disk")
 
 with sync_playwright() as p:
     b = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
@@ -162,6 +238,18 @@ with sync_playwright() as p:
             hashes.update(part)
         print(f"overlay: {len(part)} from {PARTIAL.name}")
     BATCH = 32
+    # A seeded hash is only trustworthy if the fixed resolver still points at
+    # the same file the old one did. The old resolver sent every English id to
+    # official/en/{id}.png, so ids whose real scan lives under card_images/
+    # tcgdex/en/ were hashed from a missing or wrong file — drop those so they
+    # get rebuilt, and drop anything now unresolvable.
+    stale = [i for i in list(hashes)
+             if (new_u := resolve(i)) is None
+             or (u := old_get_image_url(i)) is None or u != new_u]
+    for i in stale:
+        del hashes[i]
+    if stale:
+        print(f"purged {len(stale)} stale hashes (wrong/missing source image)")
     pending = [e for e in todo if e[0] not in hashes]
     t0 = time.time()
     for start in range(0, len(pending), BATCH):
@@ -176,6 +264,12 @@ with sync_playwright() as p:
             print(f"  {done}/{len(pending)} hashes done (rate {rate:.1f}/s, {eta:.0f} min left)", flush=True)
 
     b.close()
+
+bad = [i for i, h in hashes.items() if not h]
+for i in bad:
+    del hashes[i]
+if bad:
+    print(f"dropped {len(bad)} ids whose image failed to load (not written to index)")
 
 OUT.write_text(json.dumps(hashes))
 PARTIAL.unlink(missing_ok=True)
