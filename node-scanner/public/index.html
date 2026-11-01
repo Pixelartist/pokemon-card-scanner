@@ -133,9 +133,24 @@
   .empty { text-align: center; color: var(--muted); font-size: 0.8rem; padding: 24px 0; }
   .err { color: var(--accent-2); font-size: 0.75rem; text-align: center; margin-top: 12px; }
 
+  /* Review queue as a floating tray over the camera (quickdraw.cards'
+     sessionTray pattern): it stays on screen while you scan instead of
+     scrolling away below the results, and collapses to a pill when empty. */
   .queue-panel {
-    margin-top: 10px; background: var(--bg-2); border: 1px solid var(--border);
+    position: absolute; bottom: 54px; right: 10px; z-index: 30;
+    width: min(240px, 46vw);
+    background: color-mix(in srgb, var(--bg-2) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
     border-radius: var(--radius); overflow: hidden;
+    box-shadow: 0 8px 24px rgba(0,0,0,.45);
+    max-height: min(60%, calc(100% - 130px)); display: flex; flex-direction: column;
+  }
+  .queue-panel.empty { width: auto; }
+  .queue-panel.empty .queue-chips, .queue-panel.empty .queue-list { display: none; }
+  .queue-panel .queue-list { flex: 1 1 auto; min-height: 0; max-height: none; }
+  @media (max-width: 520px) {
+    .queue-panel { bottom: 50px; right: 8px; width: min(200px, 52vw); }
   }
   .queue-header {
     display: flex; justify-content: space-between; align-items: center;
@@ -184,6 +199,7 @@
       <div class="frame"></div>
       <div class="status"><span id="status-dot" class="dot"></span><span id="status-text">Initialising…</span></div>
     </div>
+    <div class="queue-panel" id="review-queue"></div>
   </div>
 
   <div class="progress" id="progress"><div></div></div>
@@ -197,8 +213,6 @@
     <h2 id="results-title">Top matches</h2>
     <div class="results-inner" id="results-list"></div>
   </div>
-
-  <div class="queue-panel" id="review-queue"></div>
 
   <input type="file" id="file-input" accept="image/*" capture="environment" style="display:none">
 <script src="./review-queue.js"></script>

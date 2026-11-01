@@ -36,16 +36,36 @@ async function loadIndex() {
     const hashResp = await fetch(base + 'card-hashes.json');
     if (hashResp.ok) {
       const hashes = await hashResp.json();
-      const cardsWithHashes = ids.map((id, i) => ({
-        id,
-        name: meta[i]?.name || id,
-        set: meta[i]?.set,
-        number: meta[i]?.number,
-        rarity: meta[i]?.rarity,
-        image: meta[i]?.image,
-        hash: hashes[id] || null,
-      }));
+      // Key-based hydration. Zipping meta onto ids by array position silently
+      // mislabels every card once the two files are built from different runs,
+      // and the meta entries are keyed by `set` + `number`, not by index id.
+      const byKey = new Map();
+      for (const entry of m) {
+        if (!entry || !entry.set) continue;
+        const k = `${entry.set}-${entry.number}`.toLowerCase();
+        if (!byKey.has(k)) byKey.set(k, entry);
+      }
+      const lookup = (id) => {
+        const k = id.toLowerCase();
+        // German index ids are "de_<set>-<n>" while meta stores them unprefixed.
+        return byKey.get(id) || byKey.get(k) ||
+          (k.startsWith('de_') ? byKey.get(k.slice(3)) : undefined);
+      };
+      const cardsWithHashes = ids.map((id) => {
+        const entry = lookup(id);
+        return {
+          id,
+          name: entry?.name || id,
+          set: entry?.set,
+          number: entry?.number,
+          rarity: entry?.rarity,
+          image: entry?.image || '',
+          hash: hashes[id] || null,
+        };
+      });
       hashMatcher.loadIndex(cardsWithHashes);
+      // Serve queue/match images from this index — no per-card API round trip.
+      window.rqCardImageLookup = (id) => lookup(id)?.image || '';
     }
   } catch (e) {
     console.warn('[PerceptualHash] No precomputed hashes found, will compute on demand');
@@ -243,10 +263,9 @@ window.toggleAutoScan = toggleAutoScan;
 
 async function init() {
   console.log('[SCANNER] init() called');
-  await loadIndex();
-  await loadModel();
-  await startCamera();
-  // Mount shared review queue; "Keep" posts straight to the collection API
+  // Mount the review tray first: it reads localStorage and must be usable even
+  // when the model download or camera permission below fails (no camera on a
+  // desktop, denied permission, offline model CDN).
   window.__localQueue = window.mountReviewQueue($('review-queue'), {
     async add(item) {
       const token = sessionStorage.getItem('access_token');
@@ -261,6 +280,9 @@ async function init() {
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
     },
   });
+  await loadIndex();
+  try { await loadModel(); } catch (e) { console.warn('[SCANNER] model load failed:', e); }
+  try { await startCamera(); } catch (e) { console.warn('[SCANNER] camera unavailable:', e); }
   console.log('[SCANNER] init() complete');
 }
 init();
