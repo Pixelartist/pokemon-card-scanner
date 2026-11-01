@@ -544,7 +544,15 @@ window.__cardScanner = {
     // bestSimilarity is returned even below the gate so the UI can show
     // how close the near-miss was instead of failing silently.
     const all = await this.matcher.match(crop, 0, 5);
-    const matches = all.filter(m => m.similarity >= 78);
+    // Margin gate: a flat 78 cutoff passes ~34 cards per scan, so a near-threshold
+    // hit is a coin flip. Requiring the top hit to lead the runner-up by >= 8
+    // points rejects crowded false positives without a rebuild — real cards
+    // (~90) clear it; a 75-vs-74 pair does not. (measured: whole-card hash is
+    // frame-edge sensitive, so skew alone drops clean-image sim 92 -> 57.)
+    const MARGIN = 8;
+    const matches = all.filter(m =>
+        m.similarity >= 78 &&
+        (all.length < 2 || m.similarity - all[1].similarity >= MARGIN));
     const bestSimilarity = all.length ? all[0].similarity / 100 : 0;
     // Always produce the crop data URL — even on low local confidence — so the
     // cloud /api/scan always receives the clean straightened card instead of a
