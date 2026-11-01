@@ -318,8 +318,22 @@ class QuickdrawMatcher:
             logger.exception("quickdraw: load failed")
             return False
 
+    # static URL prefix -> on-disk base. German cards live outside data/images/,
+    # so a card_images-only resolver silently dropped all 17k of them.
+    _IMG_PREFIXES = (
+        ("/static/german_cards/images/", DATA_DIR / "german_cards" / "images"),
+        ("/static/pocket/", DATA_DIR / "images" / "pocket"),
+        ("/static/card_images/", DATA_DIR / "images"),
+        ("/static/clip_images/", DATA_DIR / "clip_images"),
+    )
+
     def _local_image(self, card: dict) -> Optional[Path]:
-        rel = card.get("image", "").split("/static/card_images/")[-1].lstrip("/")
+        url = card.get("image", "")
+        for prefix, base in self._IMG_PREFIXES:
+            if prefix in url:
+                p = base / url.split(prefix, 1)[1]
+                return p if p.exists() else None
+        rel = url.split("/static/card_images/")[-1].lstrip("/")
         p = DATA_DIR / "images" / rel
         return p if rel and p.exists() else None
 

@@ -3,7 +3,18 @@
 const RQ_KEY = 'psc_review_queue';
 const RQ = {
   load() { try { return JSON.parse(localStorage.getItem(RQ_KEY)) || []; } catch { return []; } },
-  save(items) { localStorage.setItem(RQ_KEY, JSON.stringify(items.slice(0, 100))); },
+  save(items) {
+    // A near-miss entry can carry a crop data URL (~40 KB), so 100 entries can
+    // blow the ~5 MB quota. Degrade by dropping the oldest half instead of
+    // throwing out of the scan flow.
+    for (;;) {
+      try { localStorage.setItem(RQ_KEY, JSON.stringify(items.slice(0, 100))); return; }
+      catch (e) {
+        if (items.length <= 1) return;
+        items = items.slice(0, Math.max(1, Math.ceil(items.length / 2)));
+      }
+    }
+  },
   add(item) {
     const items = RQ.load();
     if (item.id && items.some(q => q.id === item.id)) return false;

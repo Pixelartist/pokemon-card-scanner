@@ -595,6 +595,14 @@ window.__cardScanner = {
       detection: det,
       bestSimilarity,
       cropDataUrl,
+      // quickdraw never discards a near-miss: it stashes the best guesses so the
+      // UI can offer them for one-tap confirmation. Ship the top guesses even
+      // when the gate rejected all of them.
+      nearMiss: uniq.slice(0, 3).map(m => ({
+        id: m.id, name: m.name, number: m.number, rarity: m.rarity,
+        similarity: (m.similarity || 0) / 100, image_url: m.image || '',
+        set: { name: m.set },
+      })),
       candidates: matches.map(m => ({
         id: m.id,
         name: m.name,
@@ -651,6 +659,7 @@ if (scanBtn) {
                     // not cards; the browser YOLO already knows where the card
                     // is, so hand the server the clean crop it can actually match.
                     lastBrowserBest = res ? (res.bestSimilarity || 0) : 0;
+                    lastNearMiss = (res && res.nearMiss) || [];
                     const uploadSrc = (res && res.cropCanvas) || snap;
                     currentImage = await new Promise(r => uploadSrc.toBlob(r, 'image/jpeg', 0.9));
                 } catch (e) {
@@ -723,6 +732,40 @@ if (scanBtn) {
     });
 }
 
+// quickdraw's `noteNearMiss` contract: a card the matcher could not name is
+// still a detected card, so it goes to the review queue as an `unknown:` entry
+// the user can confirm or dismiss — it never just vanishes. The dedupe key is
+// the nearest catalogue guess plus a coarse score band: deterministic for a
+// given physical card, so the 2s auto-scan loop cannot flood the queue. A
+// detection with no guess at all is only worth storing for an explicit capture.
+function noteNearMiss(data) {
+  const pool = (data && data.candidates && data.candidates.length)
+    ? data.candidates
+    : ((data && data.nearMiss) || lastNearMiss);
+  const guess = pool && pool.length ? pool[0] : null;
+  const auto = !!(window.__autoScan && window.__autoScan.active);
+  if (!guess && auto) return;              // nothing to key on; don't spam
+  const best = (data && data.bestSimilarity) || lastBrowserBest
+    || (guess ? guess.similarity : 0) || 0;
+  const id = guess ? `unknown:${guess.id}:${Math.round(best * 40)}`
+                   : `unknown:frame:${Date.now()}`;
+  const crop = (data && (data.crop_image_path || data.crop_data_url))
+    || lastScanImages?.crop_image_path
+    || (window.__cardScanner && window.__cardScanner._lastCropDataUrl) || null;
+  if (!RQ.add({
+    id,
+    name: guess ? `Unidentified — looks like ${guess.name}` : 'Unidentified card',
+    meta: [guess && (guess.number || (guess.set && guess.set.name)),
+           `best ${Math.round(best * 100)}%`].filter(Boolean).join(' · '),
+    img: guess ? (guess.image_url || guess.card?.images?.large || '') : '',
+    score: best,
+    source: 'near_miss',
+    scan: (data && data.scan_image_path) || lastScanImages?.scan_image_path || null,
+    crop,
+  })) return;
+  if (window.refreshReviewQueues) window.refreshReviewQueues();
+}
+
 function displayScanResult(data, container) {
     // Normalize: API returns {data, meta} envelope on success, flat {error,...} on failure
     data = data.data || data;
@@ -757,6 +800,8 @@ function displayScanResult(data, container) {
     
     if (data.decision === 'no_match') {
         container.innerHTML = '<div class="card-result"><h3>No Match Found</h3><p>No matching card found. Try a clearer image, or use the manual search below to find and add your card.</p></div>';
+        // quickdraw contract: an unnamed detection is still a detection.
+        noteNearMiss(data);
         const panel = document.getElementById('manual-search-panel');
         if (panel && !(window.__autoScan && window.__autoScan.active)) {
             const inp = document.getElementById('manual-search-input');
@@ -839,6 +884,7 @@ function displayScanResult(data, container) {
         }
       }
     } else {
+      noteNearMiss(data);
       const el = document.getElementById('scan-overlay-result');
       // Show the best browser-hash score so a near-miss is visible, not silent.
       const bestPct = lastBrowserBest ? ` (best ${Math.round(lastBrowserBest * 100)}%)` : '';
@@ -1596,6 +1642,7 @@ document.getElementById('stop-camera-btn').addEventListener('click', () => {
 // by the Auto-Scan button + CLIP confidence, not by this loop.
 let liveDetectionInterval = null;
 let lastBrowserBest = 0; // best browser-hash similarity of the last scan (near-miss display)
+let lastNearMiss = [];  // top gated-out browser guesses, for the review queue
 
 function startLiveDetection() {
     if (liveDetectionInterval) return;
