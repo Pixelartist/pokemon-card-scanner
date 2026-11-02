@@ -431,16 +431,37 @@ class QuickdrawMatcher:
 
     # measured on index: exact self dist ~0, transformed queries ~0.05-0.15,
     # distinct-card nearest neighbours median 0.28 (min 0 = cross-set dup art)
-    MATCH_DIST, WEAK_DIST = 0.12, 0.30
+    MATCH_DIST, WEAK_DIST = 0.16, 0.30
 
-    def recognize(self, image_bytes: bytes, top_k: int = 5) -> Dict[str, Any]:
+    def recognize(self, image_bytes: bytes, top_k: int = 5, lang: Optional[str] = None) -> Dict[str, Any]:
+        """Recognize a card. If lang is set (e.g. 'en' or 'de'), filter candidates
+        to that language prefix only — English and German cards share the same
+        artwork and their fingerprints are nearly identical, so without this
+        filter an English card image falsely matches the German variant."""
         if not self.count and not self.load_index():
             return {"decision": "no_match", "candidates": [], "source": "quickdraw_matcher"}
         t0 = time.time()
         hyps = self._query_hypotheses(image_bytes)
-        c_dist = _weighted_sq_rows(np.stack([c for c, _ in hyps]), self.coarse, COARSE_DIM)
-        k = min(max(top_k * 20, 100), self.count)
+
+        # Build a mask of valid index positions for language filtering
+        # card_idx maps index position -> meta index; cards list is indexed by meta index
+        if lang:
+            mask = np.array([
+                (not lang.startswith("de") or self.cards[int(self.card_idx[i])].get("ptcg_id", "").startswith("de_"))
+                and (not lang.startswith("en") or not self.cards[int(self.card_idx[i])].get("ptcg_id", "").startswith("de_"))
+                for i in range(self.count)
+            ])
+            valid_indices = np.where(mask)[0]
+        else:
+            valid_indices = np.arange(self.count)
+
+        if len(valid_indices) == 0:
+            return {"decision": "no_match", "candidates": [], "source": "quickdraw_matcher"}
+
+        c_dist = _weighted_sq_rows(np.stack([c for c, _ in hyps]), self.coarse[valid_indices], COARSE_DIM)
+        k = min(max(top_k * 20, 100), len(valid_indices))
         cand = np.argpartition(c_dist, k - 1)[:k]
+        cand = valid_indices[cand]
         f_dist = _weighted_sq_rows(np.stack([f for _, f in hyps]), self.fine[cand], FINE_DIM)
         order = np.argsort(f_dist)[:top_k]
         best = float(f_dist[order[0]])
@@ -449,8 +470,9 @@ class QuickdrawMatcher:
         candidates = []
         for o in order:
             card = self.cards[int(self.card_idx[cand[o]])]
+            card_id = card.get("ptcg_id", "")
             candidates.append({
-                "id": card.get("ptcg_id", ""), "ptcg_id": card.get("ptcg_id", ""),
+                "id": card_id, "ptcg_id": card_id,
                 "name": card.get("name", ""), "set": card.get("set", ""),
                 "number": card.get("number", ""), "image": card.get("image", ""),
                 "similarity": round(max(0.0, 1.0 - float(f_dist[o]) / self.WEAK_DIST), 4),

@@ -228,6 +228,7 @@ async def scan_card(
     image: UploadFile = File(...),
     set_hint: Optional[str] = Form(None),
     region: Optional[str] = Form(None),
+    lang: Optional[str] = Form(None),
     browser_crop: Optional[UploadFile] = Form(None),
 ):
     """Identify a Pokemon card from an uploaded image.
@@ -238,6 +239,11 @@ async def scan_card(
     re-running its own detector on the raw frame — which historically
     produced garbage 140x175 crops of table edges because the numpy fallback
     mis-detected on frames that don't even contain a card.
+
+    If `lang` is set (e.g. 'en' or 'de'), restricts matching to cards of that
+    language — English and German cards share the same artwork and their
+    fingerprints are nearly identical, so without this an English card image
+    falsely matches the German variant.
     """
     try:
         image_bytes = await image.read()
@@ -288,6 +294,7 @@ async def scan_card(
             top_k=5,
             set_hint=set_hint,
             region=region,
+            lang=lang,
         )
 
         # If we got candidates from offline matcher, they already have image_url and name
@@ -1986,6 +1993,7 @@ async def quickdraw_status():
     from services.quickdraw_matcher import get_quickdraw_matcher
 
     matcher = get_quickdraw_matcher()
+    matcher.load_index()
     return {
         "matcher": "quickdraw",
         "index_available": matcher.index_path.exists(),

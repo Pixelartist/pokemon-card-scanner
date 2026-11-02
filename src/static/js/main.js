@@ -692,6 +692,16 @@ if (scanBtn) {
         
         if (setHint) formData.append('set_hint', setHint);
         if (region) formData.append('region', region);
+        // Pass language from the browser hash match so the server's Quickdraw
+        // matcher can restrict candidates to that language — English and German
+        // cards share the same artwork and their fingerprints are nearly
+        // identical, so without this an English card image falsely matches the
+        // German variant.
+        if (lastNearMiss && lastNearMiss.length > 0 && lastNearMiss[0].id) {
+            const lang = lastNearMiss[0].id.startsWith('de_') ? 'de' :
+                         lastNearMiss[0].id.startsWith('en_') ? 'en' : null;
+            if (lang) formData.append('lang', lang);
+        }
         
         try {
             const token = getAuthToken();

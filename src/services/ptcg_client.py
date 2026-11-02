@@ -38,9 +38,15 @@ class PokemonTCGClient:
         return {"X-Api-Key": self.api_key}
 
     def identify_card(self, image_bytes: bytes, top_k: int = 5,
-                      set_hint: str = None, region: str = None) -> Dict[str, Any]:
+                              set_hint: Optional[str] = None, region: Optional[str] = None,
+                              lang: Optional[str] = None) -> Dict[str, Any]:
         """Identify a Pokemon card from an image using the vision API.
-        
+
+        If lang is set (e.g. 'en' or 'de'), restricts the Quickdraw matcher
+        to cards of that language — English and German cards share the same
+        artwork and their fingerprints are nearly identical, so without this
+        an English card image falsely matches the German variant.
+
         Enhanced with comprehensive error handling:
         - HTML response detection and logging
         - Automatic fallback to offline matchers
@@ -50,7 +56,7 @@ class PokemonTCGClient:
         if not self.api_key:
             # No API key at all — go straight to offline
             logger.info("No API key found, using offline matcher.")
-            return self._identify_offline(image_bytes, top_k)
+            return self._identify_offline(image_bytes, top_k, lang=lang)
 
         try:
             # Encode image to base64
@@ -87,7 +93,7 @@ class PokemonTCGClient:
                 else:
                     # Response is HTML - treat as API error, fall back to offline
                     logger.warning(f"API returned HTML error page for status 403")
-                    return self._identify_offline(image_bytes, top_k)
+                    return self._identify_offline(image_bytes, top_k, lang=lang)
                 
                 error_code = error_data.get('error', {}).get('code', '') if isinstance(error_data.get('error'), dict) else ''
                 error_msg = error_data.get('error', {}).get('message', '') if isinstance(error_data.get('error'), dict) else str(error_data)
@@ -103,11 +109,11 @@ class PokemonTCGClient:
                     else:
                         # Trial exhausted — try offline fallback
                         logger.info("API trial exhausted, falling back to offline matcher")
-                        return self._identify_offline(image_bytes, top_k)
+                        return self._identify_offline(image_bytes, top_k, lang=lang)
                 else:
                     # Invalid key — try offline fallback
                     logger.info("Invalid API key, falling back to offline matcher")
-                    return self._identify_offline(image_bytes, top_k)
+                    return self._identify_offline(image_bytes, top_k, lang=lang)
             elif resp.status_code == 422 and is_json:
                 return {"error": "Invalid image", "decision": "no_match", "candidates": []}
             elif resp.status_code == 503 and is_json:
@@ -119,14 +125,14 @@ class PokemonTCGClient:
                 else:
                     logger.warning(f"API error {resp.status_code}, trying offline fallback")
                 # Always fall back to offline matcher for HTML responses or unknown errors
-                return self._identify_offline(image_bytes, top_k)
+                return self._identify_offline(image_bytes, top_k, lang=lang)
 
         except requests.exceptions.Timeout:
             return {"error": "Request timed out", "decision": "no_match", "candidates": []}
         except requests.exceptions.JSONDecodeError:
             # Specifically handle JSON decode errors (HTML response)
             logger.warning("API returned non-JSON response, falling back to offline matcher")
-            return self._identify_offline(image_bytes, top_k)
+            return self._identify_offline(image_bytes, top_k, lang=lang)
         except Exception as e:
             logger.error(f"Identification error: {e}")
             return {"error": str(e), "decision": "no_match", "candidates": []}
@@ -155,7 +161,7 @@ class PokemonTCGClient:
             logger.debug(f"CLIP matcher setup failed: {e}")
         return None
 
-    def _identify_offline(self, image_bytes: bytes, top_k: int = 5) -> Dict[str, Any]:
+    def _identify_offline(self, image_bytes: bytes, top_k: int = 5, lang: Optional[str] = None) -> Dict[str, Any]:
         """Fallback: identify card using offline matchers with comprehensive error handling and diagnostics."""
 
         # Try Quickdraw matcher FIRST: pure-CPU integral-image fingerprints,
@@ -168,7 +174,7 @@ class PokemonTCGClient:
 
             if matcher.load_index():
                 try:
-                    result = matcher.recognize(image_bytes, top_k=top_k)
+                    result = matcher.recognize(image_bytes, top_k=top_k, lang=lang)
                     if isinstance(result, dict) and result.get('candidates'):
                         decision = result.get('decision', 'no_match')
                         logger.info(f"Quickdraw matcher: {len(result['candidates'])} candidates, decision={decision}")
