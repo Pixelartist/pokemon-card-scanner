@@ -869,7 +869,7 @@ function displayScanResult(data, container) {
         data.candidates.forEach(candidate => {
             html += `
                 <div class="candidate" onclick="showCandidateDetail('${candidate.id}')">
-                    <img src="${candidate.card?.images?.small || candidate.image_url || ''}" alt="${candidate.name}">
+                    <img src="${candidate.card?.images?.small || candidate.image_url || ''}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
                     <div class="candidate-name">${candidate.name}</div>
                     <div class="candidate-number">${candidate.number || ''}</div>
                 </div>
@@ -2092,7 +2092,7 @@ displayScanResult = async function(data, container) {
                 data.candidates.slice(1).forEach(candidate => {
                     container.innerHTML += `
                         <div class="candidate" onclick="showCandidateDetail('${candidate.id}')">
-                            <img src="${candidate.card?.images?.small || candidate.image_url || ''}" alt="${candidate.name}">
+                            <img src="${candidate.card?.images?.small || candidate.image_url || ''}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
                             <div class="candidate-name">${candidate.name}</div>
                             <div class="candidate-number">${candidate.number || ''}</div>
                         </div>
