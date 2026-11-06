@@ -1173,7 +1173,8 @@ body {
     z-index: 100;
     width: 100%;
     max-width: 100%;
-    overflow-x: hidden;
+    overflow-x: visible;  /* must be visible too — overflow:hidden on one axis forces the other to auto, clipping the dropdown */
+    overflow-y: visible;  /* user-dropdown is absolute; let it float over the page */
     gap: var(--spacing-md);
 }
 
@@ -1251,12 +1252,12 @@ body {
     position: absolute;
     top: calc(100% + 8px);
     right: 0;
-    min-width: 220px;
+    min-width: 240px;
     background: var(--bg-card);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
-    padding: 12px;
+    border-radius: 14px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.4);
+    padding: 14px;
     z-index: 200;
     display: none;
 }
@@ -1315,14 +1316,27 @@ body {
 
 .user-dropdown-item {
     width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
     background: none;
     border: none;
     color: var(--text-primary);
-    padding: 8px 4px;
+    padding: 10px 8px;
     text-align: left;
-    border-radius: 6px;
+    border-radius: 8px;
     cursor: pointer;
-    font-size: 0.9rem;
+    font-size: 0.92rem;
+    transition: background 0.15s;
+}
+.user-dropdown-item .item-icon {
+    font-size: 1.05rem;
+    width: 20px;
+    text-align: center;
+    flex-shrink: 0;
+}
+.user-dropdown-item .item-text {
+    flex: 1;
 }
 
 .user-dropdown-item:hover {
@@ -2640,211 +2654,297 @@ body {
 .queue-panel .qi-status { font-size: 0.65rem; color: var(--text-muted, #8b949e); align-self: center; }
 .queue-panel .empty { text-align: center; color: var(--text-muted, #8b949e); font-size: 0.8rem; padding: 20px 0; }
 
-/* Fullscreen camera mode: when the camera section is active, it becomes a
-   full-screen overlay with the version badge floating on the video. */
-.camera-section:not(.hidden) {
-    position: fixed; inset: 0; z-index: 1000; margin: 0;
-    background: #000; color: #fff;
-    display: flex; flex-direction: column;
-}
-.camera-section:not(.hidden) .camera-wrapper {
-    flex: 1; max-width: none; width: 100%; min-height: 0;
-}
-.camera-section:not(.hidden) .camera-wrapper video {
-    width: 100%; height: 100%; object-fit: contain;
-}
-.camera-section:not(.hidden) .camera-controls,
-.camera-section:not(.hidden) .auto-detect-toggle {
-    padding: 12px; background: #000;
-    overflow: visible; /* buttons must not be clipped in fullscreen */
+/* =====================================================================
+   IMMERSIVE SCAN MODE — layout reverse-engineered from quickdraw.cards
+   (their app.css: desktop scan-view is `grid minmax(0,1fr) 360px` with a
+   capped camera stage + sticky session dock; phones get a full-bleed
+   stage above a 64px fixed tabbar; live state drives .camera-stage.live).
+   Their structure is adopted, our electric palette is kept.
+   ===================================================================== */
+
+/* Fix: markup uses class="scan-layout"; widen the dock to their 360px. */
+@media (min-width: 1025px) {
+    .scan-layout { grid-template-columns: minmax(0, 1fr) 360px; gap: 24px; }
+    /* Desktop nav lives in the top bar; the bottom tabbar is mobile-only (their .tabbar). */
+    .bottom-nav { display: none !important; }
 }
 
-/* Floating scan overlay in fullscreen camera mode */
+/* Mobile tabbar base: fixed 64px row, visible in every view (their .tabbar). */
+@media (max-width: 1024px) {
+    .bottom-nav {
+        position: fixed; left: 0; right: 0; bottom: 0; z-index: 100;
+        display: flex; height: calc(64px + env(safe-area-inset-bottom));
+        padding-bottom: env(safe-area-inset-bottom);
+        align-items: center; justify-content: space-around;
+        background: var(--bg-secondary, #0f1319); border-top: 1px solid var(--bg-card, #1a1a1d);
+    }
+    .bottom-nav .nav-item {
+        flex: 1; position: relative; display: flex; flex-direction: column;
+        align-items: center; gap: 3px; background: none; border: 0;
+        color: var(--text-muted, #8b949e); font-size: 0.62rem; font-weight: 600;
+        cursor: pointer; padding: 8px 4px; transition: color 0.15s;
+    }
+    .bottom-nav .nav-item:hover { color: var(--text-primary, #f1ece1); }
+    .bottom-nav .nav-item.active { color: var(--gold, #ffc629); }
+    .bottom-nav .nav-item.active::before {
+        content: ""; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+        width: 28px; height: 3px; border-radius: 0 0 4px 4px; background: var(--gold, #ffc629);
+    }
+    .bottom-nav .nav-icon { font-size: 22px; line-height: 1; }
+    body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+}
+
+/* --- Camera stage: capped box on desktop, not full-bleed (their .camera-stage) --- */
+@media (min-width: 1025px) {
+    body.camera-fs .scan-main {
+        padding: 0; background: transparent; border-radius: 0;
+        display: flex; flex-direction: column; min-height: 0;
+    }
+    body.camera-fs #camera-section {
+        position: relative; margin: 0; text-align: left;
+        height: calc(100dvh - 215px); min-height: 420px; max-height: 820px;
+        overflow: hidden; border: 1px solid var(--bg-card);
+        border-radius: var(--border-radius);
+        background: radial-gradient(ellipse at 50% 42%, var(--bg-secondary), #05060a 72%);
+    }
+    body.camera-fs .camera-wrapper {
+        position: absolute; inset: 0; width: 100%; height: 100%; max-width: none;
+    }
+    body.camera-fs #camera-preview {
+        width: 100%; height: 100%; object-fit: contain;
+        border: 0; border-radius: 0; background: #000;
+    }
+    /* Session dock sticks beside the stage and scrolls internally (their .session-dock) */
+    body.camera-fs .scan-sidebar {
+        position: sticky; top: 120px; max-height: calc(100dvh - 150px);
+        overflow-y: auto; gap: 14px;
+    }
+    body.camera-fs .scan-sidebar .queue-list { max-height: none; }
+    body.camera-fs .scan-sidebar .scan-options { display: none; }
+    body.camera-fs .tabs, body.camera-fs #drop-zone, body.camera-fs #preview { display: none; }
+    /* Queue lives in the dock here — kill only the floating queue duplicate. */
+    body.camera-fs #review-queue-overlay { display: none; }
+}
+
+/* --- Mobile: full-bleed stage + bottom tabbar (their .tabbar, 64px) --- */
+@media (max-width: 1024px) {
+    body.camera-fs .scan-main {
+        padding: 0; background: transparent; border-radius: 0;
+        display: flex; flex-direction: column; min-height: 0;
+    }
+    body.camera-fs #camera-section {
+        position: fixed; inset: 0 0 64px 0; margin: 0; text-align: left;
+        overflow: hidden; border: 0; border-radius: 0; z-index: 10;
+        background: radial-gradient(ellipse at 50% 42%, var(--bg-secondary), #05060a 72%);
+    }
+    body.camera-fs { overflow: hidden; }
+    body.camera-fs .scan-header { display: none; }
+    body.camera-fs .camera-wrapper {
+        position: absolute; inset: 0; width: 100%; height: 100%; max-width: none;
+    }
+    body.camera-fs #camera-preview {
+        width: 100%; height: 100%; object-fit: contain;
+        border: 0; border-radius: 0; background: #000;
+    }
+    body.camera-fs .scan-sidebar {
+        display: none; /* queue hidden on mobile in scan mode */
+    }
+    body.camera-fs #review-queue-overlay { display: none; }
+    body.camera-fs .scan-overlay {
+        position: fixed; left: 16px; right: 16px; bottom: 172px;
+        transform: none; max-width: none; z-index: 30;
+    }
+    body.camera-fs #camera-section .detection-status { display: none; }
+    body.camera-fs .bottom-controls { bottom: 80px; z-index: 28; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+}
+
+
+/* --- Live identification glass (their .live-match-banner) ---
+   Sits over the camera stage in scan mode; base (non-media) so both
+   desktop and mobile get it. Positioning overridden per breakpoint. */
 .scan-overlay {
-    position: absolute; top: 10px; right: 10px; bottom: 10px; z-index: 6;
-    width: min(300px, 34vw); display: flex; flex-direction: column; gap: 10px;
-    pointer-events: none;
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: 104px; width: min(420px, calc(100% - 28px));
+    z-index: 20; pointer-events: none;
 }
-.scan-overlay .so-result, .scan-overlay .queue-panel { pointer-events: auto; }
+body.camera-fs .scan-main { position: relative; }
+/* Glass pill carries the status text — hide the duplicate chip in immersive mode. */
+body.camera-fs .detection-status { display: none; }
 .so-result {
-    background: rgba(13,17,23,0.85); border: 1px solid var(--border, #30363d);
-    border-radius: 10px; padding: 10px; color: #fff;
-    font-size: 0.85rem; display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 12px;
+    background: rgba(10, 10, 11, 0.72); backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-left: 4px solid var(--gold, #ffc629);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    animation: so-in 0.18s ease-out; text-align: left;
 }
-.so-result img { width: 52px; height: 73px; object-fit: contain; border-radius: 6px; }
-.so-result .so-name { font-weight: 700; }
-.so-result .so-meta { font-size: 0.72rem; color: var(--text-muted, #8b949e); }
-.so-result .so-score { margin-left: auto; font-weight: 700; color: #3fb950; }
-.so-empty { color: var(--text-muted, #8b949e); }
-.so-found { color: #4ecca3; font-weight: 700; }
-.so-maybe { color: #ffa500; font-weight: 700; }
-.so-hint { color: var(--text-muted, #8b949e); font-size: 0.72rem; margin-left: auto; }
-.scan-overlay .queue-panel { flex: 1; min-height: 0; background: rgba(13,17,23,0.85); display: flex; flex-direction: column; }
-.scan-overlay .queue-list { flex: 1; min-height: 0; max-height: none; }
+@keyframes so-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.so-result img {
+    width: 34px; height: 48px; object-fit: cover; border-radius: 4px; flex: none;
+}
+.so-result .so-name {
+    font-weight: 800; font-size: 0.86rem; line-height: 1.15; color: var(--text-primary, #f1ece1);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.so-result .so-meta { font-size: 0.68rem; color: var(--text-muted, #a39d92); }
+.so-result .so-score { margin-left: auto; font-weight: 700; font-size: 0.75rem; color: var(--gold, #ffc629); }
+.so-result .so-empty { font-size: 0.75rem; color: var(--text-muted, #a39d92); letter-spacing: 0.03em; }
+.so-result .so-hint { font-size: 0.65rem; color: var(--text-muted, #8b949e); margin-top: 2px; }
+.so-result .so-found { font-weight: 800; color: var(--success, #3ef08a); font-size: 0.8rem; }
+.so-result .so-maybe { font-weight: 800; color: #ff9f1c; font-size: 0.8rem; }
+.so-result:has(.so-found) { border-left-color: var(--success, #3ef08a); }
+.so-result:has(.so-maybe) { border-left-color: #ff9f1c; }
 
-/* Camera fullscreen: overlay moves to a wider bottom panel when camera is active.
-   Shows up to 3 cards with big images so a human can identify each card at a glance.
-   Click header to expand/collapse the list. */
-/* Upload mode keeps the review tray too (quickdraw never hides its session
-   tray based on capture mode — it is a worklist, not camera chrome). The live
-   ID readout is meaningless without a feed, so only that is hidden; the tray
-   docks statically under the drop zone instead of floating over it. */
-#camera-section.hidden + #scan-overlay {
-    position: static; width: auto; margin-top: 16px; pointer-events: auto;
-}
-#camera-section.hidden + #scan-overlay .so-result { display: none; }
-body.camera-fs #scan-overlay {
-    position: fixed; top: 10px; right: 12px; bottom: auto; left: auto;
-    width: min(300px, 26vw); z-index: 1001;
-    flex-direction: column; /* stack result + queue vertically */
-}
-body.camera-fs #scan-overlay .queue-header { cursor: pointer; padding: 6px 12px; border-radius: 10px 10px 0 0; }
-body.camera-fs #scan-overlay .queue-panel { border-radius: 0 0 10px 10px; }
-body.camera-fs #scan-overlay:not(.expanded) .queue-list { display: none; }
-body.camera-fs #scan-overlay:not(.expanded) .queue-header { border-bottom: none; background: transparent; }
-body.camera-fs #scan-overlay.expanded { flex-direction: column; }
-body.camera-fs #scan-overlay.expanded .queue-panel { max-height: calc(100vh - 110px); overflow: hidden; }
-body.camera-fs #scan-overlay .queue-list { max-height: none; overflow-y: auto; }
-/* Latest-card chip: only visible in the collapsed camera chip */
-.queue-panel .qi-latest { display: none; align-items: center; gap: 6px; min-width: 0; }
-.queue-panel .qi-latest img { width: 22px; height: 31px; object-fit: contain; border-radius: 4px; }
-.queue-panel .qi-latest .qi-name { font-weight: 400; font-size: 0.72rem; max-width: 110px; }
-body.camera-fs #scan-overlay:not(.expanded) .qi-latest { display: flex; }
-/* Big card chips in expanded view */
-body.camera-fs #scan-overlay .queue-item {
-    flex-direction: column; align-items: flex-start; padding: 10px 12px;
-    min-height: 140px;
-}
-body.camera-fs #scan-overlay .queue-item > img,
-body.camera-fs #scan-overlay .qi-thumb-empty {
-    width: 80px; height: 110px; border-radius: 8px;
-}
-body.camera-fs #scan-overlay .qi-info { width: 100%; margin-top: 8px; }
-body.camera-fs #scan-overlay .qi-name { font-size: 1rem; }
-body.camera-fs #scan-overlay .qi-meta { font-size: 0.75rem; }
-body.camera-fs #scan-overlay .qi-actions { margin-top: 8px; }
-body.camera-fs #scan-overlay .qi-actions button { padding: 6px 14px; font-size: 0.85rem; }
-/* Collapsed: show up to 3 card chips horizontally */
-.queue-chips { display: none; }
-body.camera-fs #scan-overlay:not(.expanded) .queue-chips {
-    display: flex; gap: 8px; padding: 8px 10px;
-    overflow-x: auto; max-width: 100%;
-}
-body.camera-fs #scan-overlay:not(.expanded) .queue-chip {
-    flex-shrink: 0; width: 60px; cursor: pointer;
-    border-radius: 6px; overflow: hidden;
-    border: 2px solid var(--border, #30363d);
-}
-body.camera-fs #scan-overlay:not(.expanded) .queue-chip:hover { border-color: var(--accent, #58a6ff); }
-body.camera-fs #scan-overlay:not(.expanded) .queue-chip img { width: 60px; height: 82px; object-fit: contain; display: block; }
-body.camera-fs #scan-overlay:not(.expanded) .queue-chip .chip-name {
-    font-size: 0.6rem; color: var(--text-muted, #8b949e); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    padding: 2px 4px; background: var(--bg-card, #161b22);
-}
-
-/* ── Review-queue correction modal (inline, no native dialog) ─────────── */
+/* --- Correction modal (their sheet/dialog look), classes from review-queue.js --- */
 .rq-modal-backdrop {
-  position: fixed; inset: 0; z-index: 99999;
-  background: rgba(4,6,10,0.82);
-  display: flex; align-items: center; justify-content: center;
-  animation: rq-fade-in .12s ease-out;
+    position: fixed; inset: 0; z-index: 200; display: flex;
+    align-items: center; justify-content: center; padding: 18px;
+    background: rgba(5, 6, 10, 0.72); backdrop-filter: blur(4px);
 }
-@keyframes rq-fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes rq-slide-up { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
 .rqm-panel {
-  background: var(--bg-card, #161b22);
-  border: 1px solid var(--border, #30363d);
-  border-radius: 14px; width: min(96vw, 820px);
-  max-height: 94vh; overflow-y: auto;
-  box-shadow: 0 18px 64px rgba(0,0,0,.65);
-  display: flex; flex-direction: column;
-  animation: rq-slide-up .15s ease-out;
+    width: min(680px, 100%); max-height: calc(100dvh - 36px); overflow-y: auto;
+    background: var(--bg-secondary, #10141a); color: var(--text-primary, #f1ece1);
+    border: 1px solid var(--bg-card, #232a35); border-radius: 14px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
 }
 .rqm-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px; border-bottom: 1px solid var(--border, #30363d);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px; border-bottom: 1px solid var(--bg-card, #232a35);
 }
-.rqm-title { font-size: 1rem; font-weight: 700; color: var(--text-primary, #e6edf3); }
+.rqm-title { font-weight: 800; font-size: 1.05rem; }
 .rqm-close {
-  background: none; border: none; color: var(--text-muted, #8b949e);
-  font-size: 1.3rem; cursor: pointer; padding: 2px 6px; line-height: 1;
+    background: none; border: 0; color: var(--text-muted, #8b949e);
+    font-size: 1rem; cursor: pointer; padding: 4px 8px; border-radius: 8px;
 }
-.rqm-close:hover { color: var(--text-primary, #e6edf3); }
-.rqm-body {
-  display: flex; gap: 16px; padding: 14px 16px; flex: 1;
-}
-@media (max-width: 700px) {
-  .rqm-body { flex-direction: column; }
-}
-.rqm-column { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.rqm-close:hover { color: var(--text-primary, #fff); background: var(--bg-card, #232a35); }
+.rqm-body { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 18px; }
+.rqm-column { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .rqm-label {
-  font-size: 0.72rem; font-weight: 600; color: var(--text-muted, #8b949e);
-  text-transform: uppercase; letter-spacing: .06em;
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-muted, #8b949e);
 }
-.rqm-capture {
-  background: var(--bg-hover, #1c2128); border: 1px solid var(--border, #30363d);
-  border-radius: 8px; overflow: hidden; aspect-ratio: 3/4;
-  display: flex; align-items: center; justify-content: center;
+.rqm-capture img, .rqm-guess img {
+    width: 100%; max-height: 260px; object-fit: contain;
+    background: #000; border-radius: 10px; border: 1px solid var(--bg-card, #232a35);
 }
-.rqm-capture img { width: 100%; height: 100%; object-fit: contain; }
-.rqm-crop-wrap { display: flex; flex-direction: column; gap: 6px; }
-.rqm-crop { width: 100%; max-width: 220px; align-self: flex-start; margin: 0 auto; }
-.rqm-missing { color: var(--text-muted, #8b949e); font-size: 0.85rem; }
-.rqm-guess {
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
-  background: var(--bg-hover, #1c2128); border: 1px solid var(--border, #30363d);
-  border-radius: 8px; padding: 8px; width: 100%;
+.rqm-missing {
+    display: grid; place-items: center; height: 140px; border-radius: 10px;
+    border: 1px dashed var(--bg-card, #2a3342); color: var(--text-muted, #8b949e); font-size: 0.75rem;
 }
-.rqm-guess img {
-  width: 100%; max-width: 180px; aspect-ratio: 3/4; object-fit: contain;
-  border-radius: 6px; background: var(--bg, #0d1117);
-}
-.rqm-guess-name { font-weight: 700; font-size: 0.95rem; color: var(--text-primary, #e6edf3); text-align: center; }
-.rqm-guess-meta { font-size: 0.78rem; color: var(--text-muted, #8b949e); text-align: center; }
-.rqm-search { display: flex; flex-direction: column; gap: 6px; }
+.rqm-guess-name { font-weight: 800; font-size: 0.95rem; }
+.rqm-guess-meta { font-size: 0.72rem; color: var(--text-muted, #a39d92); }
+.rqm-search { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .rqm-input {
-  width: 100%; box-sizing: border-box; background: var(--bg, #0d1117);
-  border: 1px solid var(--border, #30363d); border-radius: 8px; color: var(--text-primary, #e6edf3);
-  padding: 8px 10px; font-size: 0.9rem; outline: none;
+    width: 100%; padding: 9px 12px; border-radius: 10px; font-size: 0.85rem;
+    background: var(--bg-primary, #0a0d12); color: var(--text-primary, #fff);
+    border: 1px solid var(--bg-card, #232a35);
 }
-.rqm-input:focus { border-color: var(--accent, #58a6ff); }
-.rqm-results {
-  display: flex; flex-direction: column; gap: 4px;
-  max-height: 200px; overflow-y: auto;
-  background: var(--bg, #0d1117); border: 1px solid var(--border, #30363d);
-  border-radius: 8px; padding: 6px;
-}
+.rqm-input:focus { outline: 2px solid var(--accent, #ffc629); border-color: transparent; }
+.rqm-results { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
 .rqm-row {
-  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
-  border-radius: 6px; cursor: pointer; border: 1px solid transparent;
+    display: flex; align-items: center; gap: 10px; padding: 6px 8px;
+    border-radius: 10px; cursor: pointer; border: 1px solid transparent;
 }
-.rqm-row:hover, .rqm-row-hl { border-color: var(--accent, #58a6ff); background: var(--bg-hover, #1c2128); }
-.rqm-row-img { width: 32px; height: 44px; object-fit: contain; border-radius: 4px; flex-shrink: 0; }
-.rqm-row-noimg { width: 32px; height: 44px; background: var(--border, #30363d); border-radius: 4px; flex-shrink: 0; }
-.rqm-row-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.rqm-row-name { font-size: 0.82rem; font-weight: 600; color: var(--text-primary, #e6edf3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.rqm-row-meta { font-size: 0.72rem; color: var(--text-muted, #8b949e); }
-.rqm-loading, .rqm-none { font-size: 0.78rem; color: var(--text-muted, #8b949e); padding: 8px; text-align: center; }
+.rqm-row:hover, .rqm-row-hl { background: var(--bg-card, #1a212c); border-color: var(--bg-card, #2b3546); }
+.rqm-row-img, .rqm-row-noimg { width: 34px; height: 48px; border-radius: 5px; object-fit: cover; flex: none; background: #000; }
+.rqm-row-info { min-width: 0; }
+.rqm-row-name { font-weight: 700; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rqm-row-meta { font-size: 0.66rem; color: var(--text-muted, #8b949e); }
+.rqm-loading, .rqm-none { font-size: 0.72rem; color: var(--text-muted, #8b949e); padding: 6px 2px; }
 .rqm-footer {
-  display: flex; justify-content: flex-end; gap: 8px;
-  padding: 10px 16px; border-top: 1px solid var(--border, #30363d);
+    display: flex; justify-content: flex-end; gap: 10px;
+    padding: 14px 18px; border-top: 1px solid var(--bg-card, #232a35);
 }
 .rqm-btn-cancel, .rqm-btn-save {
-  padding: 7px 14px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+    padding: 9px 18px; border-radius: 10px; font-weight: 700; font-size: 0.82rem; cursor: pointer;
 }
-.rqm-btn-cancel {
-  background: transparent; border: 1px solid var(--border, #30363d); color: var(--text-muted, #8b949e);
-}
-.rqm-btn-cancel:hover { color: var(--text-primary, #e6edf3); border-color: var(--text-muted, #8b949e); }
+.rqm-btn-cancel { background: none; border: 1px solid var(--bg-card, #2b3546); color: var(--text-primary, #e6e2d8); }
 .rqm-btn-save {
-  background: var(--accent, #58a6ff); border: none; color: #fff;
+    background: var(--gold, #ffc629); border: 0; color: #14100a;
 }
-.rqm-btn-save:hover:not(:disabled) { background: #79b8ff; }
 .rqm-btn-save:disabled { opacity: 0.45; cursor: not-allowed; }
-@media (max-width: 1100px) {
-  .gallery-grid { grid-template-columns: repeat(2, 1fr); }
-}
-@media (max-width: 700px) {
-  .gallery-grid { grid-template-columns: 1fr; }
+@media (max-width: 640px) {
+    .rqm-body { grid-template-columns: 1fr; }
 }
 
+/* --- In-stage chrome (their camera overlays: badges top, tools bottom) ---
+   Everything here sits absolute inside the camera stage so it can never
+   push or overlap the video, and flows as plain blocks in the upload-mode
+   fallback where the stage has no fixed height. */
+.camera-fs .status-badges, #camera-section .status-badges {
+    position: absolute; top: 12px; left: 12px; z-index: 5;
+    display: flex; gap: 8px; pointer-events: none;
+}
+.status-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px; font-size: 0.66rem; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    background: rgba(10, 10, 11, 0.65); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255, 255, 255, 0.16); color: var(--text-primary, #f1ece1);
+}
+.status-badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success, #3ef08a); }
+.status-badge.scanned { border-color: rgba(62, 240, 138, 0.5); color: var(--success, #3ef08a); }
+
+#camera-section .price-indicator {
+    position: absolute; top: 12px; right: 12px; z-index: 5;
+    padding: 5px 12px; border-radius: 999px;
+    background: rgba(255, 198, 41, 0.92); color: #14100a;
+    font-weight: 800; font-size: 0.72rem; letter-spacing: 0.02em;
+}
+#camera-section .version-badge {
+    position: absolute; top: 46px; right: 12px; left: auto; z-index: 5;
+    width: auto; display: inline-block; padding: 3px 10px;
+    border-radius: 999px; font-size: 0.62rem; line-height: 1.4;
+}
+
+/* Tool row pinned along the stage bottom */
+#camera-section .bottom-controls {
+    position: absolute; left: 0; right: 0; bottom: 14px; z-index: 6;
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+    padding: 0 14px; pointer-events: none;
+}
+#camera-section .bottom-controls > * { pointer-events: auto; }
+#camera-section .control-left { justify-self: start; display: flex; gap: 8px; }
+#camera-section .control-center { justify-self: center; }
+#camera-section .control-right { justify-self: end; display: flex; gap: 8px; }
+#camera-section .auto-detect-toggle { margin-top: 0; }
+
+/* In-stage tool buttons: glass pills (their .camera-tools buttons) */
+#camera-section .auto-scan-btn,
+#camera-section .stop-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 10px 14px; border-radius: 999px;
+    font-size: 0.72rem; font-weight: 700; line-height: 1;
+    background: rgba(10, 10, 11, 0.65); backdrop-filter: blur(6px);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    color: var(--text-primary, #f1ece1); cursor: pointer; white-space: nowrap;
+    width: auto; height: auto;
+}
+#camera-section .auto-scan-btn:hover, #camera-section .stop-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+}
+#camera-section .auto-scan-btn.active {
+    border-color: var(--gold, #ffc629); color: var(--gold, #ffc629);
+}
+
+/* Detection status chip sits just above the tool row */
+#camera-section .detection-status {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    bottom: 84px; z-index: 5; margin: 0;
+}
+
+@media (max-width: 480px) {
+    #camera-section .detection-status { bottom: 92px; font-size: 0.68rem; }
+}
+
+/* Camera-error fallback inside the immersive stage: center the prompt
+   (startCamera replaces the stage contents with just .camera-prompt). */
+body.camera-fs .camera-prompt {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 14px;
+    padding: 24px; text-align: center; color: var(--text-primary, #f1ece1);
+    font-size: 0.9rem;
+}
+body.camera-fs .camera-prompt p { max-width: 340px; margin: 0; opacity: 0.9; }

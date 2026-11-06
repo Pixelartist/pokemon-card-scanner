@@ -748,15 +748,24 @@ if (scanBtn) {
 // the nearest catalogue guess plus a coarse score band: deterministic for a
 // given physical card, so the 2s auto-scan loop cannot flood the queue. A
 // detection with no guess at all is only worth storing for an explicit capture.
+// minimum similarity for near-miss queue (avoid false positives from hands, edges, etc.)
+// 0.4 let a blurry shelf photo through as a "73%" near-miss; 0.75 filters that
+// while keeping real unidentified cards (confirmed matches score 0.8+).
+const MIN_NEAR_MISS_SIM = 0.75;
+
 function noteNearMiss(data) {
   const pool = (data && data.candidates && data.candidates.length)
     ? data.candidates
     : ((data && data.nearMiss) || lastNearMiss);
   const guess = pool && pool.length ? pool[0] : null;
-  const auto = !!(window.__autoScan && window.__autoScan.active);
-  if (!guess && auto) return;              // nothing to key on; don't spam
   const best = (data && data.bestSimilarity) || lastBrowserBest
     || (guess ? guess.similarity : 0) || 0;
+  
+  // Guard: don't queue near-misses below confidence threshold (false positives)
+  if (best < MIN_NEAR_MISS_SIM) return;
+  
+  const auto = !!(window.__autoScan && window.__autoScan.active);
+  if (!guess && auto) return;              // nothing to key on; don't spam
   const id = guess ? `unknown:${guess.id}:${Math.round(best * 40)}`
                    : `unknown:frame:${Date.now()}`;
   const crop = (data && (data.crop_image_path || data.crop_data_url))
@@ -1431,10 +1440,23 @@ async function initializeApp() {
             e.stopPropagation();
             userDropdown?.classList.toggle('open');
         });
-        // Close dropdown on outside click
-        document.addEventListener('click', () => {
+        // Close dropdown on outside click (only when the click is NOT inside
+        // the dropdown - otherwise the language <select> would close the menu
+        // the moment you try to pick a language).
+        document.addEventListener('click', (e) => {
+            if (!userDropdown) return;
+            if (userDropdown.contains(e.target)) return;
             userDropdown?.classList.remove('open');
         });
+        // Change Password button in the dropdown
+        const changePasswordBtn = document.getElementById('user-change-password');
+        if (changePasswordBtn) {
+            changePasswordBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                userDropdown?.classList.remove('open');
+                openPasswordChangeModal('current');
+            });
+        }
         // Sign out button
         const signoutBtn = document.getElementById('user-signout');
         if (signoutBtn) {
@@ -1507,17 +1529,35 @@ let currentMode = 'upload'; // 'upload' or 'camera'
 document.getElementById('mode-upload').addEventListener('click', () => switchMode('upload'));
 document.getElementById('mode-camera').addEventListener('click', () => switchMode('camera'));
 
+// Bottom navigation (mobile): highlight active tab, navigate sections
+document.querySelectorAll('#bottom-nav .nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+        const tab = item.dataset.tab;
+        document.querySelectorAll('#bottom-nav .nav-item').forEach(n => n.classList.remove('active'));
+        item.classList.add('active');
+        // Scroll / reveal the matching section; on mobile this is the primary nav.
+        const target = document.getElementById(tab === 'scan' ? 'camera-section'
+                            : tab === 'review' ? 'review-queue'
+                            : tab === 'collection' ? 'collection'
+                            : 'decks');
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+});
+
 function switchMode(mode) {
     currentMode = mode;
-    
+
     // Update button states
     document.getElementById('mode-upload').classList.toggle('active', mode === 'upload');
     document.getElementById('mode-camera').classList.toggle('active', mode === 'camera');
-    
+
+    // Toggle full-screen overlay class on <body>
+    document.body.classList.toggle('camera-fs', mode === 'camera');
+
     // Show/hide appropriate sections
     const dropZone = document.getElementById('drop-zone');
     const cameraSection = document.getElementById('camera-section');
-    
+
     if (mode === 'upload') {
         dropZone.classList.remove('hidden');
         cameraSection.classList.add('hidden');
@@ -1556,7 +1596,11 @@ async function startCamera() {
         });
         
         video.srcObject = cameraStream;
-        video.play();
+        // Muted+playsInline so mobile browsers allow autoplay without a
+        // gesture chain reaching play(); swallow autoplay rejections.
+        video.muted = true;
+        video.playsInline = true;
+        video.play().catch(e => console.warn('camera autoplay blocked:', e));
 
         // Show capture button
         document.getElementById('capture-btn').classList.remove('hidden');
@@ -2688,7 +2732,55 @@ function createGalleryItem(card) {
     // all effects key off these custom properties.
     const holo = item.querySelector('.holo-card');
     const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    let resetFrame = null;
+    let resetStarted = 0;
+    let resetValues = null;
+    const resetTargets = {
+        'pointer-x': 50,
+        'pointer-y': 50,
+        'pointer-from-center': 0,
+        'pointer-from-top': 0.5,
+        'pointer-from-left': 0.5,
+        'background-x': 50,
+        'background-y': 50,
+        'rotate-x': 0,
+        'rotate-y': 0
+    };
+    const resetUnits = {
+        'pointer-x': '%',
+        'pointer-y': '%',
+        'background-x': '%',
+        'background-y': '%',
+        'rotate-x': 'deg',
+        'rotate-y': 'deg'
+    };
+    const readCustomProperty = (name) => {
+        const value = getComputedStyle(holo).getPropertyValue(`--${name}`).trim();
+        return parseFloat(value) || 0;
+    };
+    const cancelReset = () => {
+        if (resetFrame !== null) cancelAnimationFrame(resetFrame);
+        resetFrame = null;
+    };
+    const animateReset = (timestamp) => {
+        if (resetStarted === 0) resetStarted = timestamp;
+        const progress = clamp((timestamp - resetStarted) / 650, 0, 1);
+        const eased = 1 - (1 - progress) ** 3;
+        const style = holo.style;
+        Object.entries(resetTargets).forEach(([name, target]) => {
+            const value = resetValues[name] + (target - resetValues[name]) * eased;
+            style.setProperty(`--${name}`, `${value.toFixed(3)}${resetUnits[name] || ''}`);
+        });
+        if (progress < 1) {
+            resetFrame = requestAnimationFrame(animateReset);
+        } else {
+            resetFrame = null;
+            resetStarted = 0;
+        }
+    };
     item.addEventListener('mousemove', (e) => {
+        cancelReset();
+        resetStarted = 0;
         const r = holo.getBoundingClientRect();
         const x = clamp(((e.clientX - r.left) / r.width) * 100, 0, 100);
         const y = clamp(((e.clientY - r.top) / r.height) * 100, 0, 100);
@@ -2705,7 +2797,10 @@ function createGalleryItem(card) {
         s.setProperty('--rotate-y', `${((y - 50) / 50 * -15).toFixed(2)}deg`);
     });
     item.addEventListener('mouseleave', () => {
-        holo.removeAttribute('style');
+        cancelReset();
+        resetValues = Object.fromEntries(Object.keys(resetTargets).map(name => [name, readCustomProperty(name)]));
+        resetStarted = 0;
+        resetFrame = requestAnimationFrame(animateReset);
     });
 
     // Click: spin the card, then open the detail modal (delegates to showEnhancedCardDetail)
@@ -3118,3 +3213,92 @@ function injectElectricFilters() {
 
 injectElectricFilters();
 
+
+// Open the Password Change modal in a given tab mode (current/reset)
+function openPasswordChangeModal(mode) {
+    const modal = document.getElementById('password-change-modal');
+    if (!modal) return;
+    mode = mode || 'current';
+    document.querySelectorAll('.auth-tabs button').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.changePassword === mode);
+    });
+    document.querySelectorAll('.auth-form').forEach(form => {
+        form.style.display = form.id === mode + '-password-form' ? 'block' : 'none';
+    });
+    modal.classList.remove('hidden');
+}
+// Forgot password link -> open the Reset Password tab of the Password Change modal
+const forgotPasswordLink = document.getElementById("forgot-password-link");
+if (forgotPasswordLink) {
+    forgotPasswordLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        const passwordChangeModal = document.getElementById("password-change-modal");
+        if (!passwordChangeModal) return;
+        // Switch to the Reset Password tab
+        document.querySelectorAll(".auth-tabs button").forEach(btn => {
+            btn.classList.toggle("active", btn.dataset.changePassword === "reset");
+        });
+        document.querySelectorAll(".auth-form").forEach(form => {
+            form.style.display = form.id === "reset-password-form" ? "block" : "none";
+        });
+        passwordChangeModal.classList.remove("hidden");
+    });
+}
+
+// Reset password form handler (public "Forgot Password" flow)
+async function handleResetPasswordSubmit(e) {
+    e.preventDefault();
+    const email = document.getElementById("reset-email")?.value?.trim();
+    const newPassword = document.getElementById("reset-new-password")?.value;
+    const confirmPassword = document.getElementById("reset-confirm-password")?.value;
+    const errorEl = document.getElementById("reset-password-error");
+    const submitBtn = document.getElementById("reset-password-submit");
+
+    if (!email || !newPassword || !confirmPassword) {
+        if (errorEl) errorEl.textContent = "Please fill in all fields";
+        return;
+    }
+    if (newPassword !== confirmPassword) {
+        if (errorEl) errorEl.textContent = "Passwords do not match";
+        return;
+    }
+    if (newPassword.length < 6) {
+        if (errorEl) errorEl.textContent = "Password must be at least 6 characters";
+        return;
+    }
+
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+        const response = await fetch("/api/auth/reset-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ email, new_password: newPassword })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.success) {
+            if (errorEl) { errorEl.textContent = ""; errorEl.style.color = ""; }
+            // Clear form and switch back to the Login tab
+            document.getElementById("reset-email").value = "";
+            document.getElementById("reset-new-password").value = "";
+            document.getElementById("reset-confirm-password").value = "";
+            const loginModal = document.getElementById("login-modal");
+            if (loginModal) {
+                loginModal.classList.remove("hidden");
+                document.querySelectorAll(".auth-tabs button").forEach(btn => {
+                    btn.classList.toggle("active", btn.dataset.auth === "login");
+                });
+                document.querySelectorAll(".auth-form").forEach(form => {
+                    form.classList.toggle("active", form.id === "login-form");
+                });
+            }
+        } else {
+            if (errorEl) errorEl.textContent = data.detail || "Reset failed";
+        }
+    } catch (error) {
+        if (errorEl) errorEl.textContent = "Network error";
+    } finally {
+        if (submitBtn) submitBtn.disabled = false;
+    }
+}
+
+document.getElementById("reset-password-form")?.addEventListener("submit", handleResetPasswordSubmit);

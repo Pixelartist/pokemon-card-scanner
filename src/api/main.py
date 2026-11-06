@@ -2318,3 +2318,15 @@ async def change_password(
         return {"success": True, "detail": "Password updated successfully"}
     return {"success": False, "detail": "Invalid current password or new password too short (< 6 chars)"}
 
+
+@app.post("/api/auth/reset-password")
+async def reset_password(
+    email: str = Form(...),
+    new_password: str = Form(...),
+):
+    """Reset a user password using their email address (public "Forgot Password" flow)."""
+    auth_service = AuthService()
+    ok = auth_service.reset_password_by_email(email, new_password)
+    if ok:
+        return {"success": True, "detail": "Password updated successfully"}
+    return {"success": False, "detail": "Email not found or new password too short (< 6 chars)"}

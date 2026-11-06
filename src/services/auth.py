@@ -408,3 +408,31 @@ class AuthService:
             return cursor.rowcount > 0
         finally:
             conn.close()
+
+    def reset_password_by_email(self, email: str, new_password: str) -> bool:
+        """Reset a user password using their email address (used by the public
+        "Forgot Password" flow)."""
+        if len(new_password) < 6:
+            return False
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            new_hash = hash_password(new_password)
+            cursor.execute(
+                "UPDATE users SET hashed_password = ? WHERE id = ?",
+                (new_hash, row[0])
+            )
+            conn.commit()
+            # Invalidate any active refresh sessions so the old session is gone
+            cursor.execute(
+                "UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0",
+                (row[0],)
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
