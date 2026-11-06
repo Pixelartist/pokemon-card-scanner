@@ -400,9 +400,11 @@ document.getElementById('register-form')?.addEventListener('submit', handleRegis
 
 function updateUserInfo(username) {
     const statusEl = document.getElementById('user-status');
+    const dropdownUsername = document.querySelectorAll('.user-dropdown .username');
     if (statusEl && username) {
         statusEl.innerHTML = `<span class="status-dot"></span><span class="username">${username}</span>`;
     }
+    dropdownUsername.forEach(el => { el.textContent = username || 'Guest'; });
 }
 
 // --- Preferred card language (user setting) -------------------------------
@@ -1392,7 +1394,7 @@ if (typeof mountReviewQueue === 'function') {
     },
   };
   if (rqRoot) window.__reviewQueues.push(mountReviewQueue(rqRoot, opts));
-  if (rqOverlay) window.__reviewQueues.push(mountReviewQueue(rqOverlay, opts));
+  // (rqOverlay removed — it duplicated the sidebar queue)
 }
 window.__reviewQueue = window.__reviewQueues[0];
 window.refreshReviewQueues = () => window.__reviewQueues.forEach(q => q.refresh());
@@ -1536,10 +1538,7 @@ document.querySelectorAll('#bottom-nav .nav-item').forEach(item => {
         document.querySelectorAll('#bottom-nav .nav-item').forEach(n => n.classList.remove('active'));
         item.classList.add('active');
         // Scroll / reveal the matching section; on mobile this is the primary nav.
-        const target = document.getElementById(tab === 'scan' ? 'camera-section'
-                            : tab === 'review' ? 'review-queue'
-                            : tab === 'collection' ? 'collection'
-                            : 'decks');
+        const target = document.getElementById(tab + '-tab');
         if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
 });

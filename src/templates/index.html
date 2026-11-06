@@ -191,14 +191,13 @@
                             <canvas id="camera-canvas" hidden></canvas>
                         </div>
 
-                        <!-- Floating overlay: live identification + review queue
+                        <!-- Floating overlay: live identification
                              Kept outside #camera-section so camera error paths
                              that replace innerHTML don't destroy the queue. -->
                         <div id="scan-overlay" class="scan-overlay">
                             <div id="scan-overlay-result" class="so-result">
                                 <span class="so-empty">Scanning…</span>
                             </div>
-                            <div id="review-queue-overlay" class="queue-panel"></div>
                         </div>
 
                         <!-- Preview -->
@@ -692,17 +691,21 @@
 
     <!-- Bottom Navigation Bar (Mobile) -->
     <nav class="bottom-nav" id="bottom-nav">
-        <div class="nav-item active" data-tab="review">
-            <span class="nav-icon">📋</span>
-            <span class="nav-label">Review</span>
+        <div class="nav-item active" data-tab="binder">
+            <span class="nav-icon">📖</span>
+            <span class="nav-label">Binder</span>
         </div>
-        <div class="nav-item" data-tab="collection">
+        <div class="nav-item" data-tab="gallery">
+            <span class="nav-icon">🖼️</span>
+            <span class="nav-label">Gallery</span>
+        </div>
+        <div class="nav-item" data-tab="sets">
             <span class="nav-icon">📚</span>
-            <span class="nav-label">Collection</span>
+            <span class="nav-label">Sets</span>
         </div>
-        <div class="nav-item" data-tab="decks">
-            <span class="nav-icon">🃏</span>
-            <span class="nav-label">Decks</span>
+        <div class="nav-item" data-tab="stats">
+            <span class="nav-icon">📊</span>
+            <span class="nav-label">Stats</span>
         </div>
     </nav>
 

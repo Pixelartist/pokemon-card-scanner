@@ -2670,6 +2670,8 @@ body {
 }
 
 /* Mobile tabbar base: fixed 64px row, visible in every view (their .tabbar). */
+/* Hide the debug Electric Test tab from the user-facing nav on all breakpoints. */
+#electric-debug-tab { display: none !important; }
 @media (max-width: 1024px) {
     .bottom-nav {
         position: fixed; left: 0; right: 0; bottom: 0; z-index: 100;
