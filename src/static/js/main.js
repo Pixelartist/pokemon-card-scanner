@@ -1574,6 +1574,7 @@ async function startCamera() {
 
     // Pre-check: verify mediaDevices is available
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        document.body.classList.remove('camera-fs');
         cameraSection.innerHTML = `
             <div class="camera-prompt">
                 <p>📷 Camera API not available. Your browser does not support webcam access.</p>
@@ -1625,6 +1626,7 @@ async function startCamera() {
             message += error.message || 'Please try uploading an image instead.';
         }
         
+        document.body.classList.remove('camera-fs');
         cameraSection.innerHTML = `
             <div class="camera-prompt">
                 <p>${message}</p>
