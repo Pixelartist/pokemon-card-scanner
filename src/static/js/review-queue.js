@@ -107,7 +107,7 @@ function rqPaintImages(root, items) {
 
 async function postMisread(payload) {
   const token = window._getAuthToken || window.getAuthToken;
-  const headers = token ? { Authorization: `Bearer ${token()}` } : {};
+  const headers = token ? { Authorization: `Bearer ${token()}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
   try {
     const r = await fetch('/api/misreads', { method: 'POST', headers, body: JSON.stringify(payload) });
     if (!r.ok) throw new Error(r.statusText);
@@ -245,9 +245,19 @@ function rqOpenCorrection(item) {
         crop_image_path: item.crop,
       });
       localStorage.setItem('last_misread_' + item.id, Date.now());
+      RQ.remove(item.id);
       rqCloseCorrection();
-      window.showToast('Correction logged — thanks for improving the model!');
+      window.showToast('Correction saved — card added to your collection');
       if (window.refreshReviewQueues) window.refreshReviewQueues();
+      // Add the corrected card to the collection
+      try {
+        const correctId = selected.ptcg_id || selected.id || item.id;
+        if (correctId && typeof window.addToCollectionById === 'function') {
+          await window.addToCollectionById(correctId, selected.name);
+        }
+      } catch (addErr) {
+        console.error('Could not add corrected card to collection:', addErr);
+      }
     } catch (e) {
       saveBtn.disabled = false;
       alert('Could not log correction: ' + e.message);

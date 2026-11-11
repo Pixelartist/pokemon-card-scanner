@@ -22,7 +22,8 @@ load_dotenv('/opt/data/pokemon-card-scanner/.env')
 import requests
 from datetime import datetime
 
-from api.models.database import init_db, get_db_connection, User, Binder
+from api.models.database import init_db, get_db_connection, User, Binder, DATABASE_URL
+db_path = DATABASE_URL  # backward-compatible alias
 from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, UserProfileUpdate, BinderCreate, BinderUpdate
 from services.ptcg_client import get_client
 from services.collection import CollectionService
@@ -1677,8 +1678,10 @@ async def get_card_details(card_id: str):
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT id, ptcg_id, name, number, rarity, set_name, hp, types, images "
-                "FROM cards WHERE ptcg_id = ?", (card_id,)
+                "SELECT c.id, c.ptcg_id, c.name, c.number, c.rarity, c.set_name, c.hp, c.types, c.images, "
+                "s.name as set_display_name, s.ptcg_id as set_ptcg_id "
+                "FROM cards c LEFT JOIN sets s ON c.set_id = s.id OR (c.set_id IS NULL AND c.set_name = s.ptcg_id) "
+                "WHERE c.ptcg_id = ?", (card_id,)
             ).fetchone()
             conn.close()
             if row:
@@ -1704,7 +1707,7 @@ async def get_card_details(card_id: str):
                         "hp": row["hp"] or None,
                         "types": types,
                         "artist": None,
-                        "set": {"name": row["set_name"], "code": row["set_name"]},
+                        "set": {"name": row["set_display_name"] or row["set_name"] or "", "code": row["set_ptcg_id"] or (row["ptcg_id"].split("-")[0] if "-" in row["ptcg_id"] else "")},
                         "images": _normalize_local_row_images(images, card_id),
                     },
                     "legalities": None,
@@ -1730,8 +1733,10 @@ async def get_card_details(card_id: str):
         try:
             conn = sqlite3.connect(str(db_path))
             row = conn.execute(
-                "SELECT id, ptcg_id, name, number, rarity, set_name, hp, types, images "
-                "FROM cards WHERE id = ?", (int(card_id),)
+                "SELECT c.id, c.ptcg_id, c.name, c.number, c.rarity, c.set_name, c.hp, c.types, c.images, "
+                "s.name as set_display_name, s.ptcg_id as set_ptcg_id "
+                "FROM cards c LEFT JOIN sets s ON c.set_id = s.id OR (c.set_id IS NULL AND c.set_name = s.ptcg_id) "
+                "WHERE c.id = ?", (int(card_id),)
             ).fetchone()
             conn.close()
             if row:
@@ -1762,7 +1767,7 @@ async def get_card_details(card_id: str):
                             "hp": row["hp"] or None,
                             "types": types,
                             "artist": None,
-                            "set": {"name": row["set_name"], "code": row["set_name"]},
+                            "set": {"name": row["set_display_name"] or row["set_name"] or "", "code": row["set_ptcg_id"] or (row["ptcg_id"].split("-")[0] if "-" in row["ptcg_id"] else "")},
                             "images": _normalize_local_row_images(images, card_id),
                         },
                         "legalities": None,
