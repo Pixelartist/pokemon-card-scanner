@@ -1098,6 +1098,7 @@ async function addToCollectionById(ptcgId, name) {
     // Now call the original addToCollection with the resolved card ID
     addToCollection(cardId);
 }
+window.addToCollectionById = addToCollectionById;
 
 async function addToCollection(cardId) {
     // Open add modal
@@ -1198,6 +1199,14 @@ async function submitAddCollection(e) {
             lastScanImages = null;  // crop belongs to this add only
             document.getElementById('add-modal').classList.add('hidden');
             initBinder();
+            // Remove the just-added card from the review queue if present
+            try {
+                const cardId = formData.get('card_id');
+                if (cardId && window.RQ) {
+                    window.RQ.remove(cardId);
+                    if (window.refreshReviewQueues) window.refreshReviewQueues();
+                }
+            } catch (e) { /* non-fatal */ }
         } else {
             alert('Error adding card');
         }
@@ -1554,16 +1563,19 @@ function switchMode(mode) {
     document.body.classList.toggle('camera-fs', mode === 'camera');
 
     // Show/hide appropriate sections
-    const dropZone = document.getElementById('drop-zone');
+        const dropZone = document.getElementById('drop-zone');
     const cameraSection = document.getElementById('camera-section');
+    const scanOverlay = document.getElementById('scan-overlay');
 
     if (mode === 'upload') {
         dropZone.classList.remove('hidden');
         cameraSection.classList.add('hidden');
+        if (scanOverlay) scanOverlay.classList.add('hidden');
         stopCamera();
     } else {
         dropZone.classList.add('hidden');
         cameraSection.classList.remove('hidden');
+        if (scanOverlay) scanOverlay.classList.remove('hidden');
         startCamera();
     }
 }
@@ -1681,7 +1693,9 @@ async function capturePhoto(keepCamera = false) {
 
     const cameraSection = document.getElementById('camera-section');
     if (cameraSection) cameraSection.classList.add('hidden');
+        if (scanOverlay) scanOverlay.classList.add('hidden');
     stopCamera();
+    switchMode('upload');
 }
 
 document.getElementById('capture-btn')?.addEventListener('click', () => capturePhoto(false));
@@ -2427,7 +2441,7 @@ function normalizeCollectionItem(raw) {
         card_name: c.name || raw.card_name || 'Unknown',
         image_url: c.images?.large || c.images?.small || raw.crop_image_path || raw.scan_image_path || '',
         set_id: c.ptcg_id ? c.ptcg_id.split('-')[0] : '',
-        set_info: c.set_name || '',
+        set_info: c.set?.name || c.set_name || '',
         glow_tier: raw.glow_tier || '',
         rarity: c.rarity || raw.rarity || '',
         is_reverse_holo: !!raw.is_reverse_holo,
@@ -2725,7 +2739,7 @@ function createGalleryItem(card) {
         </div>
         <div class="gallery-item-info">
             <div class="gallery-item-name">${cardName}</div>
-            <div class="gallery-item-meta">${setId || setInfo || 'Unknown Set'}</div>
+            <div class="gallery-item-meta">${setInfo || setId || 'Unknown Set'}</div>
         </div>
     `;
 
@@ -3303,3 +3317,4 @@ async function handleResetPasswordSubmit(e) {
 }
 
 document.getElementById("reset-password-form")?.addEventListener("submit", handleResetPasswordSubmit);
+
