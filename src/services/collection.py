@@ -133,9 +133,10 @@ class CollectionService:
             if user_id:
                 cursor.execute(
                     """SELECT ci.*, c.name as card_name, c.ptcg_id, c.number, c.rarity,
-                               c.set_name, c.images, c.hp, c.types
+                               c.set_name, c.images, c.hp, c.types, s.name as set_display_name, s.ptcg_id as set_code
                         FROM collection_items ci
                         LEFT JOIN cards c ON ci.card_id = c.id
+                        LEFT JOIN sets s ON c.set_id = s.id OR (c.set_id IS NULL AND c.set_name = s.ptcg_id)
                         WHERE ci.user_id = ?
                         ORDER BY ci.added_at DESC""",
                     (user_id,)
@@ -143,9 +144,10 @@ class CollectionService:
             else:
                 cursor.execute(
                     """SELECT ci.*, c.name as card_name, c.ptcg_id, c.number, c.rarity,
-                               c.set_name, c.images, c.hp, c.types
+                               c.set_name, c.images, c.hp, c.types, s.name as set_display_name, s.ptcg_id as set_code
                         FROM collection_items ci
                         LEFT JOIN cards c ON ci.card_id = c.id
+                        LEFT JOIN sets s ON c.set_id = s.id OR (c.set_id IS NULL AND c.set_name = s.ptcg_id)
                         ORDER BY ci.added_at DESC""")
 
             all_rows = cursor.fetchall()
@@ -231,6 +233,7 @@ class CollectionService:
                     "number": row["number"],
                     "rarity": row["rarity"],
                     "set_name": row["set_name"],
+                    "set": {"name": row["set_display_name"] or row["set_name"] or "", "code": row["set_code"] or (row["ptcg_id"].split("-")[0] if row["ptcg_id"] else "")},
                     "hp": row["hp"],
                     "types": types,
                     "images": images,
