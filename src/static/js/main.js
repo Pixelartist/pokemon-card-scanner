@@ -2456,13 +2456,31 @@ function classifyHoloEffect(card) {
     if (card.is_reverse_holo) return 'reverse holo';
     if (r.includes('vmax')) return 'rare holo vmax';
     if (r.includes('vstar')) return 'rare holo vstar';
-    if (r.includes('crown') || r.includes('secret') || r === '☆☆☆' || r === '✵✵') return 'rare secret';
-    if (r.includes('radiant')) return 'radiant rare';
-    if (r.includes('rainbow') || r === '✵') return 'rare rainbow';
-    if (r.includes('ultra') || r.includes('illustration') || r === '☆' || r === '☆☆') return 'rare ultra';
-    if (/ selten v$|rare holo v$|\bdoppelselten\b|◊◊◊◊/.test(r)) return 'rare holo v';
+    
+    // Full Art / Ultra Rare variants (includes Hidden Brilliance, Illustration Rare, etc.)
+    if (r.includes('ultra') || r.includes('illustration') || r.includes('hidden brill') || 
+        r.includes('full art') || r.includes('seltene illustration') || r.includes('besondere illustration') ||
+        r === '☆' || r === '☆☆' || r.includes('selten, illustration')) return 'rare ultra';
+    
+    // Secret Rare / Crown Rare variants  
+    if (r.includes('crown') || r.includes('secret') || r.includes('sauer') || r.includes('holo secret') ||
+        r === '☆☆☆' || r === '♛♛' || r === '♛' || r.includes('selten, besondere')) return 'rare secret';
+    
+    // Rainbow Rare variants
+    if (r.includes('rainbow')) return 'rare rainbow';
+    
+    // Radiant variants
+    if (r.includes('radiant') || r.includes('strahlend')) return 'radiant rare';
+    
+    // Pokemon V variants (German and English)
+    if (/ selten v$|rare holo v$|\bdoppelselten\b|◇◇◇◇/.test(r)) return 'rare holo v';
+    
+    // Regular Holo variants
     if (/holograf|rare holo|lv\.x/.test(r)) return 'rare holo';
+    
+    // Common/Uncommon/Promo (no holo effect)
     return 'common';
+}turn 'common';
 }
 
 function buildBinderPages(cards) {
