@@ -2654,6 +2654,64 @@ body {
 .queue-panel .qi-status { font-size: 0.65rem; color: var(--text-muted, #8b949e); align-self: center; }
 .queue-panel .empty { text-align: center; color: var(--text-muted, #8b949e); font-size: 0.8rem; padding: 20px 0; }
 
+/* --- Collapsed camera-mode review queue chips (queue-chips / queue-chip / chip-name / qi-latest) --- */
+.queue-chips {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border, #30363d);
+}
+.queue-chip {
+    position: relative;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 42px;
+    border-radius: 5px;
+    border: 1px solid var(--border, #30363d);
+    background: var(--bg-hover, #1c2128);
+    overflow: hidden;
+    cursor: pointer;
+    padding: 0;
+}
+.queue-chip img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 5px;
+    display: block;
+}
+.queue-chip .chip-name {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    font-size: 0.55rem;
+    font-weight: 600;
+    color: var(--text-primary, #f1ece1);
+    background: rgba(10, 10, 11, 0.8);
+    padding: 2px 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+}
+.qi-latest {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+.qi-latest img {
+    width: 18px;
+    height: 26px;
+    object-fit: contain;
+    border-radius: 3px;
+    flex: none;
+}
+.qi-latest .qi-name { font-size: 0.7rem; }
+
 /* =====================================================================
    IMMERSIVE SCAN MODE — layout reverse-engineered from quickdraw.cards
    (their app.css: desktop scan-view is `grid minmax(0,1fr) 360px` with a
