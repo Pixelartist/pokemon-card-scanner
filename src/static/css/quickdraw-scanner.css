@@ -1,0 +1,329 @@
+/* ===========================================
+   Quickdraw-style scanner visual adaptation
+   Applied when camera mode is active (body.camera-fs)
+   =========================================== */
+
+/* Scan layout using quickdraw's 2-column grid approach */
+body.camera-fs .scan-layout {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) 360px !important;
+  gap: 24px !important;
+  align-items: start !important;
+}
+
+body.camera-fs .scan-main,
+body.camera-fs .scan-sidebar {
+  min-width: 0 !important;
+}
+
+/* Camera panel - transforms the main scan area */
+body.camera-fs .scan-main {
+  background: #0a0a0b !important; /* quickdraw's dark background */
+  border: 1px solid var(--border) !important;
+  border-radius: 0 !important; /* quickdraw has sharp corners */
+  padding: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  height: calc(100dvh - 128px) !important;
+  min-height: 460px !important;
+  max-height: 860px !important;
+}
+
+/* Camera stage container - center the camera-wrapper */
+body.camera-fs .camera-wrapper {
+  position: relative !important;
+  width: 100% !important;
+  margin: 0 auto !important;
+  flex: 1 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+body.camera-fs .camera-wrapper #camera-preview {
+  width: 100% !important;
+  height: auto !important;
+  max-height: none !important;
+  min-height: 400px !important;
+  aspect-ratio: 2.5/3.5 !important;
+  border-radius: 0 !important; /* quickdraw has sharp corners - FIXED: no rounded corners */
+  border: 1px solid var(--border) !important;
+  box-shadow: none !important;
+  background: #000 !important;
+  object-fit: contain !important;
+}
+
+/* Session dock - right sidebar transformed */
+body.camera-fs .scan-sidebar {
+  position: sticky !important;
+  top: 88px !important;
+  flex-direction: column !important;
+  gap: 16px !important;
+  padding: 8px 0 !important;
+}
+
+/* Status badge - quickdraw style (green for live) */
+body.camera-fs .status-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 6px 12px !important;
+  border-radius: 0 !important; /* sharp corners */
+  background: rgba(46, 204, 113, 0.15) !important; /* green tint */
+  color: #2ecc71 !important;
+  font-size: 0.8rem !important;
+  font-weight: 600 !important;
+  border: 1px solid rgba(46, 204, 113, 0.4) !important;
+}
+
+body.camera-fs .status-badge .dot {
+  width: 6px !important;
+  height: 6px !important;
+  border-radius: 50% !important;
+  background: #2ecc71 !important; /* green dot */
+}
+
+/* Price indicator - quickdraw style */
+body.camera-fs .price-indicator {
+  margin-top: 8px !important;
+  padding: 12px !important;
+  background: var(--bg-card) !important;
+  border-radius: 0 !important;
+  border: 1px solid var(--border) !important;
+}
+
+body.camera-fs .price-indicator span {
+  font-family: 'Inter', monospace !important;
+  font-size: 1.2rem !important;
+  font-weight: 600 !important;
+  color: var(--success) !important;
+  margin: 0 !important;
+}
+
+/* Hide static card frame in camera mode - use quickdraw viewfinder corners instead */
+body.camera-fs #card-frame { display: none !important; }
+body.camera-fs #card-frame * { display: none !important; }
+
+/* Detection overlay - quickdraw style (green).
+   IMPORTANT: kill the static gold `border` that main.css puts on this SVG
+   (body.camera-fs .detection-overlay { border: 3px solid #FFD700 }).
+   That border is a fixed box that never tracks the card — it is the
+   "yellow rectangle not moving" the user sees. Only the polygon inside
+   should ever draw anything. */
+body.camera-fs .detection-overlay {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  z-index: 10 !important;
+  pointer-events: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background: none !important;
+}
+
+body.camera-fs .detection-overlay polygon,
+body.camera-fs .detection-overlay path {
+  fill: #3fb95014 !important; /* quickdraw green tint */
+  stroke: #3fb950 !important; /* quickdraw green */
+  stroke-width: 3 !important;
+  stroke-linejoin: miter !important;
+  transition: all 0.12s !important;
+}
+
+body.camera-fs .detection-overlay.confirmed polygon {
+  fill: #3ef08a22 !important;
+  stroke: #2ecc71 !important;
+  stroke-width: 4 !important;
+}
+
+/* Viewfinder - quickdraw style corners */
+body.camera-fs .viewfinder {
+  position: absolute !important;
+  inset: 15% 14% !important;
+  z-index: 2 !important;
+  pointer-events: none !important;
+  opacity: 0.9 !important;
+  transition: opacity 0.3s !important;
+}
+
+body.camera-fs .viewfinder i {
+  position: absolute !important;
+  width: 30px !important;
+  height: 30px !important;
+  border: 0 solid var(--accent) !important;
+}
+
+body.camera-fs .viewfinder i:nth-child(1) { top: 0; left: 0; border-width: 4px 0 0 4px !important; }
+body.camera-fs .viewfinder i:nth-child(2) { top: 0; right: 0; border-width: 4px 4px 0 0 !important; }
+body.camera-fs .viewfinder i:nth-child(3) { bottom: 0; left: 0; border-width: 0 0 4px 4px !important; }
+body.camera-fs .viewfinder i:nth-child(4) { bottom: 0; right: 0; border-width: 0 4px 4px 0 !important; }
+
+/* Frame corner brackets - enhanced visibility */
+body.camera-fs .frame-corner {
+  position: absolute !important;
+  width: 30px !important;
+  height: 30px !important;
+  border-color: rgba(255, 255, 255, 0.8) !important;
+  border-style: solid !important;
+  border-width: 0 !important;
+  border-radius: 0 !important; /* FIXED: sharp corners */
+}
+
+body.camera-fs .frame-corner.top-left { top: -2px; left: -2px; border-top-width: 4px !important; border-left-width: 4px !important; }
+body.camera-fs .frame-corner.top-right { top: -2px; right: -2px; border-top-width: 4px !important; border-right-width: 4px !important; }
+body.camera-fs .frame-corner.bottom-left { bottom: -2px; left: -2px; border-bottom-width: 4px !important; border-left-width: 4px !important; }
+body.camera-fs .frame-corner.bottom-right { bottom: -2px; right: -2px; border-bottom-width: 4px !important; border-right-width: 4px !important; }
+
+/* Dim overlay - quickdraw style */
+body.camera-fs .camera-wrapper::before {
+  content: '' !important;
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.4) 100%) !important;
+  pointer-events: none !important;
+  z-index: 1 !important;
+}
+
+/* Camera controls - unified button styles */
+body.camera-fs .bottom-controls {
+  position: absolute !important;
+  bottom: 24px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  display: flex !important;
+  gap: 12px !important;
+  align-items: center !important;
+  z-index: 100 !important;
+}
+
+/* Unified button style - all buttons get same treatment */
+body.camera-fs .bottom-controls .btn,
+body.camera-fs .bottom-controls .auto-scan-btn,
+body.camera-fs .bottom-controls .stop-btn {
+  width: 56px !important;
+  height: 56px !important;
+  min-width: 56px !important;
+  padding: 10px !important;
+  border-radius: 0 !important; /* FIXED: sharp corners for consistent styling */
+  font-size: 1.2rem !important;
+  background: var(--accent) !important; /* same accent color for all */
+  color: white !important;
+  border: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: transform 0.15s !important;
+}
+
+body.camera-fs .bottom-controls .btn:hover,
+body.camera-fs .bottom-controls .auto-scan-btn:hover,
+body.camera-fs .bottom-controls .stop-btn:hover {
+  background: var(--accent-hover) !important;
+  transform: translateY(-2px) !important;
+}
+
+/* Capture button - larger primary button */
+body.camera-fs #capture-btn {
+  width: 64px !important;
+  height: 64px !important;
+  font-size: 1.4rem !important;
+}
+
+/* Auto-scan button - non-circular, text label */
+body.camera-fs .auto-scan-btn {
+  padding: 8px 16px !important;
+  font-size: 0.85rem !important;
+  border-radius: 0 !important; /* FIXED: sharp corners to match other buttons */
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  min-width: auto !important;
+  font-weight: 500 !important;
+}
+
+body.camera-fs .auto-scan-btn.active {
+  background: #2ecc71 !important; /* green when active */
+}
+
+/* Stop button - danger styled */
+body.camera-fs .stop-btn {
+  width: 56px !important;
+  height: 56px !important;
+  padding: 10px !important;
+  font-size: 1.2rem !important;
+  border-radius: 8px !important; /* rounded corners for modern look */
+  background: var(--danger, #ff4757) !important;
+  color: white !important;
+  border: 2px solid var(--danger, #ff4757) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: all 0.15s !important;
+}
+
+body.camera-fs .stop-btn:hover {
+  background: var(--danger-hover, #e53e4f) !important;
+  border-color: var(--danger-hover, #e53e4f) !important;
+  transform: translateY(-2px) !important;
+  box-shadow: 0 4px 12px rgba(255, 71, 87, 0.3) !important;
+}
+
+/* Scan result - compact status */
+body.camera-fs .scan-result {
+  padding: 16px !important;
+  background: var(--bg-secondary) !important;
+  border-radius: 0 !important;
+  border-top: 1px solid var(--border) !important;
+  margin-top: 16px !important;
+}
+
+body.camera-fs .scan-result h3 {
+  margin-bottom: 12px !important;
+  font-size: 1.1rem !important;
+  color: var(--success) !important;
+}
+
+/* Detection status indicator */
+body.camera-fs .detection-status {
+  margin-top: 10px !important;
+  padding: 8px 16px !important;
+  border-radius: 0 !important;
+  font-size: 0.9rem !important;
+  text-align: center !important;
+  background: var(--bg-card) !important;
+  color: var(--text-secondary) !important;
+  transition: all 0.3s ease !important;
+}
+
+body.camera-fs .detection-status.detecting {
+  background: rgba(255, 165, 0, 0.2) !important;
+  color: #ffa500 !important;
+}
+
+body.camera-fs .detection-status.found {
+  background: rgba(78, 204, 163, 0.2) !important;
+  color: var(--success) !important;
+}
+
+/* Auto-detect toggle */
+body.camera-fs .auto-detect-toggle {
+  margin-top: 15px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 10px !important;
+}
+
+body.camera-fs .auto-detect-toggle label {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  cursor: pointer !important;
+  font-size: 0.9rem !important;
+  color: var(--text-secondary) !important;
+}

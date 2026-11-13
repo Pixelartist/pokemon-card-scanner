@@ -1410,8 +1410,8 @@ Shine & Glare Effects
 
 */
 
-.holo-card[data-rarity="rare ultra"][data-supertype="pokémon"] .holo-card__shine,
-.holo-card[data-rarity="rare ultra"][data-supertype="pokémon"] .holo-card__shine:after,
+.holo-card[data-rarity="rare ultra"][data-supertype="pokemon"] .holo-card__shine,
+.holo-card[data-rarity="rare ultra"][data-supertype="pokemon"] .holo-card__shine:after,
 .holo-card[data-rarity="rare ultra"][data-subtypes*="supporter"] .holo-card__shine,
 .holo-card[data-rarity="rare ultra"][data-subtypes*="supporter"] .holo-card__shine:after,
 .holo-card[data-rarity="rare holo v"][data-trainer-gallery="true"] .holo-card__shine,
@@ -1462,7 +1462,7 @@ Shine & Glare Effects
 
 }
 
-.holo-card[data-supertype="pokémon"][data-rarity="rare ultra"] .holo-card__shine:after,
+.holo-card[data-supertype="pokemon"][data-rarity="rare ultra"] .holo-card__shine:after,
 .holo-card[data-subtypes*="supporter"][data-rarity="rare ultra"] .holo-card__shine:after,
 .holo-card[data-trainer-gallery="true"][data-rarity="rare holo v"] .holo-card__shine:after {
 
@@ -1482,7 +1482,7 @@ Shine & Glare Effects
 }
 
 
-.holo-card[data-supertype="pokémon"][data-rarity="rare ultra"] .holo-card__shine:before,
+.holo-card[data-supertype="pokemon"][data-rarity="rare ultra"] .holo-card__shine:before,
 .holo-card[data-subtypes*="supporter"][data-rarity="rare ultra"] .holo-card__shine:before {
 
   content: "";
@@ -1515,7 +1515,7 @@ Shine & Glare Effects
 
 */
 
-.holo-card[data-supertype="pokémon"][data-rarity="rare ultra"] .holo-card__glare,
+.holo-card[data-supertype="pokemon"][data-rarity="rare ultra"] .holo-card__glare,
 .holo-card[data-subtypes*="supporter"][data-rarity="rare ultra"] .holo-card__glare {
 
   background-image: 
@@ -1552,8 +1552,8 @@ Shine & Glare Effects
 */
 
 
-.holo-card:not(.masked)[data-supertype="pokémon"][data-rarity="rare ultra"] .holo-card__shine,
-.holo-card:not(.masked)[data-supertype="pokémon"][data-rarity="rare ultra"] .holo-card__shine:after,
+.holo-card:not(.masked)[data-supertype="pokemon"][data-rarity="rare ultra"] .holo-card__shine,
+.holo-card:not(.masked)[data-supertype="pokemon"][data-rarity="rare ultra"] .holo-card__shine:after,
 .holo-card:not(.masked)[data-trainer-gallery="true"][data-rarity="rare holo v"] .holo-card__shine,
 .holo-card:not(.masked)[data-trainer-gallery="true"][data-rarity="rare holo v"] .holo-card__shine:after {
 
@@ -1571,13 +1571,13 @@ Shine & Glare Effects
 
 }
 
-.holo-card:not(.masked)[data-supertype="pokémon"][data-rarity="rare ultra"] .holo-card__shine:before,
+.holo-card:not(.masked)[data-supertype="pokemon"][data-rarity="rare ultra"] .holo-card__shine:before,
 .holo-card:not(.masked)[data-trainer-gallery="true"][data-rarity="rare holo v"] .holo-card__shine:before {
   content: none;
   display: none;
 }
 
-.holo-card:not(.masked)[data-supertype="pokémon"][data-rarity="rare ultra"] .holo-card__shine:after,
+.holo-card:not(.masked)[data-supertype="pokemon"][data-rarity="rare ultra"] .holo-card__shine:after,
 .holo-card:not(.masked)[data-trainer-gallery="true"][data-rarity="rare holo v"] .holo-card__shine:after {
   filter: brightness(calc((var(--pointer-from-center)*.5) + .8)) contrast(1.6) saturate(1.4);
 }
@@ -1596,8 +1596,8 @@ Shine & Glare Effects
 
 
 
-.holo-card:not(.masked)[data-rarity="rare holo vmax"][data-supertype="pokémon"] .holo-card__shine,
-.holo-card:not(.masked)[data-rarity="rare holo vmax"][data-supertype="pokémon"] .holo-card__shine:after {
+.holo-card:not(.masked)[data-rarity="rare holo vmax"][data-supertype="pokemon"] .holo-card__shine,
+.holo-card:not(.masked)[data-rarity="rare holo vmax"][data-supertype="pokemon"] .holo-card__shine:after {
 
   --mask: none;
   --foil: url("/static/img/holo/vmaxbg.jpg"); 

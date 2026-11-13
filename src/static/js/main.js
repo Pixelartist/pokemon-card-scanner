@@ -2480,7 +2480,6 @@ function classifyHoloEffect(card) {
     
     // Common/Uncommon/Promo (no holo effect)
     return 'common';
-}turn 'common';
 }
 
 function buildBinderPages(cards) {
@@ -2741,12 +2740,14 @@ function createGalleryItem(card) {
     const setInfo = card.set_info || '';
     const cardId = card.ptcg_id || card.card_id || card.id;
     const effect = classifyHoloEffect(card);
+    const supertype = (card.supertype || 'Pokémon').toLowerCase().replace('é', 'e');
+    const subtypes = (card.subtypes || []).join(' ').toLowerCase();
     // first element type -> color class used by the holo effects (darkness naming)
     const typeCls = (card.types && card.types[0] ? String(card.types[0]) : '')
         .toLowerCase().replace(/^dark$/, 'darkness').replace(/\s+/g, '');
 
     item.innerHTML = `
-        <div class="holo-card ${typeCls}" data-rarity="${effect}">
+        <div class="holo-card ${typeCls}" data-rarity="${effect}" data-supertype="${supertype}" data-subtypes="${subtypes}">
             <div class="holo-card__translater">
                 <div class="holo-card__rotator">
                     <img src="${imageUrl}" alt="${cardName}" loading="lazy">
