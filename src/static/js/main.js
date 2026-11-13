@@ -2217,17 +2217,21 @@ async function detectTracked(video) {
     // one reads far better on a tight crop). Keep the sharper read only if
     // it didn't lose confidence.
     if (det && det.points && (det.confidence || 0) > 50) {
-        const ys0 = det.points.map(p => p[1]);
-        const cardH = Math.max(...ys0) - Math.min(...ys0);
-        if (cardH < vh * 0.6) {
-            const refined = await _refineQuad(video, det.points, vw, vh);
-            if (refined && refined.points && (refined.confidence || 0) >= (det.confidence || 0)) {
-                _updateTrack(refined);
-                return refined;
+            const ys0 = det.points.map(p => p[1]);
+            const cardH = Math.max(...ys0) - Math.min(...ys0);
+            if (cardH < vh * 0.6) {
+                const refined = await _refineQuad(video, det.points, vw, vh);
+                if (refined && refined.points && (refined.confidence || 0) >= (det.confidence || 0)) {
+                    _updateTrack(refined);
+                    return refined;
+                }
+            } else if (cardH >= vh * 0.7) {
+                // Likely a person / table edge / large clutter, not a card — reject.
+                _updateTrack(null);
+                return null;
             }
         }
-    }
-    return det;
+        return det;
 }
 
 async function detectCardInFrame() {
