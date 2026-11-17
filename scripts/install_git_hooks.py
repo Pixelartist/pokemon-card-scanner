@@ -35,21 +35,27 @@ def main():
         return 1
     target = hooks_dir()
     target.mkdir(parents=True, exist_ok=True)
-    written = appended = present = 0
+    written = appended = updated = 0
     for name in HOOKS:
         path = target / name
-        if path.exists():
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if MARKER in text:
-                present += 1
-                continue
-            path.write_bytes((text.rstrip("\n") + "\n" + BLOCK).encode("utf-8"))
-            appended += 1
-        else:
+        if not path.exists():
             path.write_bytes(("#!/bin/sh\n" + BLOCK).encode("utf-8"))
             written += 1
+        else:
+            # Our block is always last, so cutting at the marker puts the block
+            # back without touching a hook's own code (Git LFS installs several).
+            text = path.read_text(encoding="utf-8", errors="replace")
+            index = text.find(MARKER)
+            if index < 0:
+                path.write_bytes((text.rstrip("\n") + "\n" + BLOCK).encode("utf-8"))
+                appended += 1
+            else:
+                head = text[:index].rstrip("\n")
+                path.write_bytes((head + "\n" + BLOCK if head.strip() else "#!/bin/sh\n" + BLOCK)
+                                 .encode("utf-8"))
+                updated += 1
         path.chmod(0o755)  # LF is written above, or sh on Windows refuses to run it
-    print(f"hooks in {target}: {written} new, {appended} appended to, {present} already installed")
+    print(f"hooks in {target}: {written} new, {appended} appended to, {updated} refreshed")
     return 0
 
 
