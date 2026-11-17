@@ -88,6 +88,51 @@ A locally hosted website for scanning and identifying Pokemon cards, similar to 
 | HOST | Server host | 0.0.0.0 |
 | PORT | Server port | 5005 |
 
+## Live database backups
+
+`data/pokemon_cards.db` is the live collection database. It is untracked but
+deliberately *not* ignored, so git refuses to overwrite it. Under that guard,
+git hooks verify it and keep timestamped copies in `data/backups/`:
+
+```bash
+python scripts/install_git_hooks.py   # once per clone, hooks are not versioned
+python scripts/backup_live_db.py      # the same code the hooks run, by hand
+```
+
+| Hook | Fires | Case it protects |
+| --- | --- | --- |
+| `pre-commit` | any commit, including the one that concludes a conflicted merge | a merge that clobbered the file and left a conflict — no other hook runs for it, so this is what recovers it |
+| `pre-merge-commit` | a merge succeeded, before its commit | verify and snapshot before the merge result is recorded |
+| `post-checkout` | checkout or branch switch (also fast-forwards) | a blob arriving through a checkout |
+| `post-merge` | a non-fast-forward merge that succeeded | the tree after a merge moved |
+| `pre-rebase` | a rebase starts | a copy before the series rewrites the tree |
+
+No hook can run *before* git writes the working tree, so the script does not rely
+on order: it compares the live file with the blobs git holds for it (`MERGE_HEAD`,
+`CHERRY_PICK_HEAD`, `REVERT_HEAD`, `HEAD`) and copies the newest snapshot back if
+the file *is* one of them. That check runs before the snapshot step, so a
+clobbered database is repaired rather than archived as the newest copy.
+
+It compares identities rather than content, because the database is ~17 MB on a
+network share. `data/backups/live-identity.json` records the live file's size,
+mtime, sha256 and git blob id: matching size and mtime means a hook reads
+nothing at all, a matching sha256 means only metadata moved, and git is asked for
+object ids (`rev-parse ref:path`) instead of blob content. Content is read only
+for a file that actually changed, and compared as text only where checkout
+converts line endings.
+
+One case has no hook at all: `git merge --abort` fires nothing, so a file it
+replaced stays replaced until the next hooked command. If you abort a merge, run
+`python scripts/backup_live_db.py` once to restore it.
+
+Restore by hand, with the app stopped:
+
+```bash
+ls -lt data/backups                                  # newest first
+cp data/backups/pokemon_cards.db.20261117-130515 data/pokemon_cards.db
+python -c "import sqlite3;print(sqlite3.connect('data/pokemon_cards.db').execute('PRAGMA integrity_check').fetchone())"
+```
+
 ## Project Structure
 
 ```
