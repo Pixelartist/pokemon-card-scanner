@@ -2,18 +2,17 @@
 """Repair the scan labels stored beside the frames in data/scans.
 
 A card filed from a scan writes <frame>.json next to the image (see
-_write_scan_label in src/api/main.py). Older labels can hold the numeric
-database id of a card instead of its ptcg_id: a correction opened from the card
-detail modal posts cards.id, and the writer did not always resolve it. Every
-label has to name cards the same way before the corpus can be compared against
-the card index, so this rewrites those ids and says which labels predate the
-runner-up fields.
+_write_scan_label in src/api/main.py). A label can hold the numeric database id
+of a card instead of its ptcg_id - a correction opened from the card detail
+modal posts cards.id - and every label has to name cards the same way before the
+corpus can be compared against the card index. Those ids are rewritten here, and
+labels that never recorded a runner-up are listed.
 
-Only id values are rewritten. Missing runner-up fields are reported, never
-invented: the candidate list behind an old capture is not stored anywhere, so a
-similarity without an id (or neither) is all the evidence there is, and writing
-nulls over the absence would erase the difference between a gate that saw one
-candidate and a label written before the field existed.
+Missing runner-up fields are reported, never invented: the candidate list behind
+an old capture is not stored anywhere, so a similarity without an id (or
+neither) is all the evidence there is, and writing nulls over the absence would
+erase the difference between a gate that saw one candidate and a label written
+before the field existed.
 """
 import argparse
 import json
@@ -25,24 +24,28 @@ ID_FIELDS = ("filed_as", "proposed_id", "proposed_second_id")
 RUNNER_UP_FIELDS = ("proposed_second_id", "proposed_second_similarity")
 
 
-def load_cards(db_path):
-    """Map of cards.id -> cards.ptcg_id, or None when the database is unreadable."""
+def resolve(ids, db_path):
+    """Map database ids to ptcg_ids; ids the database does not know are absent."""
+    if not ids:
+        return {}
     if not db_path.exists():
-        print(f"! {db_path} not found - numeric ids cannot be resolved", file=sys.stderr)
-        return None
+        print(f"! {db_path} not found", file=sys.stderr)
+        return {}
     try:
         conn = sqlite3.connect(db_path)
         try:
-            # The app serves scans from this file while it runs, and the project
-            # can live on a UNC share where a file: URI is rejected, so read-only
-            # is enforced by the pragma rather than by the connection string.
+            # query_only rather than a file: URI: the project can live on a UNC
+            # share, and the app is serving scans from this database right now.
             conn.execute("PRAGMA query_only = ON")
-            return {row[0]: row[1] for row in conn.execute("SELECT id, ptcg_id FROM cards")}
+            marks = ",".join("?" * len(ids))
+            rows = conn.execute(f"SELECT id, ptcg_id FROM cards WHERE id IN ({marks})",
+                                sorted(ids))
+            return {card_id: ptcg_id for card_id, ptcg_id in rows if ptcg_id}
         finally:
             conn.close()
     except sqlite3.Error as exc:
         print(f"! cannot read cards from {db_path}: {exc}", file=sys.stderr)
-        return None
+        return {}
 
 
 def main():
@@ -53,7 +56,7 @@ def main():
     parser.add_argument("--db", default=str(root / "data" / "pokemon_cards.db"),
                         help="card database used to resolve ids (default: data/pokemon_cards.db)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="print the changes without writing the labels")
+                        help="report the changes without writing the labels")
     args = parser.parse_args()
 
     files = sorted(Path(args.dir).glob("*.json"))
@@ -62,36 +65,32 @@ def main():
         print("One is written each time a card is filed from a scan; file a few and run this again.")
         return 1
 
-    cards = load_cards(Path(args.db))
-    labels = {}
-    resolved, unresolved, no_runner_up, unreadable = [], [], [], []
+    labels, numeric, unreadable = {}, [], 0
     for path in files:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
-            unreadable.append(path.name)
             print(f"  ! skipped {path.name}: {exc}", file=sys.stderr)
+            unreadable += 1
             continue
         if not isinstance(data, dict):
-            unreadable.append(path.name)
             print(f"  ! skipped {path.name}: not a JSON object", file=sys.stderr)
+            unreadable += 1
             continue
         labels[path] = data
-
         for field in ID_FIELDS:
             posted = data.get(field)
-            if not posted or not str(posted).isdigit():
-                continue
-            ptcg_id = (cards or {}).get(int(posted))
-            if ptcg_id:
-                data[field] = ptcg_id
-                resolved.append((path, field, posted, ptcg_id))
-            else:
-                unresolved.append((path, field, posted))
+            if posted and str(posted).isdigit():
+                numeric.append((path, field, posted, int(posted)))
 
-        missing = [field for field in RUNNER_UP_FIELDS if field not in data]
-        if missing:
-            no_runner_up.append((path, data, missing))
+    known = resolve({card_id for *_, card_id in numeric}, Path(args.db))
+    resolved, unresolved = [], []
+    for path, field, posted, card_id in numeric:
+        if card_id in known:
+            labels[path][field] = known[card_id]
+            resolved.append((path, field, posted, known[card_id]))
+        else:
+            unresolved.append((path, field, posted))
 
     changed = list(dict.fromkeys(path for path, *_ in resolved))
     if changed and not args.dry_run:
@@ -99,34 +98,33 @@ def main():
             path.write_text(json.dumps(labels[path], ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"Scan labels in {args.dir} - {len(files)} files"
-          + (f", {len(unreadable)} unreadable" if unreadable else "") + "\n")
+          + (f", {unreadable} unreadable" if unreadable else "") + "\n")
 
     if resolved:
-        verb = "Would resolve" if args.dry_run else "Resolved"
-        print(f"{verb} {len(resolved)} numeric id(s) to ptcg_id:")
+        print(f"{'Would resolve' if args.dry_run else 'Resolved'} "
+              f"{len(resolved)} numeric id(s) to ptcg_id:")
         for path, field, posted, ptcg_id in resolved:
             print(f"  {path.name:<44} {field:<20} {posted} -> {ptcg_id}")
     else:
         print("No numeric ids left to resolve.")
 
     if unresolved:
-        why = "no card database to resolve them" if cards is None else "no matching card row"
-        print(f"\n{len(unresolved)} numeric id(s) left as posted ({why}):")
+        print(f"\n{len(unresolved)} numeric id(s) left as posted:")
         for path, field, posted in unresolved:
             print(f"  {path.name:<44} {field:<20} {posted}")
 
+    no_runner_up = [(path, data) for path, data in labels.items()
+                    if any(field not in data for field in RUNNER_UP_FIELDS)]
     if no_runner_up:
         print(f"\n{len(no_runner_up)} label(s) with no runner-up recorded - their lead is unknown:")
-        for path, data, missing in no_runner_up:
+        for path, data in no_runner_up:
+            missing = ", ".join(field for field in RUNNER_UP_FIELDS if field not in data)
             print(f"  {path.name:<44} {data.get('match_source') or '?':<10} "
                   f"{data.get('proposed_id') or '?':<14} -> {data.get('filed_as') or '?':<14} "
-                  f"missing {', '.join(missing)}")
+                  f"missing {missing}")
 
-    updated = 0 if args.dry_run else len(changed)
-    tail = f"{updated} label(s) updated, {len(labels) - updated} unchanged"
-    if unreadable:
-        tail += f", {len(unreadable)} unreadable"
-    print(f"\n{tail}.")
+    print(f"\n{'Would update' if args.dry_run else 'Updated'} {len(changed)} label(s), "
+          f"{len(labels) - len(changed)} unchanged.")
     if args.dry_run and changed:
         print("Rerun without --dry-run to write them.")
     return 0
