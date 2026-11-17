@@ -104,6 +104,57 @@ class CardDetector:
         except Exception as e:
             logger.error(f"Failed to load Quickdraw detector: {e}")
 
+    def _corner_candidates(self, pil_image: Image.Image, rect) -> List[Tuple[float, List[Tuple[float, float]]]]:
+        """Run the corner model over one rect of the frame.
+
+        Returns (score, quad) with the quad in source-image pixels. Kept separate
+        from the detection policy so the same pass can run twice: once over the
+        whole frame, then again over the card at its own scale.
+        """
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        rx, ry, rw, rh = rect
+        iw, ih = (192, 320) if rh >= rw else (320, 192)
+        crop = pil_image.crop((int(round(rx)), int(round(ry)),
+                               int(round(rx + rw)), int(round(ry + rh))))
+        arr = np.asarray(crop.resize((iw, ih), Image.BOX), dtype=np.float32) / 255.0
+        tensor = (arr.transpose(2, 0, 1)[None] - mean[None, :, None, None]) / std[None, :, None, None]
+
+        out = self.quickdraw_session.run(None, {"image": tensor.astype(np.float32)})[0]
+        d = out[0]
+        gh, gw = d.shape[1], d.shape[2]
+        sx, sy = rw / iw, rh / ih
+
+        found = []
+        for gy in range(gh):
+            for gx in range(gw):
+                v = d[0, gy, gx]
+                if v < -1.0:
+                    continue
+                peak = True
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if not dx and not dy:
+                            continue
+                        yy, xx = gy + dy, gx + dx
+                        if 0 <= yy < gh and 0 <= xx < gw and d[0, yy, xx] > v:
+                            peak = False
+                            break
+                    if not peak:
+                        break
+                if not peak:
+                    continue
+                quad = []
+                for k in range(4):
+                    px = d[1 + 2 * k, gy, gx] * 64.0 + (gx + 0.5) * 8.0
+                    py = d[2 + 2 * k, gy, gx] * 64.0 + (gy + 0.5) * 8.0
+                    quad.append((rx + px * sx, ry + py * sy))
+                flip = 1.0 / (1.0 + np.exp(-d[9, gy, gx]))
+                if flip > 0.5:
+                    quad = [quad[2], quad[3], quad[0], quad[1]]
+                found.append((float(1.0 / (1.0 + np.exp(-v))), quad))
+        return found
+
     def _detect_with_quickdraw(self, pil_image: Image.Image) -> Dict:
         """Detect card corners with the Quickdraw model (10-channel output:
         channel 0 = logit on a 24x40 grid, channels 1-8 = corner offsets
@@ -183,6 +234,32 @@ class CardDetector:
                 return result
             dets.sort(key=lambda t: t[0], reverse=True)
             score, q = dets[0]
+            # Second pass at the card's own scale, as the browser detector does.
+            # One grid cell spans ~25px at full-frame scale, and the corners land
+            # ~40px inside the card on a real scan — enough to cut the collector
+            # line out of every crop, which is the strip OCR needs.
+            xs0 = [p[0] for p in q]; ys0 = [p[1] for p in q]
+            cx, cy = (min(xs0) + max(xs0)) / 2, (min(ys0) + max(ys0)) / 2
+            rw, rh = (max(xs0) - min(xs0)) * 1.45, (max(ys0) - min(ys0)) * 1.45
+            if rw / rh > iw / ih:
+                rh = rw * ih / iw
+            else:
+                rw = rh * iw / ih
+            # Always refine, including when the card fills the frame. The browser
+            # detector skips the second pass in that case, but measured on a real
+            # scan it is exactly when the first pass is worst (corners 39-49px
+            # inside the card); the zoomed pass lands them within a few pixels.
+            near = [t for t in self._corner_candidates(
+                pil_image, (cx - rw / 2, cy - rh / 2, rw, rh)) if quad_ok(t[1])]
+            best, best_dist = None, float("inf")
+            for cand_score, cand in near:
+                ddx = sum(p[0] for p in cand) / 4 - cx
+                ddy = sum(p[1] for p in cand) / 4 - cy
+                dist = (ddx * ddx + ddy * ddy) ** 0.5
+                if dist < best_dist:
+                    best, best_dist = (cand_score, cand), dist
+            if best and best_dist < min(rw, rh) * 0.25:
+                score, q = max(best[0], score), best[1]
             xs = [p[0] for p in q]; ys = [p[1] for p in q]
             x1b, y1b = int(min(xs)), int(min(ys))
             wb, hb = int(max(xs) - min(xs)), int(max(ys) - min(ys))

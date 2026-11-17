@@ -180,7 +180,12 @@ export class PerceptualHashMatcher {
     }
 
     results.sort((a, b) => b.similarity - a.similarity);
-    return results.slice(0, topK);
+    // Hashing the crop is the expensive part of a match and the multi-frame
+    // burst needs it again to compare frames; hand it back rather than making
+    // the caller re-hash the same canvas (measured ~18ms per frame).
+    const top = results.slice(0, topK);
+    top.queryHash = queryHash;
+    return top;
   }
 
   /**

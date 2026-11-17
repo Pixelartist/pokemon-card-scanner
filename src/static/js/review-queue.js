@@ -20,6 +20,10 @@ const RQ = {
     if (item.id && items.some(q => q.id === item.id)) return false;
     items.unshift({ ...item, at: Date.now() });
     this.save(items);
+    // Only a row the matcher could not name is worth a background attempt; a
+    // card we already identified would spend OCR (and possibly an LLM call)
+    // re-reading what the hash just told us.
+    if (item.source === 'near_miss') rqEnqueueIdentify(item.id);
     return true;
   },
   remove(id) { this.save(this.load().filter(q => q.id !== id)); },
@@ -27,6 +31,129 @@ const RQ = {
 
 function rqEsc(s) {
   return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+// ------------------------------------------------- Background identification
+// A capture the matcher could not name is also handed to the server, which reads
+// the printed set code and number with OCR and, when that is inconclusive, asks
+// a vision LLM. The row reports the outcome, and once every attempt is spent it
+// says so instead of looking like it is still being worked on.
+const RQ_JOB_LABEL = {
+  queued: 'OCR queued',
+  running: 'reading text…',
+  exhausted: 'OCR + AI exhausted',
+  unavailable: 'no OCR/AI configured',
+  error: 'background attempt failed',
+};
+
+// A row the user believes is wrong can ask for the OCR/AI read by hand, even
+// though the matcher named it: that is exactly when it is worth paying for.
+function rqAssistButton(q) {
+  const ready = !!rqQueueableCrop(q);
+  return `<button class="assist" type="button"${ready ? '' : ' disabled'}`
+    + `${ready ? ' title="Read this card again with OCR, then AI"' : ' title="No stored crop to read"'}>OCR / AI</button>`;
+}
+
+function rqJobBadge(q) {
+  const label = RQ_JOB_LABEL[q.jobStatus];
+  if (!label) return '';
+  const spent = ['exhausted', 'unavailable', 'error'].includes(q.jobStatus);
+  return `<div class="qi-job${spent ? ' spent' : ''}">${rqEsc(label)}</div>`;
+}
+
+function rqAuthHeaders() {
+  const token = window._getAuthToken || window.getAuthToken;
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token()}`;
+  return headers;
+}
+
+// What the worker needs to read the crop later: a path it can open, or the
+// inline data URL the browser-side scanner keeps (the server persists that).
+// Remote or same-origin URLs are not addressable by the worker, so those rows
+// simply get no background attempt.
+function rqQueueableCrop(item) {
+  const crop = item && item.crop;
+  if (!crop) return null;
+  if (/^data:image\//.test(crop)) return { crop_data_url: crop };
+  if (/^(data:|https?:|\/)/.test(crop)) return null;
+  return { crop_image_path: crop };
+}
+
+async function rqEnqueueIdentify(id, opts = {}) {
+  const item = RQ.load().find(q => q.id === id);
+  const crop = rqQueueableCrop(item);
+  if (!item || !crop) return false;
+  // Unidentified rows queue themselves. A row the matcher named is only re-read
+  // when the user asks for it — `Not this` may have told us the name is wrong,
+  // or they may simply disagree with it.
+  if (item.source !== 'near_miss' && !opts.userAsk) return false;
+  if (item.jobId && !opts.userAsk) return false;
+  try {
+    const r = await fetch('/api/identify/enqueue', {
+      method: 'POST',
+      headers: rqAuthHeaders(),
+      body: JSON.stringify({ ...crop, scan_image_path: item.scan || null, card_key: item.id }),
+    });
+    if (!r.ok) return false;
+    const { job_id: jobId } = await r.json();
+    const items = RQ.load();
+    const target = items.find(q => q.id === id);
+    if (!target) return false;
+    target.jobId = jobId;
+    target.jobStatus = 'queued';
+    if (opts.userAsk) {
+      // The previous verdict is the thing being questioned: drop the flag that
+      // froze it, and the suggestion text it wrote, or the next answer would
+      // land behind `!q.resolved` and the row could never change.
+      delete target.resolved;
+      if (target.metaFromJob) { delete target.meta; delete target.metaFromJob; }
+    }
+    RQ.save(items);
+    if (window.refreshReviewQueues) window.refreshReviewQueues();
+    return true;
+  } catch { return false; /* the row still works without a background attempt */ }
+}
+
+async function rqPollJobs() {
+  let items = RQ.load();
+  const pending = items.filter(q => q.jobId && !['done', 'exhausted', 'unavailable', 'error'].includes(q.jobStatus));
+  if (!pending.length) return;
+  try {
+    const r = await fetch('/api/identify/jobs?ids=' + pending.map(q => q.jobId).join(','),
+                          { headers: rqAuthHeaders() });
+    if (!r.ok) return;
+    const jobs = (await r.json()).jobs || [];
+    const byId = new Map(jobs.map(j => [j.id, j]));
+    let changed = false;
+    for (const q of items) {
+      const job = byId.get(q.jobId);
+      if (!job) continue;
+      if (job.status !== q.jobStatus) { q.jobStatus = job.status; changed = true; }
+      if (job.status === 'done' && job.result_id && !q.resolved) {
+        // The read is the better identity, so the row becomes that card: Keep
+        // has to add what the row shows, not what the hash guessed before it.
+        q.id = job.result_id;
+        q.name = job.result_name || q.name;
+        q.meta = `OCR/AI via ${job.provider || 'worker'}`;
+        q.metaFromJob = true;
+        q.img = '';
+        q.resolved = true;
+        changed = true;
+      }
+    }
+    if (changed) {
+      // A re-check can land on a card that is already queued; one row per card.
+      const byCard = new Map();
+      for (const q of items) {
+        const kept = byCard.get(q.id);
+        if (!kept || (q.resolved && !kept.resolved)) byCard.set(q.id, q);
+      }
+      items = [...byCard.values()];
+      RQ.save(items);
+      if (window.refreshReviewQueues) window.refreshReviewQueues();
+    }
+  } catch { /* polling is best-effort */ }
 }
 
 // Queue items hold either a server path (relative to /data/) or an inline data
@@ -324,15 +451,18 @@ function rqCloseCorrection() {
 function mountReviewQueue(root, opts = {}) {
   function render() {
     const items = RQ.load();
-    // One compact row per card: thumbnail, name, and exactly three choices.
+    // One compact row per card: thumbnail, name, and the three choices, plus the
+    // OCR/AI read for a row the user thinks was identified wrong.
     const rows = items.map(q => `
         <div class="queue-item" data-id="${rqEsc(q.id)}">
           <img data-qid="${rqEsc(q.id)}" alt="">
           <div class="qi-info">
             <div class="qi-name">${rqEsc(q.name)}</div>
             <div class="qi-meta">${rqEsc(q.meta || '')}${q.score ? ' · ' + Math.round(q.score * 100) + '%' : ''}</div>
+            ${rqJobBadge(q)}
           </div>
           <div class="qi-actions">
+            ${rqAssistButton(q)}
             <button class="keep" type="button">Keep</button>
             <button class="correction" type="button">Not this</button>
             <button class="discard" type="button">Remove</button>
@@ -346,6 +476,18 @@ function mountReviewQueue(root, opts = {}) {
       <div class="queue-list">${items.length ? rows : '<div class="empty">Nothing waiting for review.</div>'}</div>
     `;
     rqPaintImages(root, items);
+    rqPollJobs();
+  }
+
+  // A background job finishes on the server, after the row was drawn, so the
+  // badge needs a poll. Every mounted queue would start its own timer, so one
+  // shared interval drives them all, and it only ticks while a job is pending.
+  if (!mountReviewQueue.__poll) {
+    mountReviewQueue.__poll = setInterval(() => {
+      const waiting = RQ.load().some(q => q.jobId &&
+        !['done', 'exhausted', 'unavailable', 'error'].includes(q.jobStatus));
+      if (waiting) rqPollJobs();
+    }, 15000);
   }
 
   // Collapsed camera mode expands the tray when the header is tapped.
@@ -381,6 +523,13 @@ function mountReviewQueue(root, opts = {}) {
     } else if (e.target.closest('.correction')) {
       rqOpenCorrection(item);
       return;
+    } else if (e.target.closest('.assist')) {
+      // The user says this name is wrong: spend the OCR/AI read on it now.
+      const queued = await rqEnqueueIdentify(id, { userAsk: true });
+      if (!queued) {
+        e.target.closest('.qi-actions')?.insertAdjacentHTML('beforeend',
+          '<span class="qi-status">could not queue</span>');
+      }
     } else if (e.target.closest('.discard')) {
       RQ.remove(id);
     } else return;

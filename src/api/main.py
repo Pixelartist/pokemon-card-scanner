@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from api.models.database import init_db, get_db_connection, DATABASE_URL
 db_path = DATABASE_URL  # backward-compatible alias
 from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, UserProfileUpdate, BinderCreate, BinderUpdate
+from services import identify_jobs
 from services.ptcg_client import get_client
 from services.collection import CollectionService
 from services.auth import (
@@ -158,6 +159,30 @@ def crop_card_image(image_bytes: bytes, timestamp: str) -> Optional[str]:
         logger.warning(f"Card crop failed: {e}")
         return None
 
+def save_crop_data_url(data_url: str) -> Optional[str]:
+    """Persist a browser-side crop so the background worker can read it later.
+
+    The scanner keeps its crop inline as a data URL; a queued job runs in
+    another process and needs a file on disk. Returns the relative path.
+    """
+    try:
+        import base64
+
+        header, _, payload = (data_url or "").partition(",")
+        if "base64" not in header or not payload:
+            return None
+        raw = base64.b64decode(payload)
+        if not raw or len(raw) > 8 * 1024 * 1024:
+            return None
+        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
+        CROP_DIR.mkdir(parents=True, exist_ok=True)
+        (CROP_DIR / f"crop_{stamp}_q.jpg").write_bytes(raw)
+        return f"scans/crops/crop_{stamp}_q.jpg"
+    except Exception as e:
+        logger.warning(f"Queue crop save failed: {e}")
+        return None
+
+
 # Create FastAPI app
 from contextlib import asynccontextmanager
 
@@ -175,6 +200,11 @@ async def lifespan(application):
         logger.info("✓ CLIP matcher warmed")
     except Exception as e:
         logger.warning(f"CLIP warm-up failed: {e}")
+    # Say what the background identify queue can actually reach, so a misbuilt
+    # image (tesseract binary or tessdata missing) is visible at boot rather
+    # than as rows that silently exhaust their attempts.
+    providers = [name for name, _ in identify_jobs.providers()]
+    logger.info("identify providers: %s", providers or "none (OCR/LLM unavailable)")
     logger.info("Startup complete - ready to serve requests")
     try:
         yield
@@ -1640,6 +1670,32 @@ async def list_misreads(limit: int = 100,
         return {"misreads": [dict(r) for r in rows], "count": len(rows)}
     finally:
         conn.close()
+
+
+# --------------------------------------------------- background identification
+# A capture the matcher could not name is queued here. The worker reads the
+# printed set code and number with OCR, then asks a vision LLM, and writes the
+# outcome back; the review queue polls it so it can say when the attempts are
+# used up instead of leaving the row looking busy.
+@app.post("/api/identify/enqueue")
+async def enqueue_identify(payload: Dict[str, Any],
+                           current_user: UserResponse = Depends(get_current_user)):
+    crop = (payload or {}).get("crop_image_path") or save_crop_data_url(
+        (payload or {}).get("crop_data_url"))
+    if not crop:
+        raise HTTPException(status_code=400,
+                            detail="crop_image_path or crop_data_url is required")
+    job_id = identify_jobs.enqueue(db_path, crop,
+                                   (payload or {}).get("scan_image_path"),
+                                   (payload or {}).get("card_key"))
+    return {"job_id": job_id, "max_attempts": identify_jobs.MAX_ATTEMPTS}
+
+
+@app.get("/api/identify/jobs")
+async def identify_job_status(ids: str = "", limit: int = 50,
+                              current_user: UserResponse = Depends(get_current_user)):
+    wanted = [int(part) for part in ids.split(",") if part.strip().isdigit()] if ids else None
+    return {"jobs": identify_jobs.statuses(db_path, wanted, max(1, min(limit, 200)))}
 
 
 @app.get("/api/cards/{card_id}")

@@ -14,6 +14,13 @@ services:
       # Portainer stack environment / an .env file next to this compose file;
       # never commit the real value.
       - PTCG_API_KEY=${PTCG_API_KEY:?set PTCG_API_KEY in the stack environment}
+      # Background identification: the vision model reads cards OCR cannot.
+      # Values come from the .env next to this file; leave the key unset to run
+      # with OCR only.
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - IDENTIFY_LLM_BASE=${IDENTIFY_LLM_BASE:-https://api.openai.com/v1}
+      - IDENTIFY_LLM_MODEL=${IDENTIFY_LLM_MODEL:-auto}
+      - IDENTIFY_LLM_TIMEOUT=${IDENTIFY_LLM_TIMEOUT:-90}
       # Optional overrides
       - HOST=0.0.0.0
       - PORT=5005

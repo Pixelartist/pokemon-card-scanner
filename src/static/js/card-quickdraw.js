@@ -125,6 +125,24 @@ function readRGBA(el) {
   return _rgba;
 }
 
+/**
+ * Private read for the crop. readRGBA keeps one canvas and one RGBA buffer at
+ * module scope, and the two flows that use this module overlap: auto-scan's
+ * consensus burst straightens frames while the live loop is mid-detect. Sharing
+ * that read meant either side could resize and redraw the other's canvas
+ * underfoot. A crop is a single image, so it pays for its own read instead.
+ */
+function readOwnPixels(el) {
+  const w = el.videoWidth || el.naturalWidth || el.width;
+  const h = el.videoHeight || el.naturalHeight || el.height;
+  if (!w || !h) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(el, 0, 0);
+  return { rgba: ctx.getImageData(0, 0, w, h).data, w, h };
+}
+
 class PokemonCardDetector {
   constructor() { this.model = null; }
 
@@ -187,7 +205,6 @@ class PokemonCardDetector {
       const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
       let w = (Math.max(...xs) - Math.min(...xs)) * 1.45, h = (Math.max(...ys) - Math.min(...ys)) * 1.45;
       if (w / h > iw / ih) h = w * ih / iw; else w = h * iw / ih;
-      if (w >= width * 0.8 && h >= height * 0.8) { refined.push(det); continue; }
       const rect = { x: cx - w / 2, y: cy - h / 2, w, h };
       const near = (await this._runRGBA(rgba, width, height, rect)).filter(t => isConvex(t.quad));
       let best = null, bd = Infinity;
@@ -220,12 +237,12 @@ export function cropCardStraight(imageEl, detection) {
   const canvas = document.createElement('canvas');
   const quad = (detection && (detection.points || detection.quad) || []).map(
     p => (Array.isArray(p) ? [p[0], p[1]] : [p.x, p.y]));
-  const rgba = readRGBA(imageEl);
-  if (quad.length !== 4 || !rgba || quad.some(p => !isFinite(p[0]) || !isFinite(p[1]))) {
+  const src = readOwnPixels(imageEl);
+  if (quad.length !== 4 || !src || quad.some(p => !isFinite(p[0]) || !isFinite(p[1]))) {
     canvas.width = canvas.height = 1;
     return canvas;
   }
-  const w = _rgbaW, h = _rgbaH;
+  const { rgba, w, h } = src;
   // The corner model lands ~1% outside the card on each edge, and a sliver of
   // table in the crop is expensive: the whole-card hash is edge sensitive, and
   // on a real capture the loose crop scored 72.4 (a three-way tie with unrelated
@@ -243,9 +260,14 @@ export function cropCardStraight(imageEl, detection) {
   const ew = Math.hypot(quad[1][0] - quad[0][0], quad[1][1] - quad[0][1]);
   const eh = Math.hypot(quad[3][0] - quad[0][0], quad[3][1] - quad[0][1]);
   if (ew < 2 || eh < 2) { canvas.width = canvas.height = 1; return canvas; }
+  // 704 rather than 352: the collector line is ~4px tall at 352 and tesseract
+  // cannot read it at all, which is what makes a browser crop useless to the
+  // background OCR job. Measured on a real capture, the same crop reads the
+  // number at 704 (2x) and not below.
+  const LONG_EDGE = 704;
   let outW, outH;
-  if (eh >= ew) { outH = 352; outW = Math.max(32, Math.round(352 * ew / eh)); }
-  else { outW = 352; outH = Math.max(32, Math.round(352 * eh / ew)); }
+  if (eh >= ew) { outH = LONG_EDGE; outW = Math.max(32, Math.round(LONG_EDGE * ew / eh)); }
+  else { outW = LONG_EDGE; outH = Math.max(32, Math.round(LONG_EDGE * eh / ew)); }
   const H = solveHomography([[0, 0], [1, 0], [1, 1], [0, 1]], quad);
   if (!H) { canvas.width = canvas.height = 1; return canvas; }
   canvas.width = outW; canvas.height = outH;

@@ -1062,6 +1062,9 @@ select {
   text-overflow: ellipsis;
 }
 .qi-meta, .qi-latest { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+/* Background identification state: amber once OCR and the LLM are both spent. */
+.qi-job { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.qi-job.spent { color: var(--amber, #d29922); }
 .qi-status {
   align-self: flex-start;
   padding: 2px 6px;
@@ -1090,6 +1093,8 @@ select {
 .qi-actions button:hover { border-color: var(--gold); color: var(--gold); }
 .qi-actions .keep:hover { border-color: var(--ok); color: var(--ok); }
 .qi-actions .discard { border-color: rgba(248, 81, 73, 0.45); color: var(--danger); }
+/* A row with no stored crop cannot be re-read, so the trigger says why. */
+.qi-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---------- "Not this" comparison modal ----------
    Left column is the capture and never changes; the right column swaps between

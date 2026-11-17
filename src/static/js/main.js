@@ -510,12 +510,17 @@ async function loadLanguagePreference() {
 
 const scanBtn = document.getElementById('scan-btn');
 
-// ── Browser-side scanner (1vcian architecture) ────────────────────
-// YOLO11-Nano OBB detection + perceptual-hash matching run locally in
-// this page (same TF.js weights as 1vcian/Pokemon-TCGP-Card-Scanner).
-// window.__cardScanner.tryIdentify(source) returns { detection, candidates,
-// cropCanvas } when the local hash index matches, or null when the card
-// isn't in the local index — caller then falls back to the cloud /api/scan.
+// ── Browser-side scanner ──────────────────────────────────────────
+// Corner-model detection (a port of quickdraw.cards' neural-scanner) and
+// perceptual-hash matching run locally in this page.
+//   identifyWithConsensus(video)  camera capture: samples a short burst and
+//                                 accepts a card only when the frames agree on
+//                                 the region and the identity is corroborated.
+//   analyseFrame(source)          one frame (an uploaded image); asks the
+//                                 server fingerprint before accepting a weak
+//                                 match.
+// Both return { detection, candidates, cropCanvas, nearMiss } or { noCard: true };
+// the caller falls back to the cloud /api/scan when the local index has no match.
 window.__cardScanner = {
   detector: null,
   matcher: null,
@@ -593,11 +598,145 @@ window.__cardScanner = {
     return detections[0];
   },
 
-  // Detect + straighten-crop + hash-match in one shot.
-  async tryIdentify(source) {
+  // Ask the server's fingerprint matcher whether the crop is a card at all.
+  // Its distances separate what the hash cannot: on the same data/scans crops,
+  // real cards measured 0.06-0.12 and face crops 0.30-0.33.
+  async confirmWithServer(canvas) {
+    try {
+      const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+      const body = new FormData();
+      body.append('image', blob, 'crop.jpg');
+      const response = await fetch('/api/quickdraw/match?top_k=1', { method: 'POST', body });
+      if (!response.ok) return true;   // unknown: keep the previous behaviour
+      const data = await response.json();
+      const top = (data.candidates && data.candidates[0]) || null;
+      return !!top && top.distance <= MAX_SERVER_DISTANCE;
+    } catch (e) {
+      return true;                     // offline: do not block scanning
+    }
+  },
+
+  _grabFrame(video) {
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    return canvas;
+  },
+
+  // quickdraw's sameCardRegion: two quads show the same card when their centres
+  // and sizes agree to within a fraction of the card's own size. A moving card,
+  // a hand sweeping past, or the model jumping to a face all fail this.
+  _sameRegion(a, b) {
+    if (!a || !b || a.length < 4 || b.length < 4) return false;
+    const box = q => {
+      const xs = q.map(p => Number(p[0]) || 0), ys = q.map(p => Number(p[1]) || 0);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs);
+      const y0 = Math.min(...ys), y1 = Math.max(...ys);
+      return { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 };
+    };
+    const A = box(a), B = box(b);
+    const ref = Math.min(Math.min(A.w, A.h), Math.min(B.w, B.h));
+    if (ref <= 0) return false;
+    return Math.hypot(A.cx - B.cx, A.cy - B.cy) <= ref * REGION_TOLERANCE &&
+           Math.abs(A.w - B.w) <= Math.max(A.w, B.w) * REGION_TOLERANCE &&
+           Math.abs(A.h - B.h) <= Math.max(A.h, B.h) * REGION_TOLERANCE;
+  },
+
+  // quickdraw's appearanceDistance: the fraction of hash bits that differ.
+  _appearanceDistance(a, b) {
+    if (!a || !b) return 1;
+    let diff = 0;
+    const n = Math.min(a.length, b.length);
+    for (let i = 0; i < n; i++) if (a[i] !== b[i]) diff++;
+    return diff / n;
+  },
+
+  // Sample the live video and accept a card only when the frames agree. Three
+  // sources decide: the burst (same region and same appearance across frames),
+  // the hash index, and the server fingerprint.
+  async identifyWithConsensus(video) {
+    if (!this.ready || !video || !video.videoWidth) return null;
+    const frames = [];
+    let anchor = null;
+    for (let i = 0; i < CONSENSUS_FRAMES; i++) {
+      let res = null;
+      try {
+        // The first frame locates the card; the rest reuse its quad, so a
+        // capture costs one detector pass and three hashes instead of three of
+        // each. A card that moves shows up in the appearance check below, not
+        // in a second detection.
+        res = await this.analyseFrame(this._grabFrame(video),
+                                      { server: false, quad: i > 0 ? anchor : null });
+      } catch (e) { res = null; }
+      if (i === 0 && res && res.detection && res.detection.points) anchor = res.detection.points;
+      frames.push(res);
+      if (i < CONSENSUS_FRAMES - 1) await new Promise(r => setTimeout(r, CONSENSUS_GAP_MS));
+    }
+
+    // A frame "saw something" when the detector fired; the identity gate is
+    // applied once, to the consensus result, not per frame.
+    const hits = frames.filter(r => r && !r.noCard && r.detection && r.detection.points);
+    if (hits.length >= CONSENSUS_REQUIRED) {
+      const base = hits[0];
+      // Same card in the same place: the quad may not jump, and the crop may not
+      // change much. Two different cards sliding past differ in the hash even
+      // when the reused quad never moves.
+      const agreeing = hits.filter(r =>
+        this._sameRegion(base.detection.points, r.detection.points) &&
+        this._appearanceDistance(base.queryHash, r.queryHash) <= APPEARANCE_MAX);
+      // Every frame that saw anything must agree. Two-of-three would accept the
+      // first card of a stack sliding past (A, A, B still gives two matches).
+      if (agreeing.length >= CONSENSUS_REQUIRED && agreeing.length === hits.length) {
+        // quickdraw's visionConsensus: with three frames of one card the top
+        // guess repeats. Vote on it, then keep the sharpest frame of the winner.
+        const votes = new Map();
+        for (const r of agreeing) {
+          const id = r.candidates && r.candidates[0] && r.candidates[0].id;
+          if (id) votes.set(id, (votes.get(id) || 0) + 1);
+        }
+        const winner = [...votes.entries()].sort((a, b) => b[1] - a[1])[0];
+        const pool = winner
+          ? agreeing.filter(r => r.candidates[0] && r.candidates[0].id === winner[0])
+          : agreeing;
+        const best = pool.slice().sort((a, b) => b.bestSimilarity - a.bestSimilarity)[0];
+        // Agreement is not proof on its own: a face held still agrees with
+        // itself frame after frame (measured: 80.95 similarity, three in a row).
+        // Consensus therefore gates presence, and the identity sources still
+        // decide whether a card is there: a strong hash, or the server fingerprint.
+        const strong = best.bestSimilarity * 100 >= MIN_TRUSTED_SIM;
+        if (strong || await this.confirmWithServer(best.cropCanvas)) {
+          if (best.cropDataUrl) this._lastCropDataUrl = best.cropDataUrl;
+          return { ...best, agreement: agreeing.length, frames: frames.length };
+        }
+      }
+    }
+
+    // A single hit is not a card by itself — that is the case this layer exists
+    // to catch. Ask the other source before giving up on a card that is merely
+    // hard to see (angle, glare) rather than absent. But only when one frame saw
+    // anything at all: frames that saw *different* cards are a card sliding
+    // past, and no amount of server confirmation makes that one card.
+    const single = hits.length === 1 ? hits[0] : null;
+    if (single && await this.confirmWithServer(single.cropCanvas)) {
+      if (single.cropDataUrl) this._lastCropDataUrl = single.cropDataUrl;
+      return { ...single, agreement: 1, frames: frames.length };
+    }
+    this._lastCropDataUrl = null;
+    return { noCard: true, candidates: [], nearMiss: [],
+             bestSimilarity: (hits[0]?.bestSimilarity || 0), frames: frames.length };
+  },
+
+  // Detect + straighten-crop + hash-match in one shot. The consensus path calls
+  // this once per frame; an uploaded image calls it once, with a server opinion.
+  async analyseFrame(source, { server = true, quad = null } = {}) {
     if (!this.ready) return null;
-    const det = await this.detect(source);
-    if (!det || det.confidence < 30) return null;
+    // A burst's later frames pass the quad found by its first frame: the crop is
+    // taken from that region without spending another detector pass.
+    let det = quad ? { points: quad, confidence: 100 } : await this.detect(source);
+    // 45, not 30: the corner model's own presence threshold is the sigmoid of
+    // DET_LOGIT (~0.27), so 30% let almost any quad through.
+    if (!det || det.confidence < MIN_CARD_CONF) return { noCard: true };
     const { cropCardStraight } = await import('/static/js/card-quickdraw.js');
     const crop = cropCardStraight(source, det);
     // Gate at 78 (not 85): real photos score well below reference-image
@@ -606,6 +745,9 @@ window.__cardScanner = {
     // bestSimilarity is returned even below the gate so the UI can show
     // how close the near-miss was instead of failing silently.
     const all = await this.matcher.match(crop, 0, 8);
+    // match() hashes the crop anyway and hands the hash back, so the burst can
+    // compare frames without a second 24x24 DCT of the same canvas.
+    const queryHash = all.queryHash || null;
     // EN and DE scans of the same card hash identically (0/105 bits), and match()
     // does not dedupe, so a *correct* hit is routinely its own runner-up with a
     // 0.0 lead. Collapse twins before measuring the lead or the gate would reject
@@ -614,6 +756,30 @@ window.__cardScanner = {
     const uniq = [];
     for (const m of all) {
         if (!uniq.some(u => baseId(u.id) === baseId(m.id))) uniq.push(m);
+    }
+    // A corner model answers "where are the four corners?", not "is this a
+    // card?": a head with headphones gives it a plausible quad. Measured on the
+    // face captures in data/scans it scored 0.61 where real cards score
+    // 0.75-1.0 at the same resolution, and geometry cannot separate them (that
+    // quad's ratio was 0.75, a card's 0.71).
+    //
+    // The hash cannot either. Measured in the browser against card-hashes.json
+    // (40,401 cards), the face crops score 76.2, 77.1 and 81.0 - above the 78
+    // accept gate - while real captures score 81.9 to 96.2. So similarity is
+    // never used as a card-presence floor; it only decides whether a match is
+    // strong enough to need no second opinion.
+    const strong = uniq.length > 0 && uniq[0].similarity >= MIN_TRUSTED_SIM;
+    // A single frame must be corroborated here; a frame inside a burst must not,
+    // or a card that is merely hard to read would be dropped before the burst
+    // and the consensus layer could see it at all.
+    if (server) {
+      const corroborated = strong ||
+        (uniq.length > 0 && await this.confirmWithServer(crop));
+      if (!corroborated) {
+        this._lastCropDataUrl = null;
+        return { noCard: true, bestSimilarity: (uniq[0]?.similarity || 0) / 100,
+                 candidates: [], nearMiss: [] };
+      }
     }
     // A flat 78 cutoff passes a crowded band, so a near-threshold hit is a coin
     // flip. Requiring the top hit to lead the nearest *different* card by >= 8
@@ -650,6 +816,8 @@ window.__cardScanner = {
       detection: det,
       bestSimilarity,
       cropDataUrl,
+      cropCanvas: crop,
+      queryHash,
       // quickdraw never discards a near-miss: it stashes the best guesses so the
       // UI can offer them for one-tap confirmation. Ship the top guesses even
       // when the gate rejected all of them.
@@ -704,7 +872,25 @@ if (scanBtn) {
                 snap.height = video.videoHeight;
                 snap.getContext('2d').drawImage(video, 0, 0);
                 try {
-                    const res = await window.__cardScanner.tryIdentify(snap);
+                    // Multi-frame, like quickdraw: a card is accepted only
+                    // when a short burst of frames agrees on the region and
+                    // the identity. `snap` remains the fallback image for the
+                    // cloud path when there is nothing to send a crop of.
+                    const res = await window.__cardScanner.identifyWithConsensus(video);
+                    if (res && res.noCard) {
+                        // Nothing card-like in the frame. A face under the
+                        // camera is the common case, and uploading its crop
+                        // stored a face as an unidentified card; say so instead.
+                        const auto = !!(window.__autoScan && window.__autoScan.active);
+                        if (!auto) {
+                            const box = document.getElementById('scan-result');
+                            if (box) box.innerHTML = '<p class="error">No card detected — hold a card in front of the camera, or use Upload.</p>';
+                            const ov = document.getElementById('scan-overlay-result');
+                            if (ov) ov.innerHTML = '<span class="so-empty">No card in frame</span>';
+                        }
+                        if (auto) window.__autoScan.retry(3000);
+                        return;
+                    }
                     if (res && res.candidates.length) {
                         displayScanResult({
                             decision: 'match',
@@ -814,6 +1000,33 @@ if (scanBtn) {
 // 0.4 let a blurry shelf photo through as a "73%" near-miss; 0.75 filters that
 // while keeping real unidentified cards (confirmed matches score 0.8+).
 const MIN_NEAR_MISS_SIM = 0.75;
+
+// Detector confidence (0-100) a capture must clear before it counts as a card
+// candidate at all. The corner model fires at 0.61 on a face in front of the
+// camera and at 0.75-1.0 on real cards at native resolution.
+const MIN_CARD_CONF = 45;
+// Hash similarity (0-100) that needs no second opinion. Measured in the browser
+// against card-hashes.json: clean card crops 95-96, webcam crops 81.9-96.2, and
+// face crops 76.2-81.0 — overlapping, which is why this is a trust threshold
+// and not a card-presence floor.
+const MIN_TRUSTED_SIM = 90;
+// Server fingerprint distance that still counts as a card: real cards measured
+// 0.06-0.12, face crops 0.30-0.33, so 0.20 sits between them.
+const MAX_SERVER_DISTANCE = 0.20;
+
+// Multi-frame capture, adapted from quickdraw.cards' FrameConsensus: they never
+// accept a card from one frame, and one frame is exactly what let a face
+// through here. A capture samples a short burst and requires agreement on both
+// the region and the identity before anything is shown or filed.
+const CONSENSUS_FRAMES = 3;      // frames sampled per capture
+const CONSENSUS_GAP_MS = 140;    // ~7 fps; a held card barely moves in 140ms
+const CONSENSUS_REQUIRED = 2;    // agreeing frames before a card is accepted
+const REGION_TOLERANCE = 0.35;   // how far the quad may drift between frames
+// quickdraw's appearanceDistance: how much of the 105-bit hash may differ
+// between two frames and still be the same card. A different card sliding past
+// replaces most of the artwork, so it lands far above this, while the same card
+// held by hand moves a few percent of the bits.
+const APPEARANCE_MAX = 0.25;
 
 function noteNearMiss(data) {
   const pool = (data && data.candidates && data.candidates.length)
@@ -1831,15 +2044,39 @@ let lastNearMiss = [];  // top gated-out browser guesses, for the review queue
 
 function startLiveDetection() {
     if (liveDetectionInterval) return;
-    let running = false;
+    // A detect() that never settles used to pin the guard forever: every later
+    // tick returned early and the green box stayed dead until reload, silently.
+    // Honest passes cost 100-400ms, so 8s only ever catches a real stall; slow
+    // is waited out, not abandoned.
+    const LIVE_TICK_TIMEOUT = 8000;
+    let runningSince = 0, token = 0, failureLogged = false;   // 0 = no pass in flight
     liveDetectionInterval = setInterval(async () => {
         const camVisible = !document.getElementById('camera-section').classList.contains('hidden');
         if (!camVisible) { stopLiveDetection(); return; }
         // Browser-side YOLO11 OBB: inference is ~100-400ms locally instead of
         // ~20s on the NAS CPU, so the green box tracks the card in near real-time.
-        if (running || !window.__cardScanner || !window.__cardScanner.ready) return;
-        running = true;
-        try { await detectCardInFrame(); } finally { running = false; }
+        if (!window.__cardScanner || !window.__cardScanner.ready) return;
+        if (runningSince) {
+            const stalledFor = Date.now() - runningSince;
+            if (stalledFor < LIVE_TICK_TIMEOUT) return;
+            console.warn(`[Scanner] live detect stalled ${stalledFor}ms; starting a fresh pass`);
+        }
+        runningSince = Date.now();
+        // Each pass frees only its own slot. Without this, a pass slow enough to
+        // be abandoned but that returns later would free its replacement's slot,
+        // and a device that trips the limit every time would stack overlapping
+        // inferences instead of holding at one.
+        const mine = ++token;
+        // A rejecting pass used to escape this try/finally as an unhandled
+        // rejection on every tick. Log the start of a failure run and carry on:
+        // the next tick retries, and a pass that keeps failing does not fill the
+        // console with one line every 700ms.
+        try { await detectCardInFrame(); failureLogged = false; }
+        catch (err) {
+            if (!failureLogged) console.warn('[Scanner] live detection pass failed:', err);
+            failureLogged = true;
+        }
+        finally { if (mine === token) runningSince = 0; }
     }, 700);
 }
 

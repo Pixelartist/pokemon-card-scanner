@@ -8,8 +8,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # OpenCV (pulled in by ultralytics) needs libglib; ffmpeg not needed for CPU
+# tesseract reads the card's printed set code and number for the background
+# identification queue; eng+deu cover the printings the scanner sees.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 curl \
+        tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/data/pokemon-card-scanner

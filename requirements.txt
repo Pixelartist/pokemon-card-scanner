@@ -22,3 +22,7 @@ PyJWT>=2.8.0
 
 # CLIP model loading via OpenCLIP
 open_clip_torch>=2.24.0
+
+# Reading the printed set code / number for the background identify queue
+# (needs the tesseract binary, installed in the Dockerfile)
+pytesseract>=0.3.13
