@@ -450,6 +450,8 @@ async def scan_card(
 
         return JSONResponse(result)
 
+    except HTTPException:
+        raise  # 400/413/429 from the guards above are answers, not failures
     except Exception as e:
         logger.error(f"Scan error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2344,6 +2346,8 @@ async def detect_card(
 
         return JSONResponse(_convert_numpy_types(result))
 
+    except HTTPException:
+        raise  # 413/429 from the guards above are answers, not failures
     except Exception as e:
         logger.error(f"Detection error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")

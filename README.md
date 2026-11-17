@@ -133,6 +133,22 @@ cp data/backups/pokemon_cards.db.20261117-130515 data/pokemon_cards.db
 python -c "import sqlite3;print(sqlite3.connect('data/pokemon_cards.db').execute('PRAGMA integrity_check').fetchone())"
 ```
 
+## Tests
+
+The tests need the app's requirements plus the dev ones (`requirements-dev.txt`),
+in a virtualenv of their own — `.venv/` in this checkout is the container's Linux
+venv and does not run on the host:
+
+```bash
+py -3.12 -m venv venv                                   # python3 -m venv venv elsewhere
+venv/Scripts/python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+venv/Scripts/python.exe -m pytest tests/ -q              # also: python -m unittest discover -s tests
+```
+
+`tests/test_quickdraw.py` additionally needs `data/quickdraw-index.bin` and the two
+Wailmer images, and its API test needs a server on :5005; each skips with a reason
+when its prerequisite is missing, so the rest of the suite still reports.
+
 ## Project Structure
 
 ```

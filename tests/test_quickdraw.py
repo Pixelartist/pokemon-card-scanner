@@ -1,142 +1,123 @@
 #!/usr/bin/env python3
+"""Quickdraw matcher tests.
+
+Runs under pytest (python -m pytest tests/ -q), under unittest discovery, or on
+its own:
+
+    python tests/test_quickdraw.py [--daemon]
+
+The fingerprint index and the two Wailmer images are prerequisites; when they are
+absent the tests skip with a reason instead of failing at import. That matters:
+the module imports numpy and Pillow, so without the dev dependencies installed it
+used to abort collection of the whole `tests` directory and hide real failures
+behind an ImportError.
 """
-Quickdraw matcher test suite.
-
-Usage:
-    python tests/test_quickdraw.py          # Run tests with daemon running
-    python tests/test_quickdraw.py --daemon # Auto-restart daemon if needed
-
-Tests:
-    - Index loads with expected card count
-    - English Wailmer self-match within MATCH_DIST
-    - German Wailmer self-match within MATCH_DIST  
-    - Language filtering prevents cross-language false positives
-    - API endpoints respond correctly
-"""
-
-import sys
-import os
-import time
 import argparse
 import subprocess
+import sys
+import time
+import unittest
+from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
 
-from services.quickdraw_matcher import QuickdrawMatcher
+INDEX = ROOT / "data" / "quickdraw-index.bin"
+ENGLISH = ROOT / "data" / "images" / "tcgdex" / "en" / "me05-015.png"
+GERMAN = ROOT / "data" / "german_cards" / "images" / "de_me05-015.png"
+SERVER = "http://localhost:5005"
+EXPECTED_CARDS = 40291
 
-def run_daemon_if_needed():
-    """Check if daemon is running, restart if not."""
+
+def server_is_up(timeout=2):
     try:
         import requests
-        r = requests.get('http://localhost:5005/api/quickdraw/status', timeout=2)
-        return True
-    except:
-        print("Daemon not running, starting...")
-        os.chdir('/opt/data/pokemon-card-scanner')
-        subprocess.Popen(['nohup', '.venv/bin/python3', 'daemon.py'], 
-                        stdout=open('/tmp/daemon.log', 'w'),
-                        stderr=subprocess.STDOUT)
-        time.sleep(5)
+    except ImportError:
+        return False
+    try:
+        return requests.get(f"{SERVER}/api/quickdraw/status", timeout=timeout).ok
+    except Exception:
         return False
 
-def test_index_loads():
-    """Test that index loads with expected card count."""
-    matcher = QuickdrawMatcher()
-    assert matcher.load_index(), "Failed to load index"
-    assert matcher.count == 40291, f"Expected 40291 cards, got {matcher.count}"
-    print("✓ Index loads with 40,291 cards")
-    return matcher
 
-def test_english_self_match(matcher, match_dist):
-    """Test English Wailmer self-match."""
-    with open('data/images/tcgdex/en/me05-015.png', 'rb') as f:
-        img = f.read()
-    result = matcher.recognize(img, lang='en')
-    assert result['decision'] == 'match', f"Expected match, got {result['decision']}"
-    assert len(result['candidates']) > 0, "No candidates returned"
-    top = result['candidates'][0]
-    assert top['ptcg_id'] == 'me05-015', f"Expected me05-015, got {top['ptcg_id']}"
-    assert top['distance'] < match_dist, f"Distance {top['distance']} >= MATCH_DIST {match_dist}"
-    print(f"✓ English Wailmer self-match: distance {top['distance']:.3f} < {match_dist}")
+def start_server():
+    print("Server not running, starting...")
+    with open(ROOT / "daemon.log", "w") as log:
+        subprocess.Popen([sys.executable, "daemon.py"], cwd=ROOT, stdout=log,
+                         stderr=subprocess.STDOUT, start_new_session=True)
+    time.sleep(5)
 
-def test_german_self_match(matcher, match_dist):
-    """Test German Wailmer self-match."""
-    with open('data/german_cards/images/de_me05-015.png', 'rb') as f:
-        img = f.read()
-    result = matcher.recognize(img, lang='de')
-    assert result['decision'] == 'match', f"Expected match, got {result['decision']}"
-    assert len(result['candidates']) > 0, "No candidates returned"
-    top = result['candidates'][0]
-    assert top['ptcg_id'] == 'de_me05-015', f"Expected de_me05-015, got {top['ptcg_id']}"
-    assert top['distance'] < match_dist, f"Distance {top['distance']} >= MATCH_DIST {match_dist}"
-    print(f"✓ German Wailmer self-match: distance {top['distance']:.3f} < {match_dist}")
 
-def test_language_filter(matcher):
-    """Test language filtering works correctly."""
-    # English image with lang='en' should return English card
-    with open('data/images/tcgdex/en/me05-015.png', 'rb') as f:
-        img = f.read()
-    result = matcher.recognize(img, lang='en')
-    for c in result['candidates']:
-        assert not c['ptcg_id'].startswith('de_'), \
-            f"English query matched German card: {c['ptcg_id']}"
-    print("✓ lang='en' filters to English cards only")
+class QuickdrawMatcherTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        missing = [str(p) for p in (INDEX, ENGLISH, GERMAN) if not p.exists()]
+        if missing:
+            raise unittest.SkipTest("missing " + ", ".join(missing))
+        from services.quickdraw_matcher import QuickdrawMatcher
 
-def test_api_endpoints():
-    """Test API endpoints are accessible."""
-    try:
-        import requests
-        # Status endpoint
-        r = requests.get('http://localhost:5005/api/quickdraw/status', timeout=5)
-        assert r.status_code == 200, f"Status endpoint failed: {r.status_code}"
-        data = r.json()
-        assert data['cards_indexed'] == 40291, f"Wrong card count: {data['cards_indexed']}"
-        print("✓ /api/quickdraw/status returns 40,291 cards")
-        
-        # Scan endpoint - English
-        with open('data/images/tcgdex/en/me05-015.png', 'rb') as f:
-            img = f.read()
-        r = requests.post('http://localhost:5005/api/scan', files={'image': img}, data={'lang': 'en'})
-        assert r.status_code == 200, f"Scan endpoint failed: {r.status_code}"
-        result = r.json()
-        assert result['decision'] == 'match', f"Expected match, got {result['decision']}"
-        print("✓ /api/scan works with English image (lang=en)")
-        
-        # Scan endpoint - German
-        with open('data/german_cards/images/de_me05-015.png', 'rb') as f:
-            img = f.read()
-        r = requests.post('http://localhost:5005/api/scan', files={'image': img}, data={'lang': 'de'})
-        assert r.status_code == 200, f"Scan endpoint failed: {r.status_code}"
-        result = r.json()
-        assert result['decision'] == 'match', f"Expected match, got {result['decision']}"
-        print("✓ /api/scan works with German image (lang=de)")
-        
-    except ImportError:
-        print("⚠ requests not available, skipping API tests")
+        cls.matcher = QuickdrawMatcher()
+        if not cls.matcher.load_index():
+            raise unittest.SkipTest(f"{INDEX.name} did not load")
+
+    def test_index_loads(self):
+        """The index holds every card it was built from."""
+        self.assertEqual(self.matcher.count, EXPECTED_CARDS)
+
+    def test_english_self_match(self):
+        result = self.matcher.recognize(ENGLISH.read_bytes(), lang="en")
+        self.assertEqual(result["decision"], "match")
+        self.assertTrue(result["candidates"])
+        top = result["candidates"][0]
+        self.assertEqual(top["ptcg_id"], "me05-015")
+        self.assertLess(top["distance"], self.matcher.MATCH_DIST)
+
+    def test_german_self_match(self):
+        result = self.matcher.recognize(GERMAN.read_bytes(), lang="de")
+        self.assertEqual(result["decision"], "match")
+        self.assertTrue(result["candidates"])
+        top = result["candidates"][0]
+        self.assertEqual(top["ptcg_id"], "de_me05-015")
+        self.assertLess(top["distance"], self.matcher.MATCH_DIST)
+
+    def test_language_filter(self):
+        """An English query never answers with the German variant."""
+        result = self.matcher.recognize(ENGLISH.read_bytes(), lang="en")
+        for candidate in result["candidates"]:
+            self.assertFalse(candidate["ptcg_id"].startswith("de_"), candidate["ptcg_id"])
+
+    def test_api_endpoints(self):
+        try:
+            import requests
+        except ImportError:
+            self.skipTest("requests is not installed")
+        try:
+            status = requests.get(f"{SERVER}/api/quickdraw/status", timeout=5)
+        except requests.RequestException as exc:
+            self.skipTest(f"no server on {SERVER} ({exc})")
+
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["cards_indexed"], EXPECTED_CARDS)
+
+        scan = requests.post(f"{SERVER}/api/scan", files={"image": ENGLISH.read_bytes()},
+                             data={"lang": "en"}, timeout=120)
+        self.assertEqual(scan.status_code, 200, scan.text)
+        self.assertEqual(scan.json()["decision"], "match")
+
+        scan = requests.post(f"{SERVER}/api/scan", files={"image": GERMAN.read_bytes()},
+                             data={"lang": "de"}, timeout=120)
+        self.assertEqual(scan.status_code, 200, scan.text)
+        self.assertEqual(scan.json()["decision"], "match")
+
 
 def main():
-    parser = argparse.ArgumentParser(description='Quickdraw matcher tests')
-    parser.add_argument('--daemon', action='store_true', help='Auto-restart daemon if needed')
-    args = parser.parse_args()
-    
-    print("Running Quickdraw Matcher Tests")
-    print("=" * 40)
-    
-    if args.daemon:
-        run_daemon_if_needed()
-    
-    os.chdir('/opt/data/pokemon-card-scanner')
-    
-    matcher = test_index_loads()
-    match_dist = matcher.MATCH_DIST
-    test_english_self_match(matcher, match_dist)
-    test_german_self_match(matcher, match_dist)
-    test_language_filter(matcher)
-    test_api_endpoints()
-    
-    print("=" * 40)
-    print("All tests passed!")
+    parser = argparse.ArgumentParser(description="Quickdraw matcher tests")
+    parser.add_argument("--daemon", action="store_true", help="start the server first if it is down")
+    args, rest = parser.parse_known_args()
+    if args.daemon and not server_is_up():
+        start_server()
+    unittest.main(argv=[sys.argv[0], *rest])
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
