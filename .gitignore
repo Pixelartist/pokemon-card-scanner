@@ -13,13 +13,24 @@ venv/
 demo_token.txt
 
 # Runtime data (mounted as volume in Docker)
-data/
+# `data/*`, not `data/`: a directory exclusion cannot be re-included for a single
+# file, and the live database below has to stay un-ignored on purpose.
+data/*
 database.db
 *.db
 server.log
 server_*.log
 server.pid
 logs/
+
+# The live database is untracked by design (7c991e3b) but must NOT be ignored.
+# Git refuses to overwrite an untracked file that is not ignored, and that refusal
+# is what stops a merge from writing a stale tracked blob over it. It happened on
+# 2026-11-17: merging a branch that modifies data/pokemon_cards.db replaced the
+# live database with the 2026-11-13 copy, because the file was ignored and git
+# treats ignored files as expendable. Remove this line and a merge can clobber the
+# database again; the cost of keeping it is that the file shows up as untracked.
+!data/pokemon_cards.db
 
 # Model weights (downloaded/mounted, not stored in git)
 *.pt
