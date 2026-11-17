@@ -1317,16 +1317,76 @@ def _resolve_local_card_image(ptcg_id: str, img_url: str) -> str:
     return img_url or ""
 
 
+_DE_NAME_CACHE = None
+_GERMAN_HIT_LIMIT = 400
+
+
+def _german_card_names() -> dict:
+    """Map de_<set>-<num> -> German card name.
+
+    Every de_* row in the cards table keeps the English name (the prints share
+    their artwork), so the German name printed on the card only exists in
+    static/cards_meta.json. Loaded once and cached.
+    """
+    global _DE_NAME_CACHE
+    if _DE_NAME_CACHE is not None:
+        return _DE_NAME_CACHE
+    names = {}
+    try:
+        import json
+        from pathlib import Path
+
+        meta_path = Path(__file__).resolve().parent.parent / "static" / "cards_meta.json"
+        with open(meta_path, encoding="utf-8") as fh:
+            for card in json.load(fh):
+                if "/german_cards/" not in (card.get("image") or ""):
+                    continue
+                name = card.get("name") or ""
+                if not (name and card.get("set") and card.get("number")):
+                    continue
+                names[f"de_{card['set']}-{card['number']}".lower()] = name
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("German card names unavailable: %s", exc)
+        names = {}
+    _DE_NAME_CACHE = names
+    return names
+
+
+def _shape_card_row(row, german_names) -> dict:
+    """Normalise one `cards` row for the search response.
+
+    Parses the images JSON, points any upstream image URL at our own copy, and
+    swaps in the German print's name where the index has one.
+    """
+    import json
+
+    d = dict(row)
+    if d.get("images"):
+        try:
+            d["images"] = json.loads(d["images"])
+        except Exception:
+            d["images"] = {}
+        for img_key in ("small", "large"):
+            img_url = d["images"].get(img_key, "")
+            if img_url and img_url.startswith("https://"):
+                d["images"][img_key] = _resolve_local_card_image(d.get("ptcg_id") or "", img_url)
+    if german_names:
+        german = german_names.get((d.get("ptcg_id") or "").lower())
+        if german:
+            d["name"] = german
+    return d
+
+
 @app.get("/api/cards/search")
 async def search_cards(query: str, limit: int = 20):
     """Search cards by name, set code, or number (public endpoint, no auth).
     Searches both the local DB and the full CLIP card index (~21k cards)."""
-    import sqlite3
-    from pathlib import Path
-
     q = query.strip().lower()
     results = []
     seen = set()
+    de_names = _german_card_names()
 
     # 1) Database results
     conn = get_db_connection()
@@ -1343,20 +1403,36 @@ async def search_cards(query: str, limit: int = 20):
         (search_param, search_param, search_param, search_param, limit)
     )
     for row in cursor.fetchall():
-        d = dict(row)
-        if d.get("images"):
-            try:
-                d["images"] = __import__("json").loads(d["images"])
-            except Exception:
-                d["images"] = {}
-            # Resolve external image URLs to local static paths
-            for img_key in ("small", "large"):
-                img_url = d["images"].get(img_key, "")
-                if img_url and img_url.startswith("https://"):
-                    d["images"][img_key] = _resolve_local_card_image(d.get("ptcg_id") or "", img_url)
+        d = _shape_card_row(row, de_names)
         if d.get("ptcg_id"):
-            seen.add(d["ptcg_id"])
+            seen.add(d["ptcg_id"].lower())
         results.append(d)
+
+    # German names are not in this table, so match them against the scanner's
+    # index and fetch the matching rows in one query instead of one per hit.
+    if q and de_names and len(results) < limit:
+        # A cap on the IN list, not on results: plenty of index keys have no
+        # cards row, so asking for exactly `limit` keys under-fills the page.
+        german_hits = [
+            key for key, name in de_names.items()
+            if key not in seen and q in name.lower()
+        ][:_GERMAN_HIT_LIMIT]
+        if german_hits:
+            placeholders = ",".join("?" * len(german_hits))
+            cursor.execute(
+                f"""
+                SELECT c.id, c.ptcg_id, c.name, c.number, c.rarity, c.set_name, c.hp, c.types, c.images
+                FROM cards c
+                WHERE LOWER(c.ptcg_id) IN ({placeholders})
+                """,
+                german_hits,
+            )
+            for row in cursor.fetchall():
+                if len(results) >= limit:
+                    break
+                d = _shape_card_row(row, de_names)
+                seen.add(d["ptcg_id"].lower())
+                results.append(d)
     conn.close()
 
     # 2) CLIP index results (covers cards not yet in the DB)
@@ -1368,7 +1444,7 @@ async def search_cards(query: str, limit: int = 20):
             for card in matcher.cards.values():
                 if len(results) >= limit:
                     break
-                if card.card_id in seen:
+                if card.card_id.lower() in seen:
                     continue
                 haystacks = [
                     (card.name or "").lower(),
@@ -1378,7 +1454,7 @@ async def search_cards(query: str, limit: int = 20):
                     card.card_id.lower(),
                 ]
                 if any(q in h for h in haystacks):
-                    seen.add(card.card_id)
+                    seen.add(card.card_id.lower())
                     img = _resolve_local_card_image(card.card_id, card.image_url or "")
                     results.append({
                         "id": None,

@@ -1,5 +1,5 @@
 // Review queue shared by cloud app (/) and local scanner (/scanner/) —
-// same origin, one localStorage key. Item: {id,name,meta,img,score,source,at,scan,crop}
+// same origin, one localStorage key. Item: {id,name,meta,img,score,source,at,scan,crop,candidates}
 const RQ_KEY = 'psc_review_queue';
 const RQ = {
   load() { try { return JSON.parse(localStorage.getItem(RQ_KEY)) || []; } catch { return []; } },
@@ -26,7 +26,14 @@ const RQ = {
 };
 
 function rqEsc(s) {
-  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+// Queue items hold either a server path (relative to /data/) or an inline data
+// URL from the browser-side scanner; both have to survive into an <img src>.
+function rqImgSrc(path) {
+  if (!path) return '';
+  return /^(data:|https?:|\/)/.test(path) ? path : '/data/' + path;
 }
 
 // ----------------------------------------------------------------- Card images
@@ -41,7 +48,7 @@ const rqImageCache = new Map(); // card id -> local image url ('' = known missin
 
 function rqImageSources(item) {
   const out = [];
-  if (item.img) out.push(item.img);
+  if (item.img) out.push(rqImgSrc(item.img));
   const local = rqImageCache.get(item.id);
   if (local) out.push(local);
   out.push(RQ_PLACEHOLDER);
@@ -121,9 +128,30 @@ async function postMisread(payload) {
 // --------------------------------------------------------------------------- Modal
 const MODAL_ID = 'rq-modal';
 
+// "Not this" — the capture stays on the left no matter what is picked on the
+// right, so you always compare the photo you took against the card you file.
 function rqOpenCorrection(item) {
   if (document.getElementById(MODAL_ID)) return;
-  const body = document.body;
+
+  const original = {
+    id: item.id,
+    name: item.name,
+    number: '',
+    set: '',
+    meta: item.meta || '',
+    img: item.img || '',
+    score: item.score || 0,
+  };
+  // The current guess is the first choice, then every other match the scan
+  // offered. Corrections therefore never need a re-scan.
+  const choices = [original, ...(item.candidates || [])
+    .filter(c => c && c.id && c.id !== item.id)
+    .map(c => ({ id: c.id, name: c.name || c.id, number: c.number || '', set: c.set || '', meta: '', img: c.img || '', score: c.score || 0 }))];
+  let selected = original;
+
+  const captureSrc = rqImgSrc(item.crop) || rqImgSrc(item.scan) || RQ_PLACEHOLDER;
+  const captureLabel = item.crop ? 'Your card crop' : (item.scan ? 'Your capture' : 'No capture');
+
   const overlay = document.createElement('div');
   overlay.className = 'rq-modal-backdrop';
   overlay.id = MODAL_ID;
@@ -136,140 +164,158 @@ function rqOpenCorrection(item) {
         <button class="rqm-close" type="button" aria-label="Close">✕</button>
       </div>
       <div class="rqm-body">
-        <div class="rqm-column">
-          <div class="rqm-label">Your capture</div>
-          <div class="rqm-capture">
-            ${item.scan
-              ? `<img src="/data/${rqEsc(item.scan)}" alt="Original scan">`
-              : '<div class="rqm-missing">No capture</div>'}
-          </div>
-          ${item.crop
-            ? `<div class="rqm-crop-wrap">
-                <div class="rqm-label">Card crop</div>
-                <div class="rqm-capture rqm-crop">
-                  <img src="/data/${rqEsc(item.crop)}" alt="Card crop">
-                </div>
-               </div>`
-            : ''}
+        <div class="rqm-column rqm-column-capture">
+          <div class="rqm-label">${rqEsc(captureLabel)}</div>
+          <div class="rqm-capture"><img src="${rqEsc(captureSrc)}" alt="Your capture"></div>
         </div>
         <div class="rqm-column">
-          <div class="rqm-label">Model guessed</div>
-          <div class="rqm-guess">
-            ${item.img
-              ? `<img src="${rqEsc(item.img)}" alt="${rqEsc(item.name)}">`
-              : '<div class="rqm-missing">No image</div>'}
-            <div class="rqm-guess-name">${rqEsc(item.name)}</div>
-            <div class="rqm-guess-meta">${rqEsc(item.meta || '')}${item.score ? ' · ' + Math.round(item.score * 100) + '%' : ''}</div>
-          </div>
-          <div class="rqm-search">
-            <div class="rqm-label">What is it actually?</div>
-            <input type="text" class="rqm-input" id="rqm-input"
-                   placeholder="Type card name or set…" autocomplete="off">
-            <div class="rqm-results" id="rqm-results"></div>
-          </div>
+          <div class="rqm-label">Identified as</div>
+          <div class="rqm-guess" id="rqm-guess"></div>
+          <div class="rqm-label rqm-label-gap">Other options</div>
+          <div class="rqm-options" id="rqm-options"></div>
+          <div class="rqm-label rqm-label-gap">Or search for the right card</div>
+          <input type="text" class="rqm-input" id="rqm-input" placeholder="Type card name or set…" autocomplete="off">
+          <div class="rqm-results" id="rqm-results"></div>
         </div>
       </div>
       <div class="rqm-footer">
         <button class="rqm-btn-cancel" type="button">Cancel</button>
-        <button class="rqm-btn-save" type="button" disabled>Save correction</button>
+        <button class="rqm-btn-save" type="button">Add to gallery</button>
       </div>
     </div>`;
-  body.appendChild(overlay);
-  overlay.querySelector('.rqm-close').addEventListener('click', () => rqCloseCorrection());
-  overlay.querySelector('.rqm-btn-cancel').addEventListener('click', () => rqCloseCorrection());
-  overlay.addEventListener('click', e => { if (e.target === overlay) rqCloseCorrection(); });
-  document.addEventListener('keydown', rqCloseOnEscape);
+  document.body.appendChild(overlay);
+
+  const guessBox = overlay.querySelector('#rqm-guess');
+  const optionsBox = overlay.querySelector('#rqm-options');
+  const resultsBox = overlay.querySelector('#rqm-results');
   const input = overlay.querySelector('#rqm-input');
-  input.focus();
   const saveBtn = overlay.querySelector('.rqm-btn-save');
-  let selected = null;
-  input.addEventListener('input', () => rqSearchCorrect(input.value, overlay, saveBtn));
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && selected) {
-      e.preventDefault();
-      saveBtn.click();
-    } else if (e.key === 'Escape') {
-      rqCloseCorrection();
-    }
-  });
-  function rqCloseOnEscape(e) { if (e.key === 'Escape') rqCloseCorrection(); }
-  function rqSearchCorrect(q, el, btn) {
-    const results = el.querySelector('.rqm-results');
-    if (!q || q.length < 2) { results.innerHTML = ''; btn.disabled = true; selected = null; return; }
-    results.innerHTML = '<div class="rqm-loading">Searching…</div>';
+
+  function guessMeta(c) {
+    return [c.number, c.set, c.meta].filter(Boolean).join(' · ');
+  }
+
+  function renderGuess() {
+    const meta = guessMeta(selected);
+    const score = selected.score ? Math.round(selected.score * 100) + '%' : '';
+    guessBox.innerHTML = `
+      <img src="${rqEsc(rqImgSrc(selected.img) || RQ_PLACEHOLDER)}" alt="${rqEsc(selected.name || '')}">
+      <div class="rqm-guess-text">
+        <div class="rqm-guess-name">${rqEsc(selected.name || selected.id)}</div>
+        <div class="rqm-guess-meta">${rqEsc(meta)}${score ? (meta ? ' · ' : '') + score : ''}</div>
+      </div>`;
+  }
+
+  function renderOptions() {
+    optionsBox.innerHTML = '';
+    choices.forEach(c => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'rqm-option' + (c.id === selected.id ? ' active' : '');
+      btn.innerHTML = `<img src="${rqEsc(rqImgSrc(c.img) || RQ_PLACEHOLDER)}" alt=""><span>${rqEsc(c.name)}</span>`;
+      btn.addEventListener('click', () => {
+        selected = c;
+        renderGuess();
+        renderOptions();
+      });
+      optionsBox.appendChild(btn);
+    });
+  }
+
+  function close() { rqCloseCorrection(); }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  overlay.__rqKeyHandler = onKey;
+  document.addEventListener('keydown', onKey);
+  overlay.querySelector('.rqm-close').addEventListener('click', close);
+  overlay.querySelector('.rqm-btn-cancel').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    if (q.length < 2) { resultsBox.innerHTML = ''; return; }
+    resultsBox.innerHTML = '<div class="rqm-loading">Searching…</div>';
     fetch(`/api/cards/search?query=${encodeURIComponent(q)}&limit=6`)
       .then(r => r.json())
       .then(data => {
-        results.innerHTML = '';
-        if (!data.results || data.results.length === 0) {
-          results.innerHTML = '<div class="rqm-none">No matches found</div>';
-          btn.disabled = true;
+        const results = data.results || [];
+        resultsBox.innerHTML = '';
+        if (results.length === 0) {
+          resultsBox.innerHTML = '<div class="rqm-none">No matches found</div>';
           return;
         }
-        data.results.forEach(card => {
+        results.forEach(card => {
           const row = document.createElement('div');
           row.className = 'rqm-row';
           const img = card.images?.large || card.images?.small || '';
-          row.innerHTML = img
-            ? `<img src="${rqEsc(img)}" class="rqm-row-img" alt="">`
-            : '<span class="rqm-row-noimg"></span>';
-          row.innerHTML += `<div class="rqm-row-info"><span class="rqm-row-name">${rqEsc(card.name)}</span><span class="rqm-row-meta">${rqEsc(card.number)} · ${rqEsc(card.set_name || card.set || '')}</span></div>`;
+          row.innerHTML = (img ? `<img src="${rqEsc(img)}" class="rqm-row-img" alt="">` : '')
+            + `<div class="rqm-row-info"><span class="rqm-row-name">${rqEsc(card.name)}</span>`
+            + `<span class="rqm-row-meta">${rqEsc(card.number)} · ${rqEsc(card.set_name || card.set || '')}</span></div>`;
           row.addEventListener('click', () => {
-            selected = card;
-            [...results.querySelectorAll('.rqm-row')].forEach(r => r.classList.remove('rqm-row-hl'));
+            selected = {
+              id: card.ptcg_id || card.id || card.name,
+              name: card.name,
+              number: card.number || '',
+              set: card.set_name || card.set || '',
+              meta: '',
+              img,
+              score: 0,
+            };
+            [...resultsBox.querySelectorAll('.rqm-row')].forEach(r => r.classList.remove('rqm-row-hl'));
             row.classList.add('rqm-row-hl');
-            input.value = card.name + (card.set_name ? ' ' + card.set_name : '');
-            btn.disabled = false;
+            input.value = card.name;
+            renderGuess();
+            renderOptions();
           });
-          results.appendChild(row);
+          resultsBox.appendChild(row);
         });
       })
-      .catch(() => {
-        results.innerHTML = '<div class="rqm-none">Search failed</div>';
-        btn.disabled = true;
-      });
-  }
+      .catch(() => { resultsBox.innerHTML = '<div class="rqm-none">Search failed</div>'; });
+  });
+
   saveBtn.addEventListener('click', async () => {
-    if (!selected) return;
+    if (saveBtn.disabled) return;
     saveBtn.disabled = true;
-    saveBtn.textContent = 'Saving…';
-    try {
-      await postMisread({
+    saveBtn.textContent = 'Opening…';
+    // A correction is training data; a failed log must not block the add.
+    if (selected.id !== item.id) {
+      postMisread({
         wrong_id: item.id,
         wrong_name: item.name,
-        correct_id: selected.ptcg_id || selected.id || item.id,
+        correct_id: selected.id,
         correct_name: selected.name,
         score: item.score,
         source: item.source,
         scan_image_path: item.scan,
         crop_image_path: item.crop,
-      });
-      localStorage.setItem('last_misread_' + item.id, Date.now());
-      RQ.remove(item.id);
-      rqCloseCorrection();
-      window.showToast('Correction saved — card added to your collection');
-      if (window.refreshReviewQueues) window.refreshReviewQueues();
-      // Add the corrected card to the collection
-      try {
-        const correctId = selected.ptcg_id || selected.id || item.id;
-        if (correctId && typeof window.addToCollectionById === 'function') {
-          await window.addToCollectionById(correctId, selected.name);
-        }
-      } catch (addErr) {
-        console.error('Could not add corrected card to collection:', addErr);
+      }).catch(() => {});
+      try { localStorage.setItem('last_misread_' + item.id, Date.now()); } catch { /* quota */ }
+    }
+    close();
+    try {
+      if (typeof window.addToCollectionById === 'function') {
+        // Same contract as "Keep": the row id rides along with the add form and
+        // is cleared only when that form is submitted, so cancelling or adding
+        // something else cannot remove this entry.
+        await window.addToCollectionById(selected.id, selected.name, item.id);
+      } else {
+        RQ.remove(item.id);
+        if (window.refreshReviewQueues) window.refreshReviewQueues();
       }
     } catch (e) {
       saveBtn.disabled = false;
-      alert('Could not log correction: ' + e.message);
+      saveBtn.textContent = 'Add to gallery';
+      alert('Could not open the add form: ' + e.message);
     }
   });
+
+  renderGuess();
+  renderOptions();
 }
 
 function rqCloseCorrection() {
   const m = document.getElementById(MODAL_ID);
   if (!m) return;
-  document.removeEventListener('keydown', rqCloseOnEscape);
-  function rqCloseOnEscape() {}
+  if (m.__rqKeyHandler) document.removeEventListener('keydown', m.__rqKeyHandler);
   m.remove();
 }
 
@@ -277,54 +323,32 @@ function rqCloseCorrection() {
 function mountReviewQueue(root, opts = {}) {
   function render() {
     const items = RQ.load();
-    const latest = items[0];
-    // The tray collapses to a count pill when there is nothing to review, so it
-    // never covers the camera framing box.
-    root.classList.toggle('empty', items.length === 0);
-    // Up to 3 chip previews for the collapsed camera mode bar
-    const chips = items.slice(0, 3).map(q =>
-      `<div class="queue-chip" data-id="${rqEsc(q.id)}" title="${rqEsc(q.name)}">` +
-      `<img data-qid="${rqEsc(q.id)}" alt="">` +
-      `<div class="chip-name">${rqEsc(q.name)}</div></div>`
-    ).join('');
-    root.innerHTML = `
-      <div class="queue-header">
-        <span>Review Queue <span class="queue-count${items.length ? '' : ' zero'}">${items.length}</span></span>
-        ${latest ? `<span class="qi-latest"><img data-qid="${rqEsc(latest.id)}" alt=""><span class="qi-name">${rqEsc(latest.name)}</span></span>` : ''}
-      </div>
-      <div class="queue-chips">${chips}</div>
-      <div class="queue-list">` + (items.length ? items.map(q => `\n        <div class="queue-item" data-id="${rqEsc(q.id)}">
+    // One compact row per card: thumbnail, name, and exactly three choices.
+    const rows = items.map(q => `
+        <div class="queue-item" data-id="${rqEsc(q.id)}">
           <img data-qid="${rqEsc(q.id)}" alt="">
           <div class="qi-info">
             <div class="qi-name">${rqEsc(q.name)}</div>
-            <div class="qi-meta">${rqEsc(q.meta || '')}${q.score ? ' · ' + Math.round(q.score * 100) + '%' : ''} · ${rqEsc(q.source || '')}</div>
+            <div class="qi-meta">${rqEsc(q.meta || '')}${q.score ? ' · ' + Math.round(q.score * 100) + '%' : ''}</div>
           </div>
           <div class="qi-actions">
-            <button class="keep">Keep</button>
-            <button class="correction">✗ Not this?</button>
-            <button class="discard">✕</button>
+            <button class="keep" type="button">Keep</button>
+            <button class="correction" type="button">Not this</button>
+            <button class="discard" type="button">Remove</button>
           </div>
         </div>
-      `).join('') : '<div class="empty">Nothing waiting for review.</div>') + `
+      `).join('');
+    root.innerHTML = `
+      <div class="queue-header">
+        <span>Review Queue <span class="queue-count${items.length ? '' : ' zero'}">${items.length}</span></span>
       </div>
+      <div class="queue-list">${items.length ? rows : '<div class="empty">Nothing waiting for review.</div>'}</div>
     `;
     rqPaintImages(root, items);
-    if (opts.onChange) opts.onChange(items.length);
   }
 
-  // In camera-fs collapsed mode, clicking a chip opens the overlay expanded
-  // and scrolls to that card's row. Also prevents the header toggle.
+  // Collapsed camera mode expands the tray when the header is tapped.
   root.addEventListener('click', (e) => {
-    const chip = e.target.closest('.queue-chip');
-    if (chip) {
-      e.stopPropagation();
-      root.closest('#scan-overlay')?.classList.add('expanded');
-      setTimeout(() => {
-        const row = root.querySelector(`.queue-item[data-id="${chip.dataset.id}"]`);
-        if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 50);
-      return;
-    }
     if (e.target === root || e.target.closest('.queue-header')) {
       if (!e.target.closest('.queue-item')) {
         root.closest('#scan-overlay')?.classList.toggle('expanded');
@@ -344,10 +368,13 @@ function mountReviewQueue(root, opts = {}) {
     const item = RQ.load().find(q => q.id === id);
     if (!item) return;
     if (e.target.closest('.keep')) {
-      // Removal is deferred to onAdded — fires once the card is really in the collection
+      // Removal is deferred to the add form — fires once the card is really in
+      // the collection (opts.add records the row id for submitAddCollection).
       try {
-        if (opts.add) await opts.add(item, () => { RQ.remove(id); refreshAll(); });
-        else { RQ.remove(id); }
+        // opts.add opens the add form; the row leaves the queue once the card
+        // is really in the collection, so there is nothing to remove here.
+        if (opts.add) await opts.add(item);
+        else RQ.remove(id);
       }
       catch (err) { e.target.closest('.qi-actions')?.insertAdjacentHTML('beforeend', `<span class="qi-status">${rqEsc(err.message)}</span>`); return; }
     } else if (e.target.closest('.correction')) {

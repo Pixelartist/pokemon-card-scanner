@@ -166,6 +166,8 @@ localStorage.removeItem('auth_token');
 // first load; invalidated on login/logout and after adding a card. Declared
 // here because token refresh (below) can run before the rest of the file.
 let ownedQtyMap = null;
+// newest stored capture/cut per ptcg_id, filled from the same collection fetch
+let ownedShotsMap = null;
 
 // Cut-out (or raw scan photo) from the most recent successful scan; travels
 // to the add-collection form so the stored item remembers the user's cut.
@@ -198,7 +200,7 @@ async function refreshAccessToken() {
                 if (!response.ok) return false;
                 const data = await response.json();
                 setAuthToken(data.access_token);
-                ownedQtyMap = null;  // fresh session -> refresh owned counts
+                ownedQtyMap = null; ownedShotsMap = null;  // fresh session -> refresh owned counts
                 if (data.user?.username) {
                     localStorage.setItem('username', data.user.username);
                     updateUserInfo(data.user.username);
@@ -329,7 +331,7 @@ async function handleLoginSubmit(e) {
         if (response.ok) {
             const data = await response.json();
             setAuthToken(data.access_token);
-            ownedQtyMap = null;  // fresh session -> refresh owned counts
+            ownedQtyMap = null; ownedShotsMap = null;  // fresh session -> refresh owned counts
             const uname = data.user?.username || data.username;
             if (uname) localStorage.setItem('username', uname);
             if (data.user?.preferred_language) setPreferredLanguage(data.user.preferred_language);
@@ -377,7 +379,7 @@ async function handleRegisterSubmit(e) {
         if (response.ok) {
             const data = await response.json();
             setAuthToken(data.access_token);
-            ownedQtyMap = null;  // fresh session -> refresh owned counts
+            ownedQtyMap = null; ownedShotsMap = null;  // fresh session -> refresh owned counts
             const uname = data.user?.username || data.username;
             if (uname) localStorage.setItem('username', uname);
             if (data.user?.preferred_language) setPreferredLanguage(data.user.preferred_language);
@@ -509,9 +511,15 @@ window.__cardScanner = {
         // disagree on set-code case, e.g. sv10 vs SV10), so zipping them by
         // index showed the wrong card name and thumbnail for tens of thousands
         // of entries — the hash still matched, but the answer was mislabelled.
+        // English and German prints of one card share set+number, so keying by
+        // that alone let the English row shadow every German one: `de_sv07-077`
+        // resolved to "Meditite" with the English artwork, and the German name
+        // ("Meditie") never appeared anywhere in the UI. Keep them apart by the
+        // image path the row was built from.
         const byKey = new Map();
         for (const m of meta) {
-            const k = `${m.set}-${m.number}`.toLowerCase();
+            const isGerman = /\/german_cards\//.test(m.image || '');
+            const k = `${isGerman ? 'de_' : ''}${m.set}-${m.number}`.toLowerCase();
             if (!byKey.has(k)) byKey.set(k, m);
         }
         const lookup = (id) => {
@@ -521,7 +529,7 @@ window.__cardScanner = {
             return byKey.get(id) || byKey.get(k) ||
                 (k.startsWith("de_") ? byKey.get(k.slice(3)) : undefined);
         };
-        this.matcher.loadIndex(ids.map((id) => {
+        const entries = ids.map((id) => {
           const m = lookup(id);
           return {
           id,
@@ -532,7 +540,8 @@ window.__cardScanner = {
           image: m?.image,
           hash: hashes[id] || null,
         };
-        }));
+        });
+        this.matcher.loadIndex(entries);
         await this.detector.loadModel();
         this.ready = true;
         console.log('[Scanner] Browser-side detector + hash index ready');
@@ -570,20 +579,33 @@ window.__cardScanner = {
     // does not dedupe, so a *correct* hit is routinely its own runner-up with a
     // 0.0 lead. Collapse twins before measuring the lead or the gate would reject
     // every card that exists in both languages.
+    const baseId = (id) => String(id).replace(/^de_/, '');
     const uniq = [];
     for (const m of all) {
-        const key = m.id.replace(/^de_/, "");
-        if (!uniq.some(u => u.id.replace(/^de_/, "") === key)) uniq.push(m);
+        if (!uniq.some(u => baseId(u.id) === baseId(m.id))) uniq.push(m);
     }
     // A flat 78 cutoff passes a crowded band, so a near-threshold hit is a coin
     // flip. Requiring the top hit to lead the nearest *different* card by >= 8
     // points rejects those: real cards score ~90 and clear it; a 75-vs-74 pair
     // does not. (Whole-card hash is frame-edge sensitive — 5% skew alone drops
     // a clean image's self-similarity 92 -> 57.)
-    const MARGIN = 8;
+    // A lead of 8 was unreachable: measured on a clean, full-frame scan of a
+    // real card the true hit leads the next card by ~3 points (82.9 vs 80.0),
+    // so every capture failed the gate and dropped to "unidentified". 2 still
+    // rejects the crowded 75-vs-74 coin flips while letting real cards through.
+    const MARGIN = 2;
     const matches = uniq.filter(m =>
         m.similarity >= 78 &&
         (uniq.length < 2 || m.similarity - uniq[1].similarity >= MARGIN));
+    // EN and DE prints of one card hash identically, so `uniq` keeps a single
+    // entry and the other language silently disappears. Offer the twin of an
+    // accepted hit as a second option — scanning a German card must be able to
+    // file "Meditie", not just its English namesake.
+    const twins = [];
+    for (const m of matches) {
+      const twin = all.find(o => o.id !== m.id && baseId(o.id) === baseId(m.id));
+      if (twin && ![...matches, ...twins].some(x => x.id === twin.id)) twins.push(twin);
+    }
     const bestSimilarity = all.length ? all[0].similarity / 100 : 0;
     // Always produce the crop data URL — even on low local confidence — so the
     // cloud /api/scan always receives the clean straightened card instead of a
@@ -605,7 +627,14 @@ window.__cardScanner = {
         similarity: (m.similarity || 0) / 100, image_url: m.image || '',
         set: { name: m.set },
       })),
-      candidates: matches.map(m => ({
+      // Same card in two prints: a pHash cannot tell the languages apart, and
+      // this index is German-first (17k of the 40k cards), so lead with the de_
+      // print instead of filing every German card as its English namesake.
+      candidates: [...matches, ...twins].sort((a, b) =>
+        (a.id !== b.id && baseId(a.id) === baseId(b.id))
+          ? (String(a.id).startsWith('de_') ? -1 : 1)
+          : (b.similarity || 0) - (a.similarity || 0)
+      ).map(m => ({
         id: m.id,
         name: m.name,
         number: m.number,
@@ -783,6 +812,7 @@ function noteNearMiss(data) {
     source: 'near_miss',
     scan: (data && data.scan_image_path) || lastScanImages?.scan_image_path || null,
     crop,
+    candidates: queueCandidates(pool),
   })) return;
   if (window.refreshReviewQueues) window.refreshReviewQueues();
 }
@@ -869,7 +899,7 @@ function displayScanResult(data, container) {
         data.candidates.forEach(candidate => {
             html += `
                 <div class="candidate" onclick="showCandidateDetail('${candidate.id}')">
-                    <img src="${candidate.card?.images?.small || candidate.image_url || ''}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
+                    <img src="${candidate.card?.images?.small || candidate.image_url || candidate.image || '/static/images/placeholder.png'}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
                     <div class="candidate-name">${candidate.name}</div>
                     <div class="candidate-number">${candidate.number || ''}</div>
                 </div>
@@ -889,11 +919,12 @@ function displayScanResult(data, container) {
         id: c.id,
         name: c.name || c.id,
         meta: [c.number, c.rarity, c.set?.name].filter(Boolean).join(' · '),
-        img: c.card?.images?.large || c.image_url || '',
+        img: c.card?.images?.large || c.image_url || c.image || '',
         score: c.similarity || 0,
         source: 'cloud',
         scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
         crop: (data.crop_image_path || lastScanImages?.crop_image_path) || null,
+        candidates: queueCandidates(data.candidates),
       })) {
         if (window.refreshReviewQueues) window.refreshReviewQueues();
       }
@@ -1045,14 +1076,15 @@ async function performManualSearch() {
     try {
         const response = await fetch(`/api/cards/search?query=${encodeURIComponent(query)}`);
         const data = await response.json();
+        const results = data.results || [];
 
-        if (data.results.length === 0) {
+        if (results.length === 0) {
             resultsDiv.innerHTML = '<p>No cards found. Try a different search term.</p>';
             return;
         }
 
         let html = '<div class="candidate-list">';
-        data.results.forEach(card => {
+        results.forEach(card => {
             const imgSrc = card.images?.large || card.images?.small || '';
             const setId = card.ptcg_id || `${card.set_name || ''}-${card.number || ''}`;
             html += `
@@ -1085,7 +1117,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-async function addToCollectionById(ptcgId, name) {
+async function addToCollectionById(ptcgId, name, queueRowId) {
     // Get or create card in local DB, then open add modal
     let cardId = ptcgId;
     try {
@@ -1096,11 +1128,11 @@ async function addToCollectionById(ptcgId, name) {
         console.error('Error creating card:', e);
     }
     // Now call the original addToCollection with the resolved card ID
-    addToCollection(cardId);
+    addToCollection(cardId, queueRowId);
 }
 window.addToCollectionById = addToCollectionById;
 
-async function addToCollection(cardId) {
+async function addToCollection(cardId, queueRowId) {
     // Open add modal
     const modal = document.getElementById('add-modal');
     const modalBody = document.getElementById('add-modal-body');
@@ -1160,6 +1192,7 @@ async function addToCollection(cardId) {
                 </label>
             </div>
             <input type="hidden" name="card_id" value="${cardId}">
+            ${queueRowId ? `<input type="hidden" name="rq_row" value="${String(queueRowId).replace(/"/g, '&quot;')}">` : ''}
             ${lastScanImages?.scan_image_path ? `<input type="hidden" name="scan_image_path" value="${lastScanImages.scan_image_path}">` : ''}
             ${lastScanImages?.crop_image_path ? `<input type="hidden" name="crop_image_path" value="${lastScanImages.crop_image_path}">` : ''}
             <button type="submit" class="btn btn-primary">Add to Collection</button>
@@ -1195,15 +1228,20 @@ async function submitAddCollection(e) {
         
         if (response.ok) {
             showToast('✓ Added to collection');
-            ownedQtyMap = null;  // refresh owned-count cache
+            ownedQtyMap = null; ownedShotsMap = null;  // refresh owned-count cache
             lastScanImages = null;  // crop belongs to this add only
             document.getElementById('add-modal').classList.add('hidden');
             initBinder();
             // Remove the just-added card from the review queue if present
             try {
                 const cardId = formData.get('card_id');
-                if (cardId && window.RQ) {
-                    window.RQ.remove(cardId);
+                if (window.RQ) {
+                    if (cardId) window.RQ.remove(cardId);
+                    // The queue row that opened this form, if any. It travels in
+                    // the form so a cancelled or unrelated add cannot touch it,
+                    // and a corrected match (different id) still clears.
+                    const rowId = formData.get('rq_row');
+                    if (rowId) window.RQ.remove(rowId);
                     if (window.refreshReviewQueues) window.refreshReviewQueues();
                 }
             } catch (e) { /* non-fatal */ }
@@ -1398,8 +1436,9 @@ window.__reviewQueues = [];
 if (typeof mountReviewQueue === 'function') {
   const opts = {
     add(item) {
-      // route "Keep" through the existing add-to-collection flow
-      if (item.id) addToCollection(item.id);
+      // route "Keep" through the existing add-to-collection flow, carrying the
+      // queue row id so the row clears only if this form is actually submitted
+      if (item.id) addToCollection(item.id, item.id);
     },
   };
   if (rqRoot) window.__reviewQueues.push(mountReviewQueue(rqRoot, opts));
@@ -1408,12 +1447,26 @@ if (typeof mountReviewQueue === 'function') {
 window.__reviewQueue = window.__reviewQueues[0];
 window.refreshReviewQueues = () => window.__reviewQueues.forEach(q => q.refresh());
 
+// Compact candidate list stored on a queue row so "Not this" can offer the
+// other matches without re-scanning. URLs only — a crop data URL is what eats
+// the localStorage quota, not these.
+function queueCandidates(list) {
+  return (list || []).filter(c => c && c.id).slice(0, 8).map(c => ({
+    id: c.id,
+    name: c.name || c.id,
+    number: c.number || '',
+    set: (c.set && (c.set.name || c.set)) || c.set_name || '',
+    img: c.card?.images?.small || c.image_url || c.image || '',
+    score: c.similarity || 0,
+  }));
+}
+
 // Show the identification on the fullscreen camera glass
 function updateScanOverlay(c) {
   const el = document.getElementById('scan-overlay-result');
   if (!el || !c) return;
   el.innerHTML = `
-    ${c.card?.images?.small || c.image_url ? `<img src="${c.card?.images?.small || c.image_url}" alt="">` : ''}
+    ${c.card?.images?.small || c.image_url || c.image ? `<img src="${c.card?.images?.small || c.image_url || c.image}" alt="">` : ''}
     <div>
       <div class="so-name">${c.name || c.id}</div>
       <div class="so-meta">${[c.number, c.rarity, c.set?.name].filter(Boolean).join(' · ')}</div>
@@ -1477,7 +1530,7 @@ async function initializeApp() {
                     await fetch('/api/auth/logout', { method: 'POST' });
                 } catch { /* offline logout still clears local state */ }
                 setAuthToken(null);
-                ownedQtyMap = null;
+                ownedQtyMap = null; ownedShotsMap = null;
                 localStorage.removeItem('username');
                 updateUserInfo('Guest');
                 document.getElementById('login-modal')?.classList.remove('hidden');
@@ -1543,12 +1596,9 @@ document.getElementById('mode-camera').addEventListener('click', () => switchMod
 // Bottom navigation (mobile): highlight active tab, navigate sections
 document.querySelectorAll('#bottom-nav .nav-item').forEach(item => {
     item.addEventListener('click', () => {
-        const tab = item.dataset.tab;
-        document.querySelectorAll('#bottom-nav .nav-item').forEach(n => n.classList.remove('active'));
-        item.classList.add('active');
-        // Scroll / reveal the matching section; on mobile this is the primary nav.
-        const target = document.getElementById(tab + '-tab');
-        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // On mobile this bar is the navigation, and switchTab owns the active
+        // state for both bars — so it does the whole job.
+        switchTab(item.dataset.tab);
     });
 });
 
@@ -1581,6 +1631,8 @@ function switchMode(mode) {
     } else {
         dropZone.classList.add('hidden');
         cameraSection.classList.remove('hidden');
+        // Re-opening the camera supersedes an earlier capture's review view
+        preview?.classList.add('hidden');
         if (scanOverlay) scanOverlay.classList.remove('hidden');
         startCamera();
         document.querySelector('.scan-layout')?.classList.add('camera-mode');
@@ -1596,6 +1648,7 @@ async function startCamera() {
     // Pre-check: verify mediaDevices is available
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         document.body.classList.remove('camera-fs');
+        document.getElementById('scan-overlay')?.classList.add('hidden');
         cameraSection.innerHTML = `
             <div class="camera-prompt">
                 <p>📷 Camera API not available. Your browser does not support webcam access.</p>
@@ -1648,6 +1701,9 @@ async function startCamera() {
         }
         
         document.body.classList.remove('camera-fs');
+        // The live overlay belongs to a running camera; don't leave it on screen
+        // when startup failed.
+        document.getElementById('scan-overlay')?.classList.add('hidden');
         cameraSection.innerHTML = `
             <div class="camera-prompt">
                 <p>${message}</p>
@@ -1702,7 +1758,11 @@ async function capturePhoto(keepCamera = false) {
 
     const cameraSection = document.getElementById('camera-section');
     if (cameraSection) cameraSection.classList.add('hidden');
-        if (scanOverlay) scanOverlay.classList.add('hidden');
+    // This used to reference `scanOverlay` from switchMode's scope: the
+    // ReferenceError aborted the rest of capturePhoto, so stopCamera() and
+    // the switch back to upload mode never ran and the page stayed stuck in
+    // camera mode (full-height panel, overlay floating over the page).
+    document.getElementById('scan-overlay')?.classList.add('hidden');
     stopCamera();
     switchMode('upload');
 }
@@ -1848,6 +1908,7 @@ async function getOwnedQuantity(cardId) {
     if (!getAuthToken()) return 0;
     if (!ownedQtyMap) {
         ownedQtyMap = new Map();
+        ownedShotsMap = new Map();
         try {
             const response = await fetch('/api/collection?limit=500', {
                 headers: { 'Authorization': `Bearer ${getAuthToken()}` }
@@ -1859,11 +1920,23 @@ async function getOwnedQuantity(cardId) {
                     const key = ((raw.card && raw.card.ptcg_id) || raw.ptcg_id || '');
                     if (!key) continue;
                     ownedQtyMap.set(key, (ownedQtyMap.get(key) || 0) + (raw.quantity || 1));
+                    // remember the most recent scan photo + detector cut
+                    if (raw.scan_image_path || raw.crop_image_path) {
+                        const prev = ownedShotsMap.get(key);
+                        const stamp = raw.added_at || '';
+                        if (!prev || stamp > prev.added) {
+                            ownedShotsMap.set(key, {
+                                scan: raw.scan_image_path || null,
+                                crop: raw.crop_image_path || null,
+                                added: stamp
+                            });
+                        }
+                    }
                 }
             }
         } catch (error) {
             console.error('Failed to load owned counts:', error);
-            ownedQtyMap = null;
+            ownedQtyMap = null; ownedShotsMap = null;
             return 0;
         }
     }
@@ -1871,6 +1944,18 @@ async function getOwnedQuantity(cardId) {
     // the prefix, so fall back to the normalized key.
     const exact = ownedQtyMap.get(cardId);
     return exact != null ? exact : (ownedQtyMap.get(normalizeCardId(cardId)) || 0);
+}
+
+// Look up the stored photos for a card, tolerant of the optional de_ prefix
+// on German-index ids.
+function findOwnedShots(cardId) {
+    if (!ownedShotsMap || !ownedShotsMap.size) return null;
+    if (ownedShotsMap.has(cardId)) return ownedShotsMap.get(cardId);
+    const want = normalizeCardId(cardId);
+    for (const [key, value] of ownedShotsMap) {
+        if (normalizeCardId(key) === want) return value;
+    }
+    return null;
 }
 
 async function showEnhancedCardDetail(cardId) {
@@ -1902,18 +1987,35 @@ async function showEnhancedCardDetail(cardId) {
         getOwnedQuantity(cardId)
     ]);
 
-    // Build card scan HTML if crop exists
-    let cardScanHtml = '';
-    if (cropData && cropData.found) {
-        cardScanHtml = `
-            <div class="card-scan-section">
-                <div class="card-scan-header">
-                    <span>${cropData.kind === 'crop' ? '✂ Your Cut' : '📷 Your Scan'}</span>
-                    <span class="card-scan-date">${new Date(cropData.date).toLocaleDateString()}</span>
-                </div>
-                <img src="${cropData.url}" alt="Your cut of this card">
-            </div>`;
-    }
+    // Overview strip: the raw capture, the detector's cut, and the library art.
+    // Any of the three that exist get a thumbnail; tapping one brings it up in
+    // the large frame so the user can compare capture vs. cut vs. artwork.
+    const libraryUrl = card.basic_info?.images?.large || card.basic_info?.images?.small || '';
+    const ownedShots = findOwnedShots(cardId);
+    const scanUrl = (ownedShots?.scan ? `/data/${ownedShots.scan}` : null)
+        || (cropData?.kind === 'scan' ? cropData.url : null);
+    const cutUrl = (ownedShots?.crop ? `/data/${ownedShots.crop}` : null)
+        || (cropData?.kind === 'crop' ? cropData.url : null);
+
+    const shots = [];
+    if (scanUrl) shots.push({ label: 'Original capture', url: scanUrl });
+    if (cutUrl) shots.push({ label: 'Cut card', url: cutUrl });
+    if (libraryUrl) shots.push({ label: 'Library', url: libraryUrl });
+
+    // Start on the library artwork when we have it (the "official" look),
+    // otherwise on whatever the user actually shot.
+    let mainShot = shots.findIndex(s => s.label === 'Library');
+    if (mainShot < 0) mainShot = 0;
+
+    const overviewHtml = shots.length > 1 ? `
+        <div class="card-overview" data-count="${shots.length}">
+            ${shots.map((shot, i) => `
+                <button type="button" class="shot${i === mainShot ? ' active' : ''}"
+                        data-shot-url="${shot.url}" title="${shot.label}">
+                    <img src="${shot.url}" alt="${shot.label}" loading="lazy">
+                    <span class="shot-label">${shot.label}</span>
+                </button>`).join('')}
+        </div>` : '';
     
     // Extract set info
     const setData = card.basic_info?.set || {};
@@ -1995,8 +2097,8 @@ async function showEnhancedCardDetail(cardId) {
         <h2>${card.basic_info.name}</h2>
         <div class="enhanced-card-grid">
             <div class="card-image">
-                ${cardScanHtml}
-                <img src="${card.basic_info.images?.large || ''}" alt="${card.basic_info.name}">
+                ${overviewHtml}
+                <img id="card-main-image" src="${shots[mainShot]?.url || libraryUrl}" alt="${card.basic_info.name}">
             </div>
             <div class="card-details">
                 <div class="card-meta">
@@ -2025,6 +2127,15 @@ async function showEnhancedCardDetail(cardId) {
             </div>
         </div>
     `;
+
+    // Click a thumbnail to show it in the large frame
+    const mainImage = modalBody.querySelector('#card-main-image');
+    modalBody.querySelectorAll('.shot').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (mainImage) mainImage.src = btn.dataset.shotUrl;
+            modalBody.querySelectorAll('.shot').forEach(b => b.classList.toggle('active', b === btn));
+        });
+    });
     
     modal.classList.remove('hidden');
 }
@@ -2042,6 +2153,9 @@ displayScanResult = async function(data, container) {
     if (data.decision === 'match' && data.candidates.length > 0) {
         const card = data.candidates[0];
         const cardId = card.card?.id || card.id;
+        // The candidate carries the browser index's name; the server stores the
+        // English name on every de_* row.
+        const localName = card.name;
         const ownedQty = await getOwnedQuantity(cardId);
         
         // Fetch enhanced details
@@ -2061,10 +2175,10 @@ displayScanResult = async function(data, container) {
             
             container.innerHTML = `
                 <div class="card-result">
-                    <h3>Card Identified: ${details.basic_info.name}</h3>
+                    <h3>Card Identified: ${localName || details.basic_info.name}</h3>
                     <div class="enhanced-card-grid">
                         <div class="card-image">
-                            <img src="${detailImg}" alt="${details.basic_info.name}">
+                            <img src="${detailImg}" alt="${localName || details.basic_info.name}">
                         </div>
                         <div class="card-details">
                             <div class="card-meta">
@@ -2109,35 +2223,35 @@ displayScanResult = async function(data, container) {
                 </div>
             `;
             
-            // Show other candidates
+            // Show other candidates — build the block as one string: appending
+            // unclosed tags with `innerHTML +=` lets the parser close the list
+            // immediately, which spat the rows out beside it as bare siblings.
             if (data.candidates.length > 1) {
-                container.innerHTML += '<div class="candidates"><h4>Other Matches</h4><div class="candidate-list">';
-                data.candidates.slice(1).forEach(candidate => {
-                    container.innerHTML += `
+                const rows = data.candidates.slice(1).map(candidate => `
                         <div class="candidate" onclick="showCandidateDetail('${candidate.id}')">
-                            <img src="${candidate.card?.images?.small || candidate.image_url || ''}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
+                            <img src="${candidate.card?.images?.small || candidate.image_url || candidate.image || '/static/images/placeholder.png'}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
                             <div class="candidate-name">${candidate.name}</div>
                             <div class="candidate-number">${candidate.number || ''}</div>
                         </div>
-                    `;
-                });
-                container.innerHTML += '</div></div>';
+                    `).join('');
+                container.innerHTML += `<div class="candidates"><h4>Other Matches</h4><div class="candidate-list">${rows}</div></div>`;
             }
             
             // Fullscreen glass + review queue + auto-scan: the override must
             // not skip the hooks the base implementation had, or the camera
             // overlay stays "Identifying…" while results land off-screen.
             const c = card;
-            updateScanOverlay({ ...c, name: details.basic_info.name || c.name, similarity: c.similarity || 0 });
+            updateScanOverlay({ ...c, name: c.name || details.basic_info.name, similarity: c.similarity || 0 });
             if (cardId && RQ.add({
                 id: cardId,
-                name: details.basic_info.name || c.name || cardId,
+                name: localName || details.basic_info.name || c.name || cardId,
                 meta: [details.basic_info.number, details.basic_info.rarity, details.basic_info.set?.name].filter(Boolean).join(' · '),
                 img: detailImg,
                 score: c.similarity || 0,
                 source: 'cloud',
                 scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
                 crop: (data.crop_image_path || lastScanImages?.crop_image_path) || null,
+                candidates: queueCandidates(data.candidates),
             })) {
                 if (window.refreshReviewQueues) window.refreshReviewQueues();
             }
@@ -2600,6 +2714,12 @@ async function initBinder() {
     // Calculate page size based on container
     const isMobile = window.innerWidth <= 768;
     const bookContainer = document.getElementById('book-container');
+    // A hidden binder tab measures 0px wide, and StPageFlip throws
+    // "Invalid width or height" — after adding a card from another tab that
+    // left the binder half-built. It is re-initialised when the tab opens.
+    if (!bookContainer || bookContainer.offsetWidth < 200) {
+        return;
+    }
     const containerWidth = bookContainer.offsetWidth - (isMobile ? 20 : 60);
     const pageWidth = isMobile
         ? Math.min(containerWidth, 360)            // single page per view on phones
@@ -2948,6 +3068,11 @@ function switchTab(tabName) {
     if (tabBtn) {
         tabBtn.classList.add('active');
     }
+
+    // Keep the mobile bottom bar in sync with the active section
+    document.querySelectorAll('#bottom-nav .nav-item').forEach(n => {
+        n.classList.toggle('active', n.dataset.tab === tabName);
+    });
     
     // Handle tab-specific initialization
     if (tabName === 'binder') {
@@ -2956,6 +3081,8 @@ function switchTab(tabName) {
         initGallery();
     } else if (tabName === 'sets') {
         initSets();
+    } else if (tabName === 'stats') {
+        loadStats();
     } else if (tabName === 'collection') {
         // Keep old collection functionality if needed
         loadCollection();
@@ -3163,8 +3290,12 @@ function initSets() {
                 document.querySelectorAll('.auth-tabs button').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.changePassword === mode);
                 });
+                // tab values are "current" / "reset" but the form ids are
+                // change-password-form / reset-password-form — matching on
+                // `${mode}-password-form` hid both forms.
+                const targetFormId = mode === 'reset' ? 'reset-password-form' : 'change-password-form';
                 document.querySelectorAll('.auth-form').forEach(form => {
-                    form.style.display = form.id === `${mode}-password-form` ? 'block' : 'none';
+                    form.style.display = form.id === targetFormId ? 'block' : 'none';
                 });
                 passwordChangeModal.classList.remove('hidden');
             });
