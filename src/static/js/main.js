@@ -172,6 +172,11 @@ let ownedShotsMap = null;
 // Cut-out (or raw scan photo) from the most recent successful scan; travels
 // to the add-collection form so the stored item remembers the user's cut.
 let lastScanImages = null;
+// What the match gate proposed for the scan on screen, sent with the add so the
+// server can write a label beside the stored frame (see _write_scan_label):
+// accepted, corrected and picked-by-hand are three labels on one image, and the
+// only ground truth real captures have.
+let lastScanProposal = null;
 
 // Non-blocking toast — native alert() halts JS until dismissed, which stalls
 // re-renders (e.g. the binder rebuild after adding a card).
@@ -885,7 +890,7 @@ function displayScanResult(data, container) {
                             <span>${(card.set && card.set.name) || (card.set && card.set !== 'N/A') || 'Unknown Set'}</span>
                         </div>
                         <div class="card-actions">
-                            <button class="btn btn-primary" onclick="addToCollection('${card.id}')">Add to Collection</button>
+                            <button class="btn btn-primary" onclick="addToCollection('${card.id}', null, 'accepted')">Add to Collection</button>
                         </div>
                     </div>
                 </div>
@@ -898,7 +903,7 @@ function displayScanResult(data, container) {
         html += '<div class="candidates"><h4>Other Matches</h4><div class="candidate-list">';
         data.candidates.forEach(candidate => {
             html += `
-                <div class="candidate" onclick="showCandidateDetail('${candidate.id}')">
+                <div class="candidate" onclick="showCandidateDetail('${candidate.id}', 'picked')">
                     <img src="${candidate.card?.images?.small || candidate.image_url || candidate.image || '/static/images/placeholder.png'}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
                     <div class="candidate-name">${candidate.name}</div>
                     <div class="candidate-number">${candidate.number || ''}</div>
@@ -1117,7 +1122,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-async function addToCollectionById(ptcgId, name, queueRowId) {
+async function addToCollectionById(ptcgId, name, queueRowId, matchSource, frame) {
     // Get or create card in local DB, then open add modal
     let cardId = ptcgId;
     try {
@@ -1128,11 +1133,22 @@ async function addToCollectionById(ptcgId, name, queueRowId) {
         console.error('Error creating card:', e);
     }
     // Now call the original addToCollection with the resolved card ID
-    addToCollection(cardId, queueRowId);
+    addToCollection(cardId, queueRowId, matchSource, frame);
 }
 window.addToCollectionById = addToCollectionById;
 
-async function addToCollection(cardId, queueRowId) {
+async function addToCollection(cardId, queueRowId, matchSource, frame) {
+    // The frame an add belongs to travels with the add, never with a global: a
+    // binder or manual add must not attach - or label - a capture it has nothing
+    // to do with. Scan results own the scan on screen; queue rows own the frame
+    // they were cut from (`frame` arrives from there). Anything else gets none.
+    if (frame === undefined) {
+        frame = (matchSource === 'accepted' || matchSource === 'picked') && !queueRowId && lastScanImages
+            ? { scan: lastScanImages.scan_image_path, crop: lastScanImages.crop_image_path }
+            : null;
+    }
+    // The gate's proposal only belongs to the label when the frame does.
+    const proposal = frame ? (frame.proposal || lastScanProposal) : null;
     // Open add modal
     const modal = document.getElementById('add-modal');
     const modalBody = document.getElementById('add-modal-body');
@@ -1192,9 +1208,11 @@ async function addToCollection(cardId, queueRowId) {
                 </label>
             </div>
             <input type="hidden" name="card_id" value="${cardId}">
+            <input type="hidden" name="match_source" value="${matchSource || 'manual'}">
+            ${proposal ? `<input type="hidden" name="match_proposed_id" value="${proposal.id}"><input type="hidden" name="match_proposed_similarity" value="${proposal.similarity}">` : ''}
             ${queueRowId ? `<input type="hidden" name="rq_row" value="${String(queueRowId).replace(/"/g, '&quot;')}">` : ''}
-            ${lastScanImages?.scan_image_path ? `<input type="hidden" name="scan_image_path" value="${lastScanImages.scan_image_path}">` : ''}
-            ${lastScanImages?.crop_image_path ? `<input type="hidden" name="crop_image_path" value="${lastScanImages.crop_image_path}">` : ''}
+            ${frame?.scan ? `<input type="hidden" name="scan_image_path" value="${frame.scan}">` : ''}
+            ${frame?.crop ? `<input type="hidden" name="crop_image_path" value="${frame.crop}">` : ''}
             <button type="submit" class="btn btn-primary">Add to Collection</button>
         </form>
     `;
@@ -1253,10 +1271,10 @@ async function submitAddCollection(e) {
     }
 }
 
-async function showCandidateDetail(cardId) {
+async function showCandidateDetail(cardId, source = 'manual') {
     // Reuse the enhanced detail modal — it includes prices, your scan photo,
     // ownership badge and set info (the plain view lacked prices).
-    return showEnhancedCardDetail(cardId);
+    return showEnhancedCardDetail(cardId, source);
 }
 
 // Modal close handlers
@@ -1438,7 +1456,12 @@ if (typeof mountReviewQueue === 'function') {
     add(item) {
       // route "Keep" through the existing add-to-collection flow, carrying the
       // queue row id so the row clears only if this form is actually submitted
-      if (item.id) addToCollection(item.id, item.id);
+      // "Keep" means the identification was accepted as shown. The row carries
+      // its own frame, which is not necessarily what the camera saw last.
+      if (item.id) addToCollection(item.id, item.id, 'accepted', item.scan
+        ? { scan: item.scan, crop: item.crop,
+            proposal: { id: item.id, similarity: +((item.score || 0) * 100).toFixed(1) } }
+        : null);
     },
   };
   if (rqRoot) window.__reviewQueues.push(mountReviewQueue(rqRoot, opts));
@@ -1958,7 +1981,9 @@ function findOwnedShots(cardId) {
     return null;
 }
 
-async function showEnhancedCardDetail(cardId) {
+async function showEnhancedCardDetail(cardId, source = 'manual') {
+    // `source` rides into the add buttons below, so a card chosen from the scan's
+    // other candidates is labelled picked rather than as a manual search.
     const token = getAuthToken();
     
     // Show loading state immediately
@@ -2119,9 +2144,9 @@ async function showEnhancedCardDetail(cardId) {
                 <div class="card-actions" style="margin-top: 20px;">
                     ${ownedQty > 0 ? `
                         <div class="owned-badge">✓ In Collection · ${ownedQty}×</div>
-                        <button class="btn btn-secondary" onclick="addToCollection('${cardId}')">+ Add Another</button>
+                        <button class="btn btn-secondary" onclick="addToCollection('${cardId}', null, '${source}')">+ Add Another</button>
                     ` : `
-                        <button class="btn btn-primary" onclick="addToCollection('${cardId}')">Add to Collection</button>
+                        <button class="btn btn-primary" onclick="addToCollection('${cardId}', null, '${source}')">Add to Collection</button>
                     `}
                 </div>
             </div>
@@ -2150,6 +2175,13 @@ const originalDisplayScanResult = displayScanResult;
 displayScanResult = async function(data, container) {
     // Normalize: API returns {data, meta} envelope on success, flat {error,...} on failure
     data = data.data || data;
+    // What the gate proposed for this frame, recorded with whatever is filed
+    // (see the label fields in addToCollection). Set here because this override
+    // is the live renderer; the original below is kept for reference only.
+    lastScanProposal = data.decision === 'match' && data.candidates.length
+        ? { id: (data.candidates[0].card?.id || data.candidates[0].id),
+            similarity: +(((data.candidates[0].similarity || 0) * 100).toFixed(1)) }
+        : null;
     if (data.decision === 'match' && data.candidates.length > 0) {
         const card = data.candidates[0];
         const cardId = card.card?.id || card.id;
@@ -2193,9 +2225,9 @@ displayScanResult = async function(data, container) {
                             <div class="card-actions" style="margin-top: 20px;">
                                 ${ownedQty > 0 ? `
                                     <div class="owned-badge">✓ In Collection · ${ownedQty}×</div>
-                                    <button class="btn btn-secondary" onclick="addToCollection('${cardId}')">+ Add Another</button>
+                                    <button class="btn btn-secondary" onclick="addToCollection('${cardId}', null, '${source}')">+ Add Another</button>
                                 ` : `
-                                    <button class="btn btn-primary" onclick="addToCollection('${cardId}')">Add to Collection</button>
+                                    <button class="btn btn-primary" onclick="addToCollection('${cardId}', null, '${source}')">Add to Collection</button>
                                 `}
                                 <button class="btn btn-secondary" onclick="showEnhancedCardDetail('${cardId}')">View Details</button>
                             </div>

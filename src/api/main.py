@@ -455,6 +455,54 @@ async def scan_card(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+def _write_scan_label(scan_path, crop_path, filed_as, source, proposed_id,
+                      proposed_similarity, user_id):
+    """Write <scan>.json beside the stored frame: what was filed, what the gate proposed.
+
+    Why it is stored: the 78 similarity floor and the 2-point lead margin can only
+    be re-tuned against captures whose true card is known, and a card the user
+    actually filed is exactly that. Recording the gate's proposal next to the
+    final choice turns ordinary use into a labelled corpus - "accepted",
+    "corrected" and "picked" rows on real frames, which is what the handful of
+    stored scans cannot provide. Never let a logging failure break the add.
+    """
+    if not scan_path:
+        return
+    # scan_path arrives from the browser: keep it inside data/scans/.
+    if ".." in scan_path or not scan_path.startswith("scans/"):
+        return
+    # The add form posts either a ptcg_id ("sv10-099") or the numeric database
+    # id the browser resolved for it (15032) - a correction opened from the
+    # detail modal posts the latter. Labels only join cleanly to the card index
+    # and its similarity scores if they carry the ptcg_id, so resolve a numeric
+    # id here and keep the posted value when it is already one (or unresolvable).
+    if filed_as.isdigit():
+        try:
+            conn = get_db_connection()
+            row = conn.execute("SELECT ptcg_id FROM cards WHERE id = ?",
+                               (int(filed_as),)).fetchone()
+            conn.close()
+            if row and row["ptcg_id"]:
+                filed_as = row["ptcg_id"]
+        except Exception as exc:
+            logger.warning("scan label: could not resolve card id %s: %s", filed_as, exc)
+    try:
+        target = DATA_ROOT / (scan_path + ".json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({
+            "scan": scan_path,
+            "crop": crop_path,
+            "filed_as": filed_as,
+            "match_source": source or "unknown",
+            "proposed_id": proposed_id,
+            "proposed_similarity": proposed_similarity,
+            "user_id": user_id,
+            "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("scan label not written for %s: %s", scan_path, exc)
+
+
 @app.post("/api/collection/add")
 async def add_to_collection(card_id: str = Form(...),
                             condition: str = Form("Near Mint"),
@@ -465,6 +513,9 @@ async def add_to_collection(card_id: str = Form(...),
                             is_first_edition: bool = Form(False),
                             scan_image_path: Optional[str] = Form(None),
                             crop_image_path: Optional[str] = Form(None),
+                            match_source: Optional[str] = Form(None),
+                            match_proposed_id: Optional[str] = Form(None),
+                            match_proposed_similarity: Optional[float] = Form(None),
                             current_user: UserResponse = Depends(get_current_user)):
     """Add a card to the collection."""
     try:
@@ -567,6 +618,9 @@ async def add_to_collection(card_id: str = Form(...),
             crop_image_path=crop_image_path,
         )
         item = collection_service.add_card(item_data, user_id=current_user.id)
+        _write_scan_label(scan_image_path, crop_image_path, card_id,
+                          match_source, match_proposed_id, match_proposed_similarity,
+                          current_user.id)
         return {"success": True, "id": item["id"]}
     except Exception as e:
         logger.error(f"Add to collection error: {e}")
