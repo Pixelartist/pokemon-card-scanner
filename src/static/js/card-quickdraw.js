@@ -226,6 +226,19 @@ export function cropCardStraight(imageEl, detection) {
     return canvas;
   }
   const w = _rgbaW, h = _rgbaH;
+  // The corner model lands ~1% outside the card on each edge, and a sliver of
+  // table in the crop is expensive: the whole-card hash is edge sensitive, and
+  // on a real capture the loose crop scored 72.4 (a three-way tie with unrelated
+  // cards) against 80.0 with the same quad pulled in 1%. 2% costs a little lead
+  // when the quad was already exact and 8% eats the card's own border, so 1% is
+  // the one correction that suits both.
+  const INSET = 0.01;
+  const cx = (quad[0][0] + quad[1][0] + quad[2][0] + quad[3][0]) / 4;
+  const cy = (quad[0][1] + quad[1][1] + quad[2][1] + quad[3][1]) / 4;
+  for (let i = 0; i < 4; i++) {
+    quad[i][0] = cx + (quad[i][0] - cx) * (1 - INSET);
+    quad[i][1] = cy + (quad[i][1] - cy) * (1 - INSET);
+  }
   // Keep the card's own proportions, capped at 352px on the long edge.
   const ew = Math.hypot(quad[1][0] - quad[0][0], quad[1][1] - quad[0][1]);
   const eh = Math.hypot(quad[3][0] - quad[0][0], quad[3][1] - quad[0][1]);
