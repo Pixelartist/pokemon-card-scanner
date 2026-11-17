@@ -4,6 +4,8 @@ import sqlite3
 import logging
 import time
 import asyncio
+import json
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Depends, Query
@@ -17,12 +19,16 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Load environment variables
 from dotenv import load_dotenv
-load_dotenv('/opt/data/pokemon-card-scanner/.env')
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# Data root and env file are overridable so the app runs outside the NAS layout
+# (inside the container PROJECT_ROOT resolves to the same mounted root anyway).
+DATA_ROOT = Path(os.environ.get("DATA_DIR", PROJECT_ROOT / "data"))
+load_dotenv(os.environ.get("ENV_FILE", PROJECT_ROOT / ".env"))
 
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
-from api.models.database import init_db, get_db_connection, User, Binder, DATABASE_URL
+from api.models.database import init_db, get_db_connection, DATABASE_URL
 db_path = DATABASE_URL  # backward-compatible alias
 from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, UserProfileUpdate, BinderCreate, BinderUpdate
 from services.ptcg_client import get_client
@@ -38,16 +44,81 @@ from services.auth import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --------------------------------------------------------------- guard rails
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "15")) * 1024 * 1024
+
+
+class _RateLimiter:
+    """Tiny in-process sliding-window limiter.
+
+    One uvicorn worker per container, so an in-memory counter is enough; a
+    multi-worker deployment would need a shared store (Redis, etc.).
+    """
+
+    def __init__(self, max_calls: int, window_seconds: float):
+        self.max_calls = max_calls
+        self.window = window_seconds
+        self._hits: Dict[str, List[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            hits = [t for t in self._hits.get(key, []) if now - t < self.window]
+            if len(hits) >= self.max_calls:
+                self._hits[key] = hits
+                return False
+            hits.append(now)
+            self._hits[key] = hits
+            # Keep the dict bounded on a long-running process
+            if len(self._hits) > 4096:
+                for k in [k for k, v in self._hits.items() if now - v[-1] >= self.window]:
+                    self._hits.pop(k, None)
+            return True
+
+
+# Heavy inference endpoints share one bucket: every scan writes an image to disk.
+_scan_limiter = _RateLimiter(60, 60)
+_login_limiter = _RateLimiter(10, 60)      # keyed by username
+_register_limiter = _RateLimiter(5, 3600)  # keyed by email
+
+
+def _enforce(limiter: _RateLimiter, key: str, detail: str) -> None:
+    """Raise 429 when `key` has exhausted its budget."""
+    if not limiter.allow(key):
+        raise HTTPException(status_code=429, detail=detail)
+
+
+def _check_upload(image_bytes: bytes) -> None:
+    """Reject oversized uploads before they reach the matcher or the disk."""
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)",
+        )
+
 # Initialize database
 init_db()
 
 # Create scan images directory
-SCAN_DIR = Path("/opt/data/pokemon-card-scanner/data/scans")
+SCAN_DIR = DATA_ROOT / "scans"
 SCAN_DIR.mkdir(parents=True, exist_ok=True)
 
 # Card crops cut out of scan photos by the detector (shown in detail modals)
 CROP_DIR = SCAN_DIR / "crops"
 CROP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_upload_name(filename: Optional[str]) -> str:
+    """Return a filesystem-safe basename for a client-supplied upload name.
+
+    UploadFile.filename is attacker-controlled: absolute paths and '../'
+    segments must never influence where the scan is written.
+    """
+    base = os.path.basename((filename or "").replace("\\", "/")).strip()
+    base = "".join(c if (c.isalnum() or c in "._-") else "_" for c in base)
+    base = base.lstrip(".").strip("_")
+    return base[:100] or "upload"
 
 
 def crop_card_image(image_bytes: bytes, timestamp: str) -> Optional[str]:
@@ -88,12 +159,51 @@ def crop_card_image(image_bytes: bytes, timestamp: str) -> Optional[str]:
         return None
 
 # Create FastAPI app
-app = FastAPI(title="Pokemon Card Scanner", version="1.0.0")
+from contextlib import asynccontextmanager
 
-# CORS middleware - allow the external URL origin
+
+@asynccontextmanager
+async def lifespan(application):
+    """Startup/shutdown hooks (replaces the deprecated @app.on_event API)."""
+    logger.info("Pokemon Card Scanner starting up...")
+    # Warm the CLIP index (fast binary load ~1s). The YOLO detector is loaded
+    # lazily on the first scan request so startup stays fast.
+    try:
+        from services.clip_matcher import get_clip_matcher
+        matcher = get_clip_matcher()
+        await asyncio.to_thread(matcher.load_index_fast)
+        logger.info("✓ CLIP matcher warmed")
+    except Exception as e:
+        logger.warning(f"CLIP warm-up failed: {e}")
+    logger.info("Startup complete - ready to serve requests")
+    try:
+        yield
+    finally:
+        global _db_conn
+        if _db_conn is not None:
+            logger.info("Closing DB connection on shutdown")
+            try:
+                _db_conn.close()
+            except Exception as e:
+                logger.warning(f"Error closing DB connection: {e}")
+            _db_conn = None
+
+
+app = FastAPI(title="Pokemon Card Scanner", version="1.0.0", lifespan=lifespan)
+
+# CORS middleware - explicit origins only. Never combine "*" with
+# allow_credentials=True: Starlette then reflects any Origin, which lets any
+# website make credentialed cross-origin calls with the refresh cookie.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://pixelartist.myqnapcloud.com:679", "http://localhost:5005", "*"],
+    allow_origins=[
+        o.strip()
+        for o in os.environ.get(
+            "CORS_ALLOWED_ORIGINS",
+            "https://pixelartist.myqnapcloud.com:679,http://localhost:5005",
+        ).split(",")
+        if o.strip()
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -107,7 +217,7 @@ os.makedirs(static_dir, exist_ok=True)
 os.makedirs(templates_dir, exist_ok=True)
 
 # Mount scan images directory
-SCAN_MOUNT_DIR = Path("/opt/data/pokemon-card-scanner/data")
+SCAN_MOUNT_DIR = DATA_ROOT
 SCAN_MOUNT_PATH = str(SCAN_MOUNT_DIR)
 if os.path.exists(SCAN_MOUNT_PATH):
     app.mount("/data", StaticFiles(directory=SCAN_MOUNT_PATH, check_dir=False), name="scans")
@@ -128,15 +238,15 @@ german_images_dir = os.path.join(BASE_DIR, "..", "data", "german_cards", "images
 if os.path.exists(german_images_dir):
     app.mount("/static/german_cards/images", StaticFiles(directory=german_images_dir), name="german_images")
     # TCG Pocket images downloaded from marcelpanse/tcg-pocket-collection-tracker
-    pocket_images_dir = Path("/opt/data/pokemon-card-scanner/data/images/pocket")
+    pocket_images_dir = DATA_ROOT / "images" / "pocket"
     pocket_images_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/static/pocket", StaticFiles(directory=pocket_images_dir), name="pocket_images")
     # TCGdex English-side vintage card images (base, gym, neo, ecard, ex, dp, pl, bw, hgss, pop)
-    tcgdex_images_dir = Path("/opt/data/pokemon-card-scanner/data/images/tcgdex")
+    tcgdex_images_dir = DATA_ROOT / "images" / "tcgdex"
     if tcgdex_images_dir.exists():
         app.mount("/static/tcgdex", StaticFiles(directory=tcgdex_images_dir), name="tcgdex_images")
     # Placeholder images for cards without scans
-    placeholder_dir = Path("/opt/data/pokemon-card-scanner/src/static/images")
+    placeholder_dir = Path(static_dir) / "images"
     placeholder_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/static/images", StaticFiles(directory=placeholder_dir), name="placeholder_images")
 
@@ -152,7 +262,10 @@ if os.path.exists(static_dir):
     app.mount("/static", NoCacheStaticFiles(directory=static_dir), name="static")
 
 # Mount browser-local scanner at /scanner (reuses existing /static/card_images)
-scanner_dir = "/opt/data/pokemon-card-scanner/.worktrees/local-scanner/node-scanner/public"
+scanner_dir = os.environ.get(
+    "SCANNER_DIR",
+    str(PROJECT_ROOT / ".worktrees" / "local-scanner" / "node-scanner" / "public"),
+)
 if os.path.exists(scanner_dir):
     # follow_symlink: the scanner's index/metadata and image dirs are symlinks to
     # the canonical copies in src/static and data, so /scanner can never serve a
@@ -247,13 +360,15 @@ async def scan_card(
     falsely matches the German variant.
     """
     try:
+        _enforce(_scan_limiter, "scan", "Too many scans in a row. Try again in a moment.")
         image_bytes = await image.read()
         if len(image_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty image file")
+        _check_upload(image_bytes)
 
         # Save original scan image
-        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        scan_filename = f"scan_{ts}_{image.filename}"
+        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        scan_filename = f"scan_{ts}_{_safe_upload_name(image.filename)}"
         scan_path = SCAN_DIR / scan_filename
         with open(scan_path, "wb") as f:
             f.write(image_bytes)
@@ -271,7 +386,7 @@ async def scan_card(
             crop_bytes = await browser_crop.read()
 
         if crop_bytes:
-            crop_ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S%f')
+            crop_ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S%f')
             crop_path = CROP_DIR / f"crop_{crop_ts}.jpg"
             with open(crop_path, "wb") as f:
                 f.write(crop_bytes)
@@ -280,7 +395,7 @@ async def scan_card(
             from services.card_detector import get_detector
             detector = get_detector()
             detection = await asyncio.to_thread(detector.detect_card, image_bytes)
-            crop_relative_path = await asyncio.to_thread(crop_card_image, image_bytes, datetime.utcnow().strftime('%Y%m%d_%H%M%S%f'))
+            crop_relative_path = await asyncio.to_thread(crop_card_image, image_bytes, datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S%f'))
             # Identify on the card crop when the server found one too.
             if detection.get("found") and crop_relative_path:
                 try:
@@ -337,7 +452,7 @@ async def scan_card(
 
     except Exception as e:
         logger.error(f"Scan error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/collection/add")
@@ -350,7 +465,7 @@ async def add_to_collection(card_id: str = Form(...),
                             is_first_edition: bool = Form(False),
                             scan_image_path: Optional[str] = Form(None),
                             crop_image_path: Optional[str] = Form(None),
-                            current_user: User = Depends(get_current_user)):
+                            current_user: UserResponse = Depends(get_current_user)):
     """Add a card to the collection."""
     try:
         # Resolve card_id - handle both string ptcg_id and integer DB ID
@@ -455,13 +570,13 @@ async def add_to_collection(card_id: str = Form(...),
         return {"success": True, "id": item["id"]}
     except Exception as e:
         logger.error(f"Add to collection error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/collection/add-batch")
 async def add_to_collection_batch(
     items: List[CollectionItemCreate],
-    current_user: User = Depends(get_current_user)
+    current_user: UserResponse = Depends(get_current_user)
 ):
     """Add multiple cards to the collection in a single transaction."""
     try:
@@ -473,12 +588,12 @@ async def add_to_collection_batch(
         }
     except Exception as e:
         logger.error(f"Batch add error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/collection")
 async def get_collection(limit: int = 100, offset: int = 0,
-                         current_user: User = Depends(get_current_user)):
+                         current_user: UserResponse = Depends(get_current_user)):
     """Get all collection items."""
     items = collection_service.get_all_items(limit=limit, offset=offset, user_id=current_user.id)
     return {"items": items}
@@ -486,9 +601,10 @@ async def get_collection(limit: int = 100, offset: int = 0,
 
 @app.get("/api/collection/export")
 async def export_collection(format: str = "json",
-                            current_user: User = Depends(get_current_user)):
+                            current_user: UserResponse = Depends(get_current_user)):
     """Export collection in JSON or CSV format."""
-    items = collection_service.get_all_items(limit=1000, user_id=current_user.id)
+    # No cap: the previous limit=1000 silently truncated larger collections.
+    items = collection_service.get_all_items(limit=None, user_id=current_user.id)
     
     if format == "csv":
         import csv
@@ -525,7 +641,7 @@ async def export_collection(format: str = "json",
 
 @app.get("/api/collection/search")
 async def search_collection(query: str,
-                            current_user: User = Depends(get_current_user)):
+                            current_user: UserResponse = Depends(get_current_user)):
     """Search collection by card name, set, or number (SQL-based)."""
     user_id = current_user.id
     query_lower = query.lower().strip()
@@ -580,7 +696,7 @@ async def search_collection(query: str,
 
 @app.get("/api/collection/crop/{card_id}")
 async def get_card_crop(card_id: str,
-                        current_user: User = Depends(get_current_user)):
+                        current_user: UserResponse = Depends(get_current_user)):
     """Most recent user scan of this card, preferring the detector crop.
 
     card_id may be a ptcg_id (with or without the de_ German-index prefix).
@@ -617,7 +733,7 @@ async def get_card_crop(card_id: str,
 
 @app.get("/api/collection/{item_id}")
 async def get_collection_item(item_id: int,
-                              current_user: User = Depends(get_current_user)):
+                              current_user: UserResponse = Depends(get_current_user)):
     """Get a single collection item."""
     item = collection_service.get_item(item_id, user_id=current_user.id)
     if not item:
@@ -627,7 +743,7 @@ async def get_collection_item(item_id: int,
 
 @app.delete("/api/collection/{item_id}")
 async def delete_collection_item(item_id: int,
-                                 current_user: User = Depends(get_current_user)):
+                                 current_user: UserResponse = Depends(get_current_user)):
     """Remove a card from the collection."""
     success = collection_service.delete_item(item_id, user_id=current_user.id)
     if not success:
@@ -639,7 +755,7 @@ async def delete_collection_item(item_id: int,
 
 @app.post("/api/binders")
 async def create_binder(binder_data: BinderCreate,
-                        current_user: User = Depends(get_current_user)):
+                        current_user: UserResponse = Depends(get_current_user)):
     """Create a new personal binder."""
     try:
         binder = collection_service.create_binder(
@@ -649,11 +765,11 @@ async def create_binder(binder_data: BinderCreate,
         )
         return binder
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/binders")
-async def get_binders(current_user: User = Depends(get_current_user)):
+async def get_binders(current_user: UserResponse = Depends(get_current_user)):
     """Get all binders for the current user."""
     binders = collection_service.get_binders(user_id=current_user.id)
     return {"binders": binders}
@@ -661,7 +777,7 @@ async def get_binders(current_user: User = Depends(get_current_user)):
 
 @app.get("/api/binders/{binder_id}")
 async def get_binder(binder_id: int,
-                     current_user: User = Depends(get_current_user)):
+                     current_user: UserResponse = Depends(get_current_user)):
     """Get a specific binder with its items."""
     binder = collection_service.get_binder(binder_id, user_id=current_user.id)
     if not binder:
@@ -672,7 +788,7 @@ async def get_binder(binder_id: int,
 @app.put("/api/binders/{binder_id}")
 async def update_binder(binder_id: int,
                         binder_data: BinderUpdate,
-                        current_user: User = Depends(get_current_user)):
+                        current_user: UserResponse = Depends(get_current_user)):
     """Update a binder (name, description, or items)."""
     binder = collection_service.update_binder(
         binder_id=binder_id,
@@ -688,7 +804,7 @@ async def update_binder(binder_id: int,
 
 @app.delete("/api/binders/{binder_id}")
 async def delete_binder(binder_id: int,
-                        current_user: User = Depends(get_current_user)):
+                        current_user: UserResponse = Depends(get_current_user)):
     """Delete a binder."""
     success = collection_service.delete_binder(binder_id, user_id=current_user.id)
     if not success:
@@ -697,7 +813,7 @@ async def delete_binder(binder_id: int,
 
 
 @app.get("/api/stats")
-async def get_stats(current_user: User = Depends(get_current_user)):
+async def get_stats(current_user: UserResponse = Depends(get_current_user)):
     """Get collection statistics."""
     return collection_service.get_stats(user_id=current_user.id)
 
@@ -1337,8 +1453,8 @@ async def log_misread(payload: Dict[str, Any], request: Request):
     try:
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
-            payload = verify_token(auth[7:])
-            user_id = payload.get("sub")
+            claims = verify_token(auth[7:])
+            user_id = claims.get("sub")
     except Exception:
         pass  # anonymous scanner sessions are fine — correction is still useful signal
 
@@ -1365,7 +1481,8 @@ async def log_misread(payload: Dict[str, Any], request: Request):
 
 
 @app.get("/api/misreads")
-async def list_misreads(limit: int = 100):
+async def list_misreads(limit: int = 100,
+                        current_user: UserResponse = Depends(get_current_user)):
     """Admin view of corrected false detections (training candidates)."""
     conn = _misreads_conn()
     try:
@@ -1446,8 +1563,7 @@ async def get_card(card_id: str):
 async def create_or_get_card(card_id: str):
     """Find or create a card in the local database. Returns DB ID for collection."""
     try:
-        from api.models.database import init_db
-        init_db()
+        # Schema is created once at startup (see the lifespan handler).
         
         collection = CollectionService()
         
@@ -1493,7 +1609,7 @@ async def create_or_get_card(card_id: str):
         raise
     except Exception as e:
         logger.error(f"Error creating card: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 
@@ -1506,9 +1622,11 @@ async def scan_card_advanced(
 ):
     """Enhanced card scan with full details, prices, and structured output."""
     try:
+        _enforce(_scan_limiter, "scan", "Too many scans in a row. Try again in a moment.")
         image_bytes = await image.read()
         if len(image_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty image file")
+        _check_upload(image_bytes)
 
         client = get_client()
         result = client.identify_card(
@@ -1551,7 +1669,7 @@ async def scan_card_advanced(
 
     except Exception as e:
         logger.error(f"Advanced scan error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 
@@ -1628,7 +1746,7 @@ def _cache_set(card_id: str, data: Dict[str, Any]):
                 data.get("artist"),
                 _json.dumps(data.get("legalities", {})),
                 _json.dumps(data.get("tcgdex_data", {})),
-                datetime.utcnow().isoformat() + "Z",
+                datetime.now(timezone.utc).isoformat(),
             )
         )
         conn.commit()
@@ -1667,6 +1785,59 @@ def _fetch_card_metadata_from_tcgdex(card_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _local_card_details(row, fallback_id: str = "") -> Dict[str, Any]:
+    """Build the /details payload for a card row from the local DB.
+
+    Shared by the ptcg_id and numeric-PK branches of get_card_details, which
+    previously carried byte-identical copies of this block.
+    """
+    import json as _json
+
+    images = row["images"]
+    if isinstance(images, str):
+        try:
+            images = _json.loads(images)
+        except Exception:
+            images = None
+    types = row["types"]
+    if isinstance(types, str):
+        try:
+            types = _json.loads(types)
+        except Exception:
+            types = [types] if types else None
+
+    ptcg_id = row["ptcg_id"] or ""
+    row_key = ptcg_id or fallback_id
+    details = {
+        "basic_info": {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "number": row["number"],
+            "rarity": row["rarity"] or None,
+            "hp": row["hp"] or None,
+            "types": types,
+            "artist": None,
+            "set": {
+                "name": row["set_display_name"] or row["set_name"] or "",
+                "code": row["set_ptcg_id"] or (ptcg_id.split("-")[0] if "-" in ptcg_id else ""),
+            },
+            "images": _normalize_local_row_images(images, row_key),
+        },
+        "legalities": None,
+        "prices": None,
+        "source": "local_db",
+    }
+    # Fetch prices (cached; falls back to stale cache on API failure)
+    try:
+        from services.price_cache import get_prices_cached
+        prices = get_prices_cached(ptcg_id)
+        if prices:
+            details["prices"] = _normalize_prices_for_frontend(prices)
+    except Exception as e:
+        logger.debug(f"Price fetch skipped for local card {ptcg_id}: {e}")
+    return details
+
+
 @app.get("/api/cards/{card_id}/details")
 async def get_card_details(card_id: str):
     """Get detailed card information including evolution chain and legalities."""
@@ -1685,44 +1856,7 @@ async def get_card_details(card_id: str):
             ).fetchone()
             conn.close()
             if row:
-                import json as _json
-                images = row["images"]
-                if isinstance(images, str):
-                    try:
-                        images = _json.loads(images)
-                    except Exception:
-                        images = None
-                types = row["types"]
-                if isinstance(types, str):
-                    try:
-                        types = _json.loads(types)
-                    except Exception:
-                        types = [types] if types else None
-                details = {
-                    "basic_info": {
-                        "id": str(row["id"]),
-                        "name": row["name"],
-                        "number": row["number"],
-                        "rarity": row["rarity"] or None,
-                        "hp": row["hp"] or None,
-                        "types": types,
-                        "artist": None,
-                        "set": {"name": row["set_display_name"] or row["set_name"] or "", "code": row["set_ptcg_id"] or (row["ptcg_id"].split("-")[0] if "-" in row["ptcg_id"] else "")},
-                        "images": _normalize_local_row_images(images, card_id),
-                    },
-                    "legalities": None,
-                    "prices": None,
-                    "source": "local_db",
-                }
-                # Fetch prices (cached; falls back to stale cache on API failure)
-                try:
-                    from services.price_cache import get_prices_cached
-                    prices = get_prices_cached(row["ptcg_id"])
-                    if prices:
-                        details["prices"] = _normalize_prices_for_frontend(prices)
-                except Exception as e:
-                    logger.debug(f"Price fetch skipped for local card {row['ptcg_id']}: {e}")
-                return details
+                return _local_card_details(row, card_id)
         except Exception:
             pass
 
@@ -1744,45 +1878,7 @@ async def get_card_details(card_id: str):
                     # Continue with the real ptcg_id below (API/index lookup)
                     card_id = row["ptcg_id"]
                 else:
-                    import json as _json
-                    images = row["images"]
-                    if isinstance(images, str):
-                        try:
-                            images = _json.loads(images)
-                        except Exception:
-                            images = None
-                    types = row["types"]
-                    if isinstance(types, str):
-                        try:
-                            types = _json.loads(types)
-                        except Exception:
-                            types = [types] if types else None
-                    # Build response and fetch prices
-                    details = {
-                        "basic_info": {
-                            "id": str(row["id"]),
-                            "name": row["name"],
-                            "number": row["number"],
-                            "rarity": row["rarity"] or None,
-                            "hp": row["hp"] or None,
-                            "types": types,
-                            "artist": None,
-                            "set": {"name": row["set_display_name"] or row["set_name"] or "", "code": row["set_ptcg_id"] or (row["ptcg_id"].split("-")[0] if "-" in row["ptcg_id"] else "")},
-                            "images": _normalize_local_row_images(images, card_id),
-                        },
-                        "legalities": None,
-                        "prices": None,
-                        "source": "local_db",
-                    }
-                    # Fetch prices (cached; falls back to stale cache on API failure)
-                    try:
-                        from services.price_cache import get_prices_cached
-                        prices = get_prices_cached(row["ptcg_id"])
-                        if prices:
-                            details["prices"] = _normalize_prices_for_frontend(prices)
-                    except Exception as e:
-                        logger.debug(f"Price fetch skipped for local card {row['ptcg_id']}: {e}")
-                    return details
+                    return _local_card_details(row, card_id)
         except Exception:
             pass
     client = get_client()
@@ -1983,7 +2079,8 @@ async def get_status():
 
 
 @app.post("/api/index/build")
-async def build_index(max_cards: int = 500):
+async def build_index(max_cards: int = 500,
+                      current_user: UserResponse = Depends(get_current_user)):
     """Trigger background build of the CLIP card index."""
     from services.clip_matcher import get_clip_matcher
 
@@ -2008,7 +2105,7 @@ async def quickdraw_status():
 
 
 @app.post("/api/quickdraw/build")
-async def quickdraw_build():
+async def quickdraw_build(current_user: UserResponse = Depends(get_current_user)):
     """Build the Quickdraw fingerprint index (background thread)."""
     from services.quickdraw_matcher import get_quickdraw_matcher
 
@@ -2022,9 +2119,11 @@ async def quickdraw_match(image: UploadFile = File(...), top_k: int = Query(5)):
     """Direct Quickdraw-style fingerprint match — pure CPU, no model, ~10-50ms."""
     from services.quickdraw_matcher import get_quickdraw_matcher
 
+    _enforce(_scan_limiter, "scan", "Too many scans in a row. Try again in a moment.")
     image_bytes = await image.read()
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Empty image")
+    _check_upload(image_bytes)
 
     matcher = get_quickdraw_matcher()
     if not matcher.load_index():
@@ -2044,7 +2143,7 @@ async def index_status():
 
 
 @app.post("/api/index/enrich")
-async def enrich_metadata():
+async def enrich_metadata(current_user: UserResponse = Depends(get_current_user)):
     """Fetch TCGdex metadata for all indexed cards (rarity, HP, attacks, pricing)."""
     from services.clip_matcher import get_clip_matcher
 
@@ -2060,7 +2159,8 @@ async def enrich_metadata():
 
 
 @app.post("/api/index/build-german")
-async def build_german_index(max_cards: int = 2500):
+async def build_german_index(max_cards: int = 2500,
+                             current_user: UserResponse = Depends(get_current_user)):
     """Build CLIP index from German TCGdex cards. Adds to existing English index."""
     from services.clip_matcher import get_clip_matcher
 
@@ -2080,7 +2180,9 @@ async def detect_card(
 ):
     """Detect card in image and return bounding box with confidence."""
     try:
+        _enforce(_scan_limiter, "scan", "Too many scans in a row. Try again in a moment.")
         image_bytes = await image.read()
+        _check_upload(image_bytes)
 
         # Drop the request immediately if another detection is running
         if _detect_lock.locked():
@@ -2099,7 +2201,7 @@ async def detect_card(
 
     except Exception as e:
         logger.error(f"Detection error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # ============================================================
@@ -2109,6 +2211,8 @@ async def detect_card(
 @app.post("/api/auth/register")
 async def register_user(user_data: UserRegister):
     """Register a new user account."""
+    _enforce(_register_limiter, user_data.email.strip().lower(),
+             "Too many sign-up attempts. Try again later.")
     auth_service = AuthService()
     try:
         user = auth_service.register(user_data)
@@ -2124,12 +2228,14 @@ async def register_user(user_data: UserRegister):
         raise
     except Exception as e:
         logger.error(f"Registration error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/auth/login")
 async def login_user(login_data: UserLogin):
     """Login and receive access token + httpOnly refresh cookie."""
+    _enforce(_login_limiter, login_data.username.strip().lower(),
+             "Too many login attempts. Wait a minute and try again.")
     auth_service = AuthService()
     try:
         result = auth_service.login(login_data)
@@ -2145,7 +2251,7 @@ async def login_user(login_data: UserLogin):
         raise
     except Exception as e:
         logger.error(f"Login error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/auth/refresh")
@@ -2184,7 +2290,7 @@ async def logout_user(request: Request):
 
 
 @app.get("/api/auth/me", response_model=UserResponse)
-async def get_me(current_user: User = Depends(get_current_user)):
+async def get_me(current_user: UserResponse = Depends(get_current_user)):
     """Get current user profile."""
     return UserResponse(
         id=current_user.id,
@@ -2202,7 +2308,7 @@ ALLOWED_LANGUAGES = {"EN", "DE", "FR", "IT", "ES", "JA", "ZH"}
 @app.patch("/api/auth/me/language", response_model=UserResponse)
 async def set_my_language(
     profile: UserProfileUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
 ):
     """Update the current user's preferred card language."""
     lang = (profile.preferred_language or "").upper()
@@ -2215,47 +2321,6 @@ async def set_my_language(
     if updated is None:
         raise HTTPException(status_code=404, detail="User not found")
     return updated
-
-
-# Keep a reference to the warm-up task so it isn't garbage-collected
-# before completion (Python may collect a fire-and-forget task).
-_warmup_task = None
-
-
-@app.on_event("startup")
-async def startup_event():
-    """On startup, sync some basic data."""
-    global _warmup_task
-    logger.info("Pokemon Card Scanner starting up...")
-    # Warm CLIP index (fast binary load ~1s)
-    try:
-        from services.clip_matcher import get_clip_matcher
-        matcher = get_clip_matcher()
-
-        def _warm_clip():
-            matcher.load_index_fast()  # fast binary load (~1s) + norm matrix if persisted
-
-        await asyncio.to_thread(_warm_clip)
-        logger.info("✓ CLIP matcher warmed")
-    except Exception as e:
-        logger.warning(f"CLIP warm-up failed: {e}")
-    # Note: YOLO detector is loaded lazily on first scan request, not at startup.
-    # This saves ~5s+ of startup time for negligible user impact (first scan waits ~5s).
-
-    logger.info("Startup complete - ready to serve requests")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """On shutdown, close the shared DB connection."""
-    global _db_conn
-    if _db_conn is not None:
-        logger.info("Closing DB connection on shutdown")
-        try:
-            _db_conn.close()
-        except Exception as e:
-            logger.warning(f"Error closing DB connection: {e}")
-        _db_conn = None
 
 
 # Global exception handlers to prevent HTML error pages
@@ -2302,7 +2367,7 @@ async def general_exception_handler(request, exc):
     logger.error(f"Unhandled exception: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error", "error": str(exc)}
+        content={"detail": "Internal server error", "error": "Internal Server Error"}
     )
 
 @app.post("/api/auth/change-password")
@@ -2310,7 +2375,7 @@ async def change_password(
     request: Request,
     current_password: str = Form(...),
     new_password: str = Form(...),
-    current_user: User = Depends(get_current_user),
+    current_user: UserResponse = Depends(get_current_user),
 ):
     """Change the current user's password.
 
@@ -2321,7 +2386,7 @@ async def change_password(
     ok = auth_service.change_password(current_user.id, current_password, new_password)
     if ok:
         return {"success": True, "detail": "Password updated successfully"}
-    return {"success": False, "detail": "Invalid current password or new password too short (< 6 chars)"}
+    return {"success": False, "detail": "Invalid current password or new password too short (< 8 chars)"}
 
 
 @app.post("/api/auth/reset-password")
@@ -2329,9 +2394,14 @@ async def reset_password(
     email: str = Form(...),
     new_password: str = Form(...),
 ):
-    """Reset a user password using their email address (public "Forgot Password" flow)."""
-    auth_service = AuthService()
-    ok = auth_service.reset_password_by_email(email, new_password)
-    if ok:
-        return {"success": True, "detail": "Password updated successfully"}
-    return {"success": False, "detail": "Email not found or new password too short (< 6 chars)"}
+    """Disabled: unauthenticated email-based reset allowed account takeover.
+
+    Anyone who knew an email address could set that account's password, so the
+    public flow is closed. Resets are performed server-side by the operator via
+    AuthService.reset_password_by_email; a self-service flow would need a
+    single-use token delivered out of band (email), which this app does not have.
+    """
+    raise HTTPException(
+        status_code=403,
+        detail="Password reset by email is disabled. Ask the server owner to reset it for you.",
+    )

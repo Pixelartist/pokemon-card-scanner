@@ -4,8 +4,9 @@ import requests
 import base64
 import logging
 import sqlite3
+import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
@@ -268,7 +269,7 @@ class PokemonTCGClient:
             "meta": {
                 "hint": "Try again with a clearer image, or build index via /api/index/build",
                 "debug_info": {
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "environment": "enhanced_fallback_mode"
                 }
             }

@@ -10,8 +10,10 @@ services:
     ports:
       - "5005:5005"
     environment:
-      # Required: your PTCG API key (card data source)
-      - PTCG_API_KEY=***
+      # Required: your PTCG API key (card data source). Supply it from the
+      # Portainer stack environment / an .env file next to this compose file;
+      # never commit the real value.
+      - PTCG_API_KEY=${PTCG_API_KEY:?set PTCG_API_KEY in the stack environment}
       # Optional overrides
       - HOST=0.0.0.0
       - PORT=5005

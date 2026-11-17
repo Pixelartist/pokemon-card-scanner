@@ -1,0 +1,20 @@
+# Normalise line endings in the repository. Without this a Windows checkout
+# rewrites every file and shows ~30 untouched scripts as modified.
+* text=auto eol=lf
+
+# Shell scripts must keep LF even if checked out on Windows.
+*.sh text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets: never diff, convert or merge these.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.pt binary
+*.onnx binary
+*.bin binary
+*.wasm binary
+*.db binary

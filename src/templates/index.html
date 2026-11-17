@@ -10,6 +10,8 @@
     <link rel="icon" type="image/png" href="/static/images/icon.png" sizes="64x64">
     <link rel="icon" type="image/png" href="/static/images/favicon-32.png" sizes="32x32">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+    <!-- Custom CSS only — no Tailwind CDN (preflight resets break the scanner layout) -->
+
     <link rel="stylesheet" href="/static/css/main.css?t={{ timestamp }}">
     <link rel="stylesheet" href="/static/css/holo-effects.css?t={{ timestamp }}">
     <!-- Quickdraw-style scanner visual adaptation -->
@@ -20,9 +22,9 @@
 </head>
 <body>
 <!-- SVG Electric Border Filters - Must be in DOM before CSS applies -->
-<div class="app-container">
+<div class="app-container min-h-screen flex flex-col w-full max-w-full overflow-x-hidden">
         <!-- Header -->
-        <header class="header">
+        <header class="header flex items-center justify-between gap-4 sticky top-0 z-50">
             <div class="header-content">
                 <h1 class="logo">
                     <span class="logo-icon">⚡</span>
@@ -75,7 +77,7 @@
         </header>
 
         <!-- Navigation Tabs -->
-        <nav class="tabs">
+        <nav class="tabs flex items-center gap-0 overflow-x-auto scrollbar-thin scrollbar-thumb-gray-700">
             <button class="tab active" data-tab="scan">
                 <span class="tab-icon">📷</span>
                 Scanner
@@ -103,14 +105,14 @@
         </nav>
 
         <!-- Main Content -->
-        <main class="content">
-            <div class="container">
+        <main class="content flex-1 w-full max-w-full overflow-y-auto">
+            <div class="container mx-auto px-4 w-full">
             <!-- Scanner Tab -->
             <section id="scan-tab" class="tab-content active">
-                <div class="scan-layout">
-                    <div class="scan-main">
-                        <div class="scan-header">
-                            <div class="mode-switcher">
+                <div class="scan-layout grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-6 lg:gap-[30px] items-start">
+                    <div class="scan-main bg-bg-secondary rounded-xl p-6 lg:p-[30px]">
+                        <div class="scan-header flex items-center">
+                            <div class="mode-switcher flex gap-3">
                                 <button id="mode-upload" class="mode-btn active">
                                     <span class="mode-icon">📁</span> Upload
                                 </button>
@@ -121,7 +123,7 @@
                         </div>
 
                         <!-- Upload Zone -->
-                        <div id="drop-zone" class="drop-zone">
+                        <div id="drop-zone" class="drop-zone flex flex-col items-center justify-center text-center">
                             <div class="drop-icon">
                                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -138,57 +140,66 @@
                         </div>
 
                         <!-- Camera Section -->
-                        <div id="camera-section" class="camera-section hidden">
-                            <!-- Status badges top-left -->
-                            <div class="status-badges">
-                                <div class="status-badge">
-                                    <span class="dot"></span>
-                                    <span class="status-text">Live</span>
-                                </div>
-                                <div class="status-badge scanned" id="scan-status-badge" style="display:none;">
-                                    <span class="dot" style="background:#FFD700;"></span>
-                                    <span class="status-text">Scanned</span>
+                        <div id="camera-section" class="camera-section hidden flex flex-col items-center">
+                            <!-- Stage Container: CSS container for viewport sizing -->
+                            <div class="stage-container">
+                                <div class="camera-stage">
+                                    <video id="camera-preview" autoplay playsinline></video>
+                                    <!-- Gradient fades at top/bottom of viewport -->
+                                    <div class="stage-fade stage-fade-top" aria-hidden="true"></div>
+                                    <div class="stage-fade stage-fade-bottom" aria-hidden="true"></div>
+                                    <!-- Top bar overlay: pills / price -->
+                                    <div class="top-bar">
+                                        <div class="status-badges">
+                                            <div class="status-badge">
+                                                <span class="dot"></span>
+                                                <span class="status-text">Live</span>
+                                            </div>
+                                            <div class="status-badge scanned" id="scan-status-badge" style="display:none;">
+                                                <span class="dot" style="background:#FFD700;"></span>
+                                                <span class="status-text">Scanned</span>
+                                            </div>
+                                        </div>
+                                        <div class="price-indicator" id="price-indicator" style="display:none;">$0.00</div>
+                                        <span class="version-badge cloud">CLOUD</span>
+                                    </div>
+                                    <!-- Live detection outline (Quickdraw-style glide) -->
+                                    <svg id="detection-overlay" class="detection-overlay" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice" aria-hidden="true" hidden>
+                                      <polygon id="detectionPolygon" vector-effect="non-scaling-stroke"/>
+                                    </svg>
+                                    <!-- Static viewfinder corner brackets -->
+                                    <div class="viewfinder" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+                                    <!-- Card alignment frame -->
+                                    <div id="card-frame" class="card-frame">
+                                        <div class="frame-corner top-left"></div>
+                                        <div class="frame-corner top-right"></div>
+                                        <div class="frame-corner bottom-left"></div>
+                                        <div class="frame-corner bottom-right"></div>
+                                        <div class="frame-hint">Align card here</div>
+                                    </div>
+                                    <!-- Bottom toolbar: tools -->
+                                    <div class="bottom-toolbar">
+                                        <div class="control-left">
+                                            <button id="auto-scan-btn" class="auto-scan-btn" onclick="window.__autoScan.toggle()">▶ Auto-Scan: OFF</button>
+                                        </div>
+                                        <div class="control-center">
+                                            <span class="scan-instruction">SHOW THE ARTWORK AND TITLE</span>
+                                            <button id="capture-btn" class="btn btn-primary capture-btn">
+                                                <span class="btn-icon">📸</span> Capture
+                                            </button>
+                                        </div>
+                                        <div class="control-right">
+                                            <button id="stop-camera-btn" class="stop-btn" title="Stop">■</button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
-                            <!-- Price indicator top-right -->
-                            <div class="price-indicator" id="price-indicator" style="display:none;">$0.00</div>
-                            <!-- Cloud version badge -->
-                            <span class="version-badge cloud">CLOUD</span>
-                            <div class="camera-wrapper">
-                                <video id="camera-preview" autoplay playsinline></video>
-                                <!-- Live detection outline (Quickdraw-style glide) -->
-                                <svg id="detection-overlay" class="detection-overlay" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice" aria-hidden="true" hidden>
-                                  <polygon id="detectionPolygon" vector-effect="non-scaling-stroke"/>
-                                </svg>
-                                <!-- Static viewfinder corner brackets -->
-                                <div class="viewfinder" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
-                                <!-- Card alignment frame -->
-                                <div id="card-frame" class="card-frame">
-                                    <div class="frame-corner top-left"></div>
-                                    <div class="frame-corner top-right"></div>
-                                    <div class="frame-corner bottom-left"></div>
-                                    <div class="frame-corner bottom-right"></div>
-                                    <div class="frame-hint">Align card here</div>
-                                </div>
-                            </div>
-                            <!-- Bottom controls -->
-                            <div class="bottom-controls">
-                                <div class="control-left">
-                                    <button id="auto-scan-btn" class="auto-scan-btn" onclick="window.__autoScan.toggle()">▶ Auto-Scan: OFF</button>
-                                </div>
-                                <div class="control-center">
-                                    <button id="capture-btn" class="btn btn-primary btn-lg">
-                                        <span class="btn-icon">📸</span> Capture
-                                    </button>
-                                </div>
-                                <div class="control-right">
-                                    <button id="stop-camera-btn" class="stop-btn" title="Stop">■</button>
-                                </div>
-                            </div>
+                            <!-- Auto-detect status (below stage) -->
                             <div class="auto-detect-toggle">
                                 <div id="detection-status" class="detection-status">Point camera at a card</div>
                             </div>
                             <canvas id="camera-canvas" hidden></canvas>
+                        </div>
                         </div>
 
                         <!-- Floating overlay: live identification
@@ -211,8 +222,8 @@
                     </div>
 
                     <!-- Scan Options Sidebar -->
-                    <div class="scan-sidebar">
-                        <div class="scan-options">
+                    <div class="scan-sidebar flex flex-col gap-5">
+                        <div class="scan-options flex flex-col gap-4">
                             <h3>Scan Options</h3>
                             <div class="form-group">
                                 <label for="set-hint">Set Hint (optional)</label>
@@ -274,7 +285,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="binder-footer">
+                    <div class="binder-footer text-center py-4 text-sm text-text-secondary">
                         <p>Drag corners to flip • Use arrows to navigate</p>
                     </div>
                 </div>
@@ -282,10 +293,10 @@
 
             <!-- Gallery Tab (Infinite Scroll) -->
             <section id="gallery-tab" class="tab-content">
-                <div class="gallery-container">
-                    <div class="gallery-header">
+                <div class="gallery-container flex flex-col gap-4">
+                    <div class="gallery-header flex flex-col sm:flex-row sm:items-center gap-4">
                         <h2>Card Gallery</h2>
-                        <div class="gallery-controls">
+                        <div class="gallery-controls flex items-center gap-3 flex-wrap">
                             <div class="search-box">
                                 <input type="text" id="gallery-search" placeholder="Search cards...">
                             </div>
@@ -296,7 +307,7 @@
                             </select>
                         </div>
                     </div>
-                    <div id="gallery-grid" class="gallery-grid">
+                    <div id="gallery-grid" class="gallery-grid grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                         <div class="gallery-loading">
                             <div class="spinner"></div>
                             <p>Loading cards...</p>
@@ -317,7 +328,7 @@
                             <input type="text" id="sets-search" placeholder="Search sets...">
                         </div>
                     </div>
-                    <div id="sets-grid" class="sets-grid">
+                    <div id="sets-grid" class="sets-grid grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                         <div class="loading">
                             <div class="spinner"></div>
                             <p>Loading sets...</p>
@@ -342,7 +353,7 @@
                         <h2>Collection Statistics</h2>
                         <button id="export-stats" class="btn btn-secondary">Export Report</button>
                     </div>
-                    <div id="stats-grid" class="stats-grid">
+                    <div id="stats-grid" class="stats-grid grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                         <div class="loading">
                             <div class="spinner"></div>
                             <p>Loading statistics...</p>
@@ -690,7 +701,7 @@
     </script>
 
     <!-- Bottom Navigation Bar (Mobile) -->
-    <nav class="bottom-nav" id="bottom-nav">
+    <nav class="bottom-nav flex items-center justify-around" id="bottom-nav">
         <div class="nav-item active" data-tab="binder">
             <span class="nav-icon">📖</span>
             <span class="nav-label">Binder</span>

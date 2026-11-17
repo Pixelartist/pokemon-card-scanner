@@ -1,15 +1,65 @@
 """Collection management service."""
 import logging
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import sqlite3
 import json
 import requests
 
-from api.models.database import get_db_connection, init_db
+from api.models.database import get_db_connection
 from api.models.schemas import CollectionItemCreate, BinderCreate, BinderUpdate
 
 logger = logging.getLogger(__name__)
+
+
+def _value_from_prices(prices, quantity):
+    """Return (value_eur, value_usd) for `quantity` copies from a price dict.
+
+    Handles both the TCGdex shape (flat `trend` / nested `normal.market`) and
+    the pokemontcg shape (`prices.trendPrice` / `prices.normal.market`).
+    Single source of truth: this used to be duplicated in `get_stats` and
+    `_card_value_no_glow`.
+    """
+    quantity = int(quantity or 1)
+    if not prices:
+        return 0.0, 0.0
+
+    value_eur = 0.0
+    value_usd = 0.0
+    cm = prices.get("cardmarket", {}) or {}
+    tcg = prices.get("tcgplayer", {}) or {}
+
+    if isinstance(cm, dict):
+        if cm.get("trend"):
+            value_eur = float(cm["trend"])
+        elif cm.get("avg30"):
+            value_eur = float(cm["avg30"])
+        elif isinstance(cm.get("prices"), dict):
+            cm_prices = cm["prices"]
+            if cm_prices.get("trendPrice"):
+                value_eur = float(cm_prices["trendPrice"])
+            elif cm_prices.get("avg30"):
+                value_eur = float(cm_prices["avg30"])
+
+    if isinstance(tcg, dict):
+        if isinstance(tcg.get("normal"), dict) and tcg["normal"].get("market"):
+            value_usd = float(tcg["normal"]["market"])
+        elif isinstance(tcg.get("reverse-holofoil"), dict) and tcg["reverse-holofoil"].get("market"):
+            value_usd = float(tcg["reverse-holofoil"]["market"])
+        elif isinstance(tcg.get("prices"), dict):
+            tcg_prices = tcg["prices"]
+            if isinstance(tcg_prices.get("normal"), dict) and tcg_prices["normal"].get("market"):
+                value_usd = float(tcg_prices["normal"]["market"])
+            elif isinstance(tcg_prices.get("reverseHolofoil"), dict) and tcg_prices["reverseHolofoil"].get("market"):
+                value_usd = float(tcg_prices["reverseHolofoil"]["market"])
+
+    value_eur *= quantity
+    value_usd *= quantity
+    # TCGPlayer has no price for many German/vintage cards: derive USD from EUR
+    # so the two totals don't diverge by an order of magnitude.
+    if value_usd == 0.0 and value_eur > 0.0:
+        value_usd = round(value_eur * 1.18, 2)
+    return round(value_eur, 2), round(value_usd, 2)
 
 
 def _normalize_images(images, ptcg_id):
@@ -69,7 +119,10 @@ class CollectionService:
     """Manages the user's Pokemon card collection."""
 
     def __init__(self):
-        init_db()
+        # Schema creation happens once at startup (api.main imports init_db).
+        # Running the full DDL + index pass on every construction was overhead:
+        # it fired at import and again on every /api/cards/{id}/create-or-get.
+        pass
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = get_db_connection()
@@ -88,7 +141,7 @@ class CollectionService:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (item.card_id, user_id, item.condition, item.language, item.quantity,
                  item.notes, item.is_reverse_holo, item.is_first_edition,
-                 item.scan_image_path, item.crop_image_path, datetime.utcnow().strftime('%Y-%m-%d'))
+                 item.scan_image_path, item.crop_image_path, datetime.now(timezone.utc).strftime('%Y-%m-%d'))
             )
             conn.commit()
             item_id = cursor.lastrowid
@@ -110,7 +163,7 @@ class CollectionService:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (item.card_id, user_id, item.condition, item.language, item.quantity,
                      item.notes, item.is_reverse_holo, item.is_first_edition,
-                     item.scan_image_path, item.crop_image_path, datetime.utcnow().strftime('%Y-%m-%d'))
+                     item.scan_image_path, item.crop_image_path, datetime.now(timezone.utc).strftime('%Y-%m-%d'))
                 )
                 saved_items.append(self.get_item(cursor.lastrowid, user_id))
             conn.commit()
@@ -154,9 +207,10 @@ class CollectionService:
         finally:
             conn.close()
 
-        # Batch-fetch prices once for ALL cards to avoid N+1 API calls
+        # Batch-fetch prices once per DISTINCT card (was once per row, so a
+        # collection with 50 copies of one card made 50 cache lookups).
         from services.price_cache import get_prices_cached
-        ptcg_ids = [r['ptcg_id'] for r in all_rows if r['ptcg_id']]
+        ptcg_ids = {r['ptcg_id'] for r in all_rows if r['ptcg_id']}
         price_map = {}
         for pid in ptcg_ids:
             try:
@@ -186,8 +240,9 @@ class CollectionService:
             tier_map[row_id] = ['gold', 'silver', 'bronze'][i]
 
         # Now build the paginated result with glow tiers assigned
+        page = all_results if limit is None else all_results[offset:offset + limit]
         result = []
-        for temp in all_results[offset:offset + limit]:
+        for temp in page:
             row = temp['row']
             value_eur = temp['value_eur']
             value_usd = temp['value_usd']
@@ -243,46 +298,7 @@ class CollectionService:
 
     def _card_value_no_glow(self, ptcg_id, prices, row):
         """Return (value_eur, value_usd) for one collection row without glow tier calculation."""
-        quantity = int(row['quantity'] or 1)
-        value_eur, value_usd = 0.0, 0.0
-        if prices:
-            cm = prices.get("cardmarket", {}) or {}
-            tcg = prices.get("tcgplayer", {}) or {}
-            
-            # Parse Cardmarket price - handle both TCGdex and pokemontcg formats
-            if isinstance(cm, dict):
-                # TCGdex format: direct fields
-                if cm.get("trend"):
-                    value_eur = float(cm["trend"]) * quantity
-                elif cm.get("avg30"):
-                    value_eur = float(cm["avg30"]) * quantity
-                # Fallback to nested prices structure
-                elif isinstance(cm.get("prices"), dict):
-                    cm_prices = cm["prices"]
-                    if cm_prices.get("trendPrice"):
-                        value_eur = float(cm_prices["trendPrice"]) * quantity
-                    elif cm_prices.get("avg30"):
-                        value_eur = float(cm_prices["avg30"]) * quantity
-            
-            # Parse TCGPlayer price
-            if isinstance(tcg, dict):
-                # TCGdex format: direct nested values
-                if isinstance(tcg.get("normal"), dict) and tcg["normal"].get("market"):
-                    value_usd = float(tcg["normal"]["market"]) * quantity
-                elif isinstance(tcg.get("reverse-holofoil"), dict) and tcg["reverse-holofoil"].get("market"):
-                    value_usd = float(tcg["reverse-holofoil"]["market"]) * quantity
-                # Fallback to pokemontcg format
-                elif isinstance(tcg.get("prices"), dict):
-                    tcg_prices = tcg["prices"]
-                    if isinstance(tcg_prices.get("normal"), dict) and tcg_prices["normal"].get("market"):
-                        value_usd = float(tcg_prices["normal"]["market"]) * quantity
-                    elif isinstance(tcg_prices.get("reverseHolofoil"), dict) and tcg_prices["reverseHolofoil"].get("market"):
-                        value_usd = float(tcg_prices["reverseHolofoil"]["market"]) * quantity
-            
-            if value_usd == 0.0 and value_eur > 0.0:
-                value_usd = round(value_eur * 1.18, 2)
-        
-        return round(value_eur, 2), round(value_usd, 2)
+        return _value_from_prices(prices, row['quantity'])
 
 
     def get_item(self, item_id: int, user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -396,14 +412,25 @@ class CollectionService:
                 cursor.execute("SELECT COUNT(DISTINCT card_id) FROM collection_items")
             unique_cards = cursor.fetchone()[0] or 0
 
-            # By set
-            cursor.execute("""
-                SELECT s.name, COUNT(ci.id)
-                FROM collection_items ci
-                JOIN cards c ON ci.card_id = c.id
-                JOIN sets s ON c.set_id = s.id
-                GROUP BY s.name
-            """)
+            # By set (scoped to this user: without the filter every user saw
+            # global set counts while the totals above were per-user)
+            if user_id:
+                cursor.execute("""
+                    SELECT s.name, COUNT(ci.id)
+                    FROM collection_items ci
+                    JOIN cards c ON ci.card_id = c.id
+                    JOIN sets s ON c.set_id = s.id
+                    WHERE ci.user_id = ?
+                    GROUP BY s.name
+                """, (user_id,))
+            else:
+                cursor.execute("""
+                    SELECT s.name, COUNT(ci.id)
+                    FROM collection_items ci
+                    JOIN cards c ON ci.card_id = c.id
+                    JOIN sets s ON c.set_id = s.id
+                    GROUP BY s.name
+                """)
             by_set = [{"set": row[0] or "Unknown", "count": row[1]} for row in cursor.fetchall()]
 
             # Collection value - fetch prices for each unique card in collection
@@ -436,53 +463,7 @@ class CollectionService:
                     prices = self._fetch_card_prices(ptcg_id)
                     price_cache[ptcg_id] = prices
                 
-                # Use Cardmarket trend price (EUR) and TCGPlayer market (USD) as best estimates.
-                # When TCGPlayer has no price for a card (common for German/vintage cards),
-                # fall back to the EUR price converted to USD so the totals stay consistent.
-                value_eur = 0.0
-                value_usd = 0.0
-
-                if prices:
-                    cardmarket_data = prices.get("cardmarket", {}) or {}
-                    tcgplayer_data = prices.get("tcgplayer", {}) or {}
-                    
-                    # Parse Cardmarket price - handle both TCGdex and pokemontcg formats
-                    value_eur = 0.0
-                    if isinstance(cardmarket_data, dict):
-                        # TCGdex format: direct fields
-                        if cardmarket_data.get("trend"):
-                            value_eur = float(cardmarket_data["trend"]) * quantity
-                        elif cardmarket_data.get("avg30"):
-                            value_eur = float(cardmarket_data["avg30"]) * quantity
-                        # Fallback to nested prices structure
-                        elif isinstance(cardmarket_data.get("prices"), dict):
-                            cm_prices = cardmarket_data["prices"]
-                            if cm_prices.get("trendPrice"):
-                                value_eur = float(cm_prices["trendPrice"]) * quantity
-                            elif cm_prices.get("avg30"):
-                                value_eur = float(cm_prices["avg30"]) * quantity
-                    
-                    # Parse TCGPlayer price
-                    value_usd = 0.0
-                    if isinstance(tcgplayer_data, dict):
-                        # TCGdex format: direct nested values
-                        if isinstance(tcgplayer_data.get("normal"), dict) and tcgplayer_data["normal"].get("market"):
-                            value_usd = float(tcgplayer_data["normal"]["market"]) * quantity
-                        elif isinstance(tcgplayer_data.get("reverse-holofoil"), dict) and tcgplayer_data["reverse-holofoil"].get("market"):
-                            value_usd = float(tcgplayer_data["reverse-holofoil"]["market"]) * quantity
-                        # Fallback to pokemontcg format
-                        elif isinstance(tcgplayer_data.get("prices"), dict):
-                            tp_prices = tcgplayer_data["prices"]
-                            if isinstance(tp_prices.get("normal"), dict) and tp_prices["normal"].get("market"):
-                                value_usd = float(tp_prices["normal"]["market"]) * quantity
-                            elif isinstance(tp_prices.get("reverseHolofoil"), dict) and tp_prices["reverseHolofoil"].get("market"):
-                                value_usd = float(tp_prices["reverseHolofoil"]["market"]) * quantity
-
-                    # TCGPlayer returned nothing — derive USD from EUR so the two totals
-                    # don't diverge by an order of magnitude on vintage/German cards.
-                    if value_usd == 0.0 and value_eur > 0.0:
-                        value_usd = round(value_eur * 1.18, 2)
-                
+                value_eur, value_usd = _value_from_prices(prices, quantity)
                 total_value_eur += value_eur
                 total_value_usd += value_usd
                 
@@ -688,7 +669,7 @@ class CollectionService:
             if description is not None:
                 cursor.execute("UPDATE binders SET description = ? WHERE id = ?", (description, binder_id))
             cursor.execute("UPDATE binders SET updated_at = ? WHERE id = ?", 
-                          (datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), binder_id))
+                          (datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'), binder_id))
             
             if item_ids is not None:
                 # Clear existing items

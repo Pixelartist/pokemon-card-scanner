@@ -35,12 +35,8 @@ REFRESH_COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600
 # Where the persistent JWT secret lives (survives container/server restarts)
 SECRET_FILE = os.path.join(os.path.dirname(str(DATABASE_URL)), "jwt_secret.key")
 
-# Legacy default kept so tokens issued before secret persistence still verify
-_LEGACY_DEFAULT_SECRET = "pokemon-card-scanner-dev-secret-change-in-production"
-
-
 def _load_secret_key() -> str:
-    """Resolve the JWT signing secret: env var, then a persisted file, then legacy default.
+    """Resolve the JWT signing secret: env var, then a persisted file.
 
     The file is created on first run and reused across restarts so tokens
     stay valid; a random-per-boot secret would log everyone out.
@@ -63,8 +59,13 @@ def _load_secret_key() -> str:
         except OSError:
             pass
         return new_secret
-    except OSError:
-        return _LEGACY_DEFAULT_SECRET
+    except OSError as exc:
+        # Fail closed. Falling back to a secret published in this repo would
+        # let anyone mint a valid JWT for any user id.
+        raise RuntimeError(
+            "Cannot persist the JWT secret: set JWT_SECRET_KEY or make "
+            f"{os.path.dirname(SECRET_FILE)} writable."
+        ) from exc
 
 
 SECRET_KEY = _load_secret_key()
@@ -77,7 +78,7 @@ def create_access_token(data: Dict[str, Any]) -> str:
     to_encode = data.copy()
     if "sub" in to_encode:
         to_encode["sub"] = str(to_encode["sub"])
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -167,7 +168,7 @@ def revoke_refresh_token(token: str) -> None:
 def get_current_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-) -> Dict[str, Any]:
+) -> UserResponse:
     """Resolve the current user from a bearer token.
 
     If the bearer token is missing or expired but the httpOnly refresh cookie
@@ -253,10 +254,10 @@ class AuthService:
                 detail="Invalid email format"
             )
         
-        if len(user_data.password) < 6:
+        if len(user_data.password) < 8:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Password must be at least 6 characters"
+                detail="Password must be at least 8 characters"
             )
         
         conn = self._get_conn()
@@ -293,7 +294,7 @@ class AuthService:
                 username=user_data.username,
                 email=user_data.email,
                 full_name=user_data.full_name,
-                created_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                created_at=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             )
         finally:
             conn.close()
@@ -386,7 +387,7 @@ class AuthService:
 
         Returns True on success, False if current password is wrong or new password is too short.
         """
-        if len(new_password) < 6:
+        if len(new_password) < 8:
             return False
         conn = self._get_conn()
         try:
@@ -410,9 +411,13 @@ class AuthService:
             conn.close()
 
     def reset_password_by_email(self, email: str, new_password: str) -> bool:
-        """Reset a user password using their email address (used by the public
-        "Forgot Password" flow)."""
-        if len(new_password) < 6:
+        """Reset a user password using their email address.
+
+        Operator-only: there is no public endpoint calling this. An
+        unauthenticated email-based reset let anyone who knew an address take
+        over the account.
+        """
+        if len(new_password) < 8:
             return False
         conn = self._get_conn()
         try:

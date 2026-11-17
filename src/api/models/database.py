@@ -1,12 +1,15 @@
 """Database models for Pokemon Card Scanner."""
 import os
 import sqlite3
+import logging
 from pathlib import Path
 from datetime import datetime
 
 # Calculate path from database.py to project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-DATA_DIR = Path(BASE_DIR) / "data"
+# Honours DATA_DIR so the DB lives with the rest of the data root (api.main
+# reads the same variable); defaults to ./data next to the project.
+DATA_DIR = Path(os.environ.get("DATA_DIR", Path(BASE_DIR) / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = DATA_DIR / "pokemon_cards.db"
@@ -143,6 +146,9 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_collection_items_card_id ON collection_items(card_id)",
         "CREATE INDEX IF NOT EXISTS idx_collection_items_user_id ON collection_items(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_collection_items_user_card ON collection_items(user_id, card_id)",
+        # /api/collection orders by added_at DESC per user; without this the
+        # query sorts the whole table on every page load.
+        "CREATE INDEX IF NOT EXISTS idx_collection_items_user_added ON collection_items(user_id, added_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_binders_user_id ON binders(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_binder_items_binder_id ON binder_items(binder_id)",
         "CREATE INDEX IF NOT EXISTS idx_binder_items_collection_id ON binder_items(collection_item_id)",
@@ -192,7 +198,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print(f"Database initialized successfully at {DATABASE_URL}")
+    logging.info("Database initialized at %s", DATABASE_URL)
 
 
 def get_db_connection():

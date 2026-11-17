@@ -1018,7 +1018,7 @@ window.__autoScan = {
     // Same card still sitting in front of the camera: don't toast it again,
     // just wait for the user to swap cards and re-check quietly.
     const now = Date.now();
-    if (id && id === this.lastId && now - this.lastTime < 8000) {
+    if (id && id === this.lastId && now - this.lastTime < 2000) {
       this.retry(1500);
       return;
     }
@@ -1553,9 +1553,12 @@ document.querySelectorAll('#bottom-nav .nav-item').forEach(item => {
 });
 
 function switchMode(mode) {
+    // Graceful no-op: clicking the already-active mode button does nothing.
+    if (mode === currentMode) return;
+
     currentMode = mode;
 
-    // Update button states
+    // Update button states — always reflect the current mode.
     document.getElementById('mode-upload').classList.toggle('active', mode === 'upload');
     document.getElementById('mode-camera').classList.toggle('active', mode === 'camera');
 
@@ -1572,11 +1575,17 @@ function switchMode(mode) {
         cameraSection.classList.add('hidden');
         if (scanOverlay) scanOverlay.classList.add('hidden');
         stopCamera();
+        document.querySelector('.scan-layout')?.classList.remove('camera-mode');
+        const stage = document.querySelector('.camera-stage');
+        if (stage) stage.classList.remove('live');
     } else {
         dropZone.classList.add('hidden');
         cameraSection.classList.remove('hidden');
         if (scanOverlay) scanOverlay.classList.remove('hidden');
         startCamera();
+        document.querySelector('.scan-layout')?.classList.add('camera-mode');
+        const stage = document.querySelector('.camera-stage');
+        if (stage) stage.classList.add('live');
     }
 }
 
@@ -2217,17 +2226,21 @@ async function detectTracked(video) {
     // one reads far better on a tight crop). Keep the sharper read only if
     // it didn't lose confidence.
     if (det && det.points && (det.confidence || 0) > 50) {
-        const ys0 = det.points.map(p => p[1]);
-        const cardH = Math.max(...ys0) - Math.min(...ys0);
-        if (cardH < vh * 0.6) {
-            const refined = await _refineQuad(video, det.points, vw, vh);
-            if (refined && refined.points && (refined.confidence || 0) >= (det.confidence || 0)) {
-                _updateTrack(refined);
-                return refined;
+            const ys0 = det.points.map(p => p[1]);
+            const cardH = Math.max(...ys0) - Math.min(...ys0);
+            if (cardH < vh * 0.6) {
+                const refined = await _refineQuad(video, det.points, vw, vh);
+                if (refined && refined.points && (refined.confidence || 0) >= (det.confidence || 0)) {
+                    _updateTrack(refined);
+                    return refined;
+                }
+            } else if (cardH >= vh * 0.7) {
+                // Likely a person / table edge / large clutter, not a card — reject.
+                _updateTrack(null);
+                return null;
             }
         }
-    }
-    return det;
+        return det;
 }
 
 async function detectCardInFrame() {
