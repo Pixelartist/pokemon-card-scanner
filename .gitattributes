@@ -7,14 +7,19 @@
 *.bat text eol=crlf
 *.ps1 text eol=crlf
 
-# Binary assets: never diff, convert or merge these.
-*.png binary
-*.jpg binary
-*.jpeg binary
-*.webp binary
-*.gif binary
-*.pt binary
-*.onnx binary
-*.bin binary
-*.wasm binary
-*.db binary
+# Binary assets: never diff, convert, merge or LFS-filter these.
+#
+# The explicit `-filter` matters. `binary` only clears diff/merge/text, so a
+# machine-level attributes file that sets `filter=lfs` still wins for that one
+# attribute and silently replaces the 5 MB model with a 132-byte LFS pointer on
+# `git add` -- which is exactly what happened here.
+*.png binary -filter
+*.jpg binary -filter
+*.jpeg binary -filter
+*.webp binary -filter
+*.gif binary -filter
+*.pt binary -filter
+*.onnx binary -filter
+*.bin binary -filter
+*.wasm binary -filter
+*.db binary -filter
