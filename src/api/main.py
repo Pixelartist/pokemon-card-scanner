@@ -455,8 +455,26 @@ async def scan_card(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-def _write_scan_label(scan_path, crop_path, filed_as, source, proposed_id,
-                      proposed_similarity, user_id):
+def _resolve_card_id(card_id):
+    """Labels join to the card index by ptcg_id.
+
+    The add form posts either a ptcg_id ("sv10-099") or the numeric database id
+    the browser resolved for it (15032) - a correction opened from the detail
+    modal posts the latter. Resolve a numeric id and keep anything else as given.
+    """
+    if not card_id or not str(card_id).isdigit():
+        return card_id
+    try:
+        conn = get_db_connection()
+        row = conn.execute("SELECT ptcg_id FROM cards WHERE id = ?", (int(card_id),)).fetchone()
+        conn.close()
+        return row["ptcg_id"] if row and row["ptcg_id"] else card_id
+    except Exception as exc:
+        logger.warning("scan label: could not resolve card id %s: %s", card_id, exc)
+        return card_id
+
+
+def _write_scan_label(scan_path, user_id, labels):
     """Write <scan>.json beside the stored frame: what was filed, what the gate proposed.
 
     Why it is stored: the 78 similarity floor and the 2-point lead margin can only
@@ -464,38 +482,27 @@ def _write_scan_label(scan_path, crop_path, filed_as, source, proposed_id,
     actually filed is exactly that. Recording the gate's proposal next to the
     final choice turns ordinary use into a labelled corpus - "accepted",
     "corrected" and "picked" rows on real frames, which is what the handful of
-    stored scans cannot provide. Never let a logging failure break the add.
+    stored scans cannot provide. The runner-up's id is recorded with its score
+    because a score alone cannot show whether the margin rejected the card that
+    was filed or some other one. Never let a logging failure break the add.
     """
     if not scan_path:
         return
     # scan_path arrives from the browser: keep it inside data/scans/.
     if ".." in scan_path or not scan_path.startswith("scans/"):
         return
-    # The add form posts either a ptcg_id ("sv10-099") or the numeric database
-    # id the browser resolved for it (15032) - a correction opened from the
-    # detail modal posts the latter. Labels only join cleanly to the card index
-    # and its similarity scores if they carry the ptcg_id, so resolve a numeric
-    # id here and keep the posted value when it is already one (or unresolvable).
-    if filed_as.isdigit():
-        try:
-            conn = get_db_connection()
-            row = conn.execute("SELECT ptcg_id FROM cards WHERE id = ?",
-                               (int(filed_as),)).fetchone()
-            conn.close()
-            if row and row["ptcg_id"]:
-                filed_as = row["ptcg_id"]
-        except Exception as exc:
-            logger.warning("scan label: could not resolve card id %s: %s", filed_as, exc)
     try:
         target = DATA_ROOT / (scan_path + ".json")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({
             "scan": scan_path,
-            "crop": crop_path,
-            "filed_as": filed_as,
-            "match_source": source or "unknown",
-            "proposed_id": proposed_id,
-            "proposed_similarity": proposed_similarity,
+            "crop": labels.get("crop"),
+            "filed_as": _resolve_card_id(labels.get("filed_as")),
+            "match_source": labels.get("match_source") or "unknown",
+            "proposed_id": _resolve_card_id(labels.get("proposed_id")),
+            "proposed_similarity": labels.get("proposed_similarity"),
+            "proposed_second_id": _resolve_card_id(labels.get("proposed_second_id")),
+            "proposed_second_similarity": labels.get("proposed_second_similarity"),
             "user_id": user_id,
             "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -515,7 +522,9 @@ async def add_to_collection(card_id: str = Form(...),
                             crop_image_path: Optional[str] = Form(None),
                             match_source: Optional[str] = Form(None),
                             match_proposed_id: Optional[str] = Form(None),
+                            match_proposed_second_id: Optional[str] = Form(None),
                             match_proposed_similarity: Optional[float] = Form(None),
+                            match_proposed_second_similarity: Optional[float] = Form(None),
                             current_user: UserResponse = Depends(get_current_user)):
     """Add a card to the collection."""
     try:
@@ -618,9 +627,15 @@ async def add_to_collection(card_id: str = Form(...),
             crop_image_path=crop_image_path,
         )
         item = collection_service.add_card(item_data, user_id=current_user.id)
-        _write_scan_label(scan_image_path, crop_image_path, card_id,
-                          match_source, match_proposed_id, match_proposed_similarity,
-                          current_user.id)
+        _write_scan_label(scan_image_path, current_user.id, {
+            "crop": crop_image_path,
+            "filed_as": card_id,
+            "match_source": match_source,
+            "proposed_id": match_proposed_id,
+            "proposed_similarity": match_proposed_similarity,
+            "proposed_second_id": match_proposed_second_id,
+            "proposed_second_similarity": match_proposed_second_similarity,
+        })
         return {"success": True, "id": item["id"]}
     except Exception as e:
         logger.error(f"Add to collection error: {e}")

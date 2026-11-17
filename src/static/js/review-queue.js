@@ -297,9 +297,7 @@ function rqOpenCorrection(item) {
         // is cleared only when that form is submitted, so cancelling or adding
         // something else cannot remove this entry.
         await window.addToCollectionById(selected.id, selected.name, item.id, 'corrected',
-          item.scan ? { scan: item.scan, crop: item.crop,
-                        proposal: { id: item.id, similarity: +((item.score || 0) * 100).toFixed(1) } }
-                    : null);
+          window.queueScanFrame ? window.queueScanFrame(item) : null);
       } else {
         RQ.remove(item.id);
         if (window.refreshReviewQueues) window.refreshReviewQueues();

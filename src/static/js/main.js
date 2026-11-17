@@ -175,8 +175,34 @@ let lastScanImages = null;
 // What the match gate proposed for the scan on screen, sent with the add so the
 // server can write a label beside the stored frame (see _write_scan_label):
 // accepted, corrected and picked-by-hand are three labels on one image, and the
-// only ground truth real captures have.
+// only ground truth real captures have. `second` is the nearest card that is not
+// the same one, so a corrected label can say whether the floor or the lead lost
+// the capture.
 let lastScanProposal = null;
+
+// The card the gate ranked next, and its score. Both go into the label: the
+// score alone cannot prove whether a margin rejection cost the capture, the id
+// can (it is the card the user actually filed, or it is not).
+function runnerUp(candidates, topId) {
+    const base = (id) => String(id || '').replace(/^de_/, '');  // EN/DE prints are one card
+    let best = null;
+    for (const candidate of candidates || []) {
+        if (base(candidate.id) === base(topId)) continue;
+        const score = candidate.similarity ?? candidate.score ?? 0;
+        if (!best || score > best.score) best = { id: candidate.id, score };
+    }
+    return best ? { id: best.id, similarity: +(best.score * 100).toFixed(1) } : null;
+}
+
+// Frame and proposal for a review-queue row: the row records the scan it was cut
+// from, so its label describes that frame rather than whatever the camera saw last.
+window.queueScanFrame = (item) => {
+    if (!item.scan) return null;
+    const second = runnerUp(item.candidates, item.id);
+    return { scan: item.scan, crop: item.crop,
+        proposal: { id: item.id, similarity: +((item.score || 0) * 100).toFixed(1),
+                    secondId: second?.id ?? null, second: second?.similarity ?? null } };
+};
 
 // Non-blocking toast — native alert() halts JS until dismissed, which stalls
 // re-renders (e.g. the binder rebuild after adding a card).
@@ -1210,6 +1236,8 @@ async function addToCollection(cardId, queueRowId, matchSource, frame) {
             <input type="hidden" name="card_id" value="${cardId}">
             <input type="hidden" name="match_source" value="${matchSource || 'manual'}">
             ${proposal ? `<input type="hidden" name="match_proposed_id" value="${proposal.id}"><input type="hidden" name="match_proposed_similarity" value="${proposal.similarity}">` : ''}
+            ${proposal?.secondId ? `<input type="hidden" name="match_proposed_second_id" value="${proposal.secondId}">` : ''}
+            ${proposal?.second != null ? `<input type="hidden" name="match_proposed_second_similarity" value="${proposal.second}">` : ''}
             ${queueRowId ? `<input type="hidden" name="rq_row" value="${String(queueRowId).replace(/"/g, '&quot;')}">` : ''}
             ${frame?.scan ? `<input type="hidden" name="scan_image_path" value="${frame.scan}">` : ''}
             ${frame?.crop ? `<input type="hidden" name="crop_image_path" value="${frame.crop}">` : ''}
@@ -1456,12 +1484,8 @@ if (typeof mountReviewQueue === 'function') {
     add(item) {
       // route "Keep" through the existing add-to-collection flow, carrying the
       // queue row id so the row clears only if this form is actually submitted
-      // "Keep" means the identification was accepted as shown. The row carries
-      // its own frame, which is not necessarily what the camera saw last.
-      if (item.id) addToCollection(item.id, item.id, 'accepted', item.scan
-        ? { scan: item.scan, crop: item.crop,
-            proposal: { id: item.id, similarity: +((item.score || 0) * 100).toFixed(1) } }
-        : null);
+      // "Keep" means the identification was accepted as shown.
+      if (item.id) addToCollection(item.id, item.id, 'accepted', window.queueScanFrame(item));
     },
   };
   if (rqRoot) window.__reviewQueues.push(mountReviewQueue(rqRoot, opts));
@@ -2178,9 +2202,13 @@ displayScanResult = async function(data, container) {
     // What the gate proposed for this frame, recorded with whatever is filed
     // (see the label fields in addToCollection). Set here because this override
     // is the live renderer; the original below is kept for reference only.
-    lastScanProposal = data.decision === 'match' && data.candidates.length
-        ? { id: (data.candidates[0].card?.id || data.candidates[0].id),
-            similarity: +(((data.candidates[0].similarity || 0) * 100).toFixed(1)) }
+    const topId = data.candidates?.[0] ? (data.candidates[0].card?.id || data.candidates[0].id) : null;
+    const second = topId ? runnerUp(data.candidates, topId) : null;
+    lastScanProposal = data.decision === 'match' && topId
+        ? { id: topId,
+            similarity: +(((data.candidates[0].similarity || 0) * 100).toFixed(1)),
+            secondId: second?.id ?? null,
+            second: second?.similarity ?? null }
         : null;
     if (data.decision === 'match' && data.candidates.length > 0) {
         const card = data.candidates[0];
