@@ -38,7 +38,7 @@ body.camera-fs .scan-sidebar {
 
 /* Camera panel - transforms the main scan area */
 body.camera-fs .scan-main {
-  background: #0a0a0b !important; /* quickdraw's dark background */
+  background: var(--ink) !important; /* shell ink */
   border: 1px solid var(--border) !important;
   border-radius: 0 !important; /* quickdraw has sharp corners */
   padding: 0 !important;
@@ -81,49 +81,15 @@ body.camera-fs .scan-sidebar {
   padding: 8px 0 !important;
 }
 
-/* Status badge - quickdraw style (green for live) */
-body.camera-fs .status-badge {
-  display: inline-flex !important;
-  align-items: center !important;
-  gap: 8px !important;
-  padding: 6px 12px !important;
-  border-radius: 0 !important; /* sharp corners */
-  background: rgba(46, 204, 113, 0.15) !important; /* green tint */
-  color: #2ecc71 !important;
-  font-size: 0.8rem !important;
-  font-weight: 600 !important;
-  border: 1px solid rgba(46, 204, 113, 0.4) !important;
-}
-
-body.camera-fs .status-badge .dot {
-  width: 6px !important;
-  height: 6px !important;
-  border-radius: 50% !important;
-  background: #2ecc71 !important; /* green dot */
-}
-
-/* Price indicator - quickdraw style */
-body.camera-fs .price-indicator {
-  margin-top: 8px !important;
-  padding: 12px !important;
-  background: var(--bg-card) !important;
-  border-radius: 0 !important;
-  border: 1px solid var(--border) !important;
-}
-
-body.camera-fs .price-indicator span {
-  font-family: 'Inter', monospace !important;
-  font-size: 1.2rem !important;
-  font-weight: 600 !important;
-  color: var(--success) !important;
-  margin: 0 !important;
-}
+/* Status badges, the live dot and the price pill are left to main.css:
+   gold accent on the shell palette, --ok green reserved for confirmed.
+   (The old green #2ecc71 overrides here made camera mode a second theme.) */
 
 /* Hide static card frame in camera mode - use quickdraw viewfinder corners instead */
 body.camera-fs #card-frame { display: none !important; }
 body.camera-fs #card-frame * { display: none !important; }
 
-/* Detection overlay - quickdraw style (green).
+/* Detection overlay - gold while detecting, --ok green once confirmed.
    IMPORTANT: kill the static gold `border` that main.css puts on this SVG
    (body.camera-fs .detection-overlay { border: 3px solid #FFD700 }).
    That border is a fixed box that never tracks the card — it is the
@@ -145,16 +111,16 @@ body.camera-fs .detection-overlay {
 
 body.camera-fs .detection-overlay polygon,
 body.camera-fs .detection-overlay path {
-  fill: #3fb95014 !important; /* quickdraw green tint */
-  stroke: #3fb950 !important; /* quickdraw green */
+  fill: rgba(255, 203, 5, 0.09) !important; /* gold tint while detecting */
+  stroke: var(--gold) !important;
   stroke-width: 3 !important;
   stroke-linejoin: miter !important;
   transition: all 0.12s !important;
 }
 
 body.camera-fs .detection-overlay.confirmed polygon {
-  fill: #3ef08a22 !important;
-  stroke: #2ecc71 !important;
+  fill: rgba(53, 196, 106, 0.16) !important;
+  stroke: var(--ok) !important;
   stroke-width: 4 !important;
 }
 
@@ -231,8 +197,8 @@ body.camera-fs .bottom-controls .stop-btn {
   padding: 10px !important;
   border-radius: 0 !important; /* FIXED: sharp corners for consistent styling */
   font-size: 1.2rem !important;
-  background: var(--accent) !important; /* same accent color for all */
-  color: white !important;
+  background: var(--accent) !important; /* one accent for all */
+  color: var(--ink) !important; /* dark label on the yellow accent */
   border: none !important;
   display: flex !important;
   align-items: center !important;
@@ -274,7 +240,9 @@ body.camera-fs .auto-scan-btn {
 }
 
 body.camera-fs .auto-scan-btn.active {
-  background: #2ecc71 !important; /* green when active */
+  background: var(--gold) !important; /* armed, not confirmed */
+  border-color: var(--gold) !important;
+  color: var(--ink) !important;
 }
 
 /* Stop button - squared outline in the terminal palette */
@@ -285,9 +253,9 @@ body.camera-fs .stop-btn {
   padding: 0 !important;
   font-size: 0.8rem !important;
   border-radius: 0 !important;
-  background: rgba(248, 81, 73, 0.14) !important;
-  color: var(--danger, #f85149) !important;
-  border: 1px solid var(--danger, #f85149) !important;
+  background: rgba(242, 84, 91, 0.14) !important;
+  color: var(--danger) !important;
+  border: 1px solid var(--danger) !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
@@ -295,8 +263,8 @@ body.camera-fs .stop-btn {
 }
 
 body.camera-fs .stop-btn:hover {
-  background: rgba(248, 81, 73, 0.28) !important;
-  border-color: var(--danger, #f85149) !important;
+  background: rgba(242, 84, 91, 0.28) !important;
+  border-color: var(--danger) !important;
   transform: none !important;
   box-shadow: none !important;
 }
@@ -313,7 +281,7 @@ body.camera-fs .scan-result {
 body.camera-fs .scan-result h3 {
   margin-bottom: 12px !important;
   font-size: 1.1rem !important;
-  color: var(--success) !important;
+  color: var(--gold) !important;
 }
 
 /* Detection status indicator */
@@ -329,13 +297,13 @@ body.camera-fs .detection-status {
 }
 
 body.camera-fs .detection-status.detecting {
-  background: rgba(255, 165, 0, 0.2) !important;
-  color: #ffa500 !important;
+  background: rgba(224, 163, 46, 0.16) !important;
+  color: var(--warn) !important;
 }
 
 body.camera-fs .detection-status.found {
-  background: rgba(78, 204, 163, 0.2) !important;
-  color: var(--success) !important;
+  background: rgba(53, 196, 106, 0.16) !important;
+  color: var(--ok) !important;
 }
 
 /* Auto-detect toggle */

@@ -3,12 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#0a0a0a">
+    <meta name="theme-color" content="#0a0f1c">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Pokémon Card Scanner</title>
-    <link rel="icon" type="image/png" href="/static/images/icon.png" sizes="64x64">
+    <link rel="icon" type="image/svg+xml" href="/static/images/favicon.svg">
     <link rel="icon" type="image/png" href="/static/images/favicon-32.png" sizes="32x32">
+    <link rel="icon" type="image/png" href="/static/images/icon.png" sizes="64x64">
+    <link rel="apple-touch-icon" href="/static/images/apple-touch-icon.png">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- Custom CSS only — no Tailwind CDN (preflight resets break the scanner layout) -->
@@ -157,7 +159,7 @@
                                                 <span class="status-text">Live</span>
                                             </div>
                                             <div class="status-badge scanned" id="scan-status-badge" style="display:none;">
-                                                <span class="dot" style="background:#FFD700;"></span>
+                                                <span class="dot" style="background: var(--gold, #ffcb05);"></span>
                                                 <span class="status-text">Scanned</span>
                                             </div>
                                         </div>
@@ -305,9 +307,14 @@
                                 <option value="oldest">Oldest First</option>
                                 <option value="name">By Name</option>
                             </select>
+                            <button id="gallery-size" type="button" data-size="medium"
+                                    class="btn btn-icon gallery-size-btn"
+                                    title="Card size: medium" aria-label="Card size: medium">
+                                <span class="size-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                            </button>
                         </div>
                     </div>
-                    <div id="gallery-grid" class="gallery-grid grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                    <div id="gallery-grid" data-size="medium" class="gallery-grid grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
                         <div class="gallery-loading">
                             <div class="spinner"></div>
                             <p>Loading cards...</p>
@@ -385,7 +392,7 @@
                 <button id="login-btn" type="submit" class="btn btn-primary btn-full">Login</button>
                 <p class="auth-error" id="login-error"></p>
                 <p class="auth-links" style="text-align:center; margin-top:12px;">
-                    <a href="#" id="forgot-password-link" style="color: var(--gold, #ffc629); text-decoration: none; font-weight: 600;">Forgot Password?</a>
+                    <a href="#" id="forgot-password-link" style="color: var(--gold, #ffcb05); text-decoration: none; font-weight: 600;">Forgot Password?</a>
                 </p>
             </form>
             <form id="register-form" class="auth-form" autocomplete="on">
@@ -478,7 +485,7 @@
 
             <div style="position: relative; width: 420px; height: 540px; margin: 40px auto;" id="electric-wrapper">
                 <canvas id="electric-canvas" width="420" height="540" style="position: absolute; top: 0; left: 0; pointer-events: none; z-index: 2;"></canvas>
-                <div style="position: absolute; inset: 60px; background: #1a1a1a; border-radius: 20px; display: flex; align-items: center; justify-content: center; color: white; flex-direction: column; padding: 20px;">
+                <div style="position: absolute; inset: 60px; background: #162034; border-radius: 20px; display: flex; align-items: center; justify-content: center; color: white; flex-direction: column; padding: 20px;">
                     <h3 style="margin: 0; font-size: 24px; font-weight: 600;">⚡ Electric</h3>
                     <p style="margin: 10px 0 0; opacity: 0.8;">1:1 Test Card</p>
                 </div>
@@ -492,7 +499,7 @@
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
 
-        const color = '#FFD700';
+        const color = '#FFCB05';
         const speed = 1.8;
         const chaos = 1.1;
         const spread = 0.8;

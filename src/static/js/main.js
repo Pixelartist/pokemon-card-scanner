@@ -3090,6 +3090,41 @@ let galleryHasMore = true;
 let gallerySearchQuery = '';
 let gallerySortOrder = 'newest';
 
+// --- Card size (small / medium / big) --------------------------------------
+// Layout only, so it is a per-browser preference rather than a server setting.
+const GALLERY_SIZE_KEY = 'gallery_card_size';
+const GALLERY_SIZES = ['small', 'medium', 'big'];
+// One button cycles medium → big → small → medium.
+const GALLERY_SIZE_CYCLE = ['medium', 'big', 'small'];
+
+function getGalleryCardSize() {
+    const saved = localStorage.getItem(GALLERY_SIZE_KEY);
+    return GALLERY_SIZES.includes(saved) ? saved : 'medium';
+}
+
+function nextGallerySize(size) {
+    const i = GALLERY_SIZE_CYCLE.indexOf(size);
+    return GALLERY_SIZE_CYCLE[(i + 1) % GALLERY_SIZE_CYCLE.length];
+}
+
+function applyGallerySize(size) {
+    if (!GALLERY_SIZES.includes(size)) return;
+    const grid = document.getElementById('gallery-grid');
+    if (grid) grid.dataset.size = size;
+    const btn = document.getElementById('gallery-size');
+    if (btn) {
+        const next = nextGallerySize(size);
+        btn.dataset.size = size;
+        btn.title = `Card size: ${size} — click for ${next}`;
+        btn.setAttribute('aria-label', `Card size: ${size} — click for ${next}`);
+    }
+}
+
+function setGalleryCardSize(size) {
+    if (!GALLERY_SIZES.includes(size)) return;
+    try { localStorage.setItem(GALLERY_SIZE_KEY, size); } catch { /* quota */ }
+}
+
 async function loadGalleryPage() {
     if (galleryLoading || !galleryHasMore) return;
     
@@ -3315,6 +3350,19 @@ function initGallery() {
         sortSelect.addEventListener('change', (e) => {
             gallerySortOrder = e.target.value;
             resetGallery();
+        });
+    }
+
+    // Restore and wire the card size button (bound once — initGallery runs
+    // again every time the tab is opened)
+    applyGallerySize(getGalleryCardSize());
+    const sizeBtn = document.getElementById('gallery-size');
+    if (sizeBtn && !sizeBtn.dataset.bound) {
+        sizeBtn.dataset.bound = '1';
+        sizeBtn.addEventListener('click', () => {
+            const next = nextGallerySize(getGalleryCardSize());
+            setGalleryCardSize(next);
+            applyGallerySize(next);
         });
     }
 }

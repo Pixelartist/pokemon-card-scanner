@@ -8,10 +8,13 @@
 
 const MODULE_VERSION = '1.0.0';
 const PAD = 10; // canvas margin around the card for the glow to bleed into
+// Strands ride just OUTSIDE the card edge, so the arc reads as an aura around
+// the card rather than a rim swallowed by the artwork.
+const EDGE_OFFSET = 2;
 
 /** Tier → color mapping (matching value tiers) */
 const TIER_COLORS = {
-    gold:   { stroke: '#FFD700', glow: 'rgba(255,215,0,',  core: [1, 0.84, 0] },
+    gold:   { stroke: '#FFCB05', glow: 'rgba(255,203,5,',  core: [1, 0.80, 0.02] },
     silver: { stroke: '#C0C0C0', glow: 'rgba(192,192,192,', core: [0.75, 0.75, 0.78] },
     bronze: { stroke: '#CD7F32', glow: 'rgba(205,127,50,',  core: [0.8, 0.5, 0.2] },
 };
@@ -99,6 +102,12 @@ class ElectricGlow {
         const cfg = TIER_COLORS[tier];
         if (!cfg) return false;
 
+        // Host the canvas on the card frame, never on .gallery-item: the item
+        // also contains the name/set caption row, so a canvas sized to the
+        // whole item drew its strands down the sides of that text and along
+        // its bottom edge (painted on top of it) instead of hugging the card.
+        this.host = this.el.querySelector('.holo-card') || this.el;
+
         // Build overlay structure
         const wrapper = document.createElement('div');
         wrapper.className = 'electric-glow-wrapper';
@@ -108,14 +117,14 @@ class ElectricGlow {
         this.canvas.className = 'electric-glow-canvas';
 
         wrapper.appendChild(this.canvas);
-        if (getComputedStyle(this.el).position === 'static') {
-            this.el.style.position = 'relative';
+        if (getComputedStyle(this.host).position === 'static') {
+            this.host.style.position = 'relative';
         }
         // Ensure wrapper is visible inside the card
-        if (getComputedStyle(this.el).overflow !== 'visible') {
-            this.el.style.overflow = 'visible';
+        if (getComputedStyle(this.host).overflow !== 'visible') {
+            this.host.style.overflow = 'visible';
         }
-        this.el.appendChild(wrapper);
+        this.host.appendChild(wrapper);
         this.wrapper = wrapper;
 
         this.color = cfg.stroke;
@@ -138,8 +147,9 @@ class ElectricGlow {
     }
 
     resize() {
-        const w = this.el.offsetWidth || this.el.getBoundingClientRect().width;
-        const h = this.el.offsetHeight || this.el.getBoundingClientRect().height;
+        const host = this.host || this.el;
+        const w = host.offsetWidth || host.getBoundingClientRect().width;
+        const h = host.offsetHeight || host.getBoundingClientRect().height;
         this.width = w;
         this.height = h;
         if (this.width < 40 || this.height < 50) return;
@@ -160,11 +170,12 @@ class ElectricGlow {
 
     _updateGeometry() {
         const w = this.width, h = this.height;
-        // Border sits ON the card edge; strands wobble ±few px around it.
-        this.borderLeft = PAD;
-        this.borderTop = PAD;
-        this.borderWidth = w;
-        this.borderHeight = h;
+        // Border sits EDGE_OFFSET outside the card edge; strands wobble ±few px
+        // around it, so the glow clears the card frame all the way round.
+        this.borderLeft = PAD - EDGE_OFFSET;
+        this.borderTop = PAD - EDGE_OFFSET;
+        this.borderWidth = w + EDGE_OFFSET * 2;
+        this.borderHeight = h + EDGE_OFFSET * 2;
         this.radius = Math.min(w, h) * 0.06;
 
         const straightW = this.borderWidth - 2*this.radius;
@@ -221,15 +232,15 @@ class ElectricGlow {
         // ---- Soft halo ----
         ctx.globalAlpha = 0.35;
         ctx.strokeStyle = color;
-        ctx.lineWidth = 6;
-        ctx.filter = 'blur(4px)';
+        ctx.lineWidth = 7;
+        ctx.filter = 'blur(5px)';
         this._strokeBorderPath(ctx, scale, displacement, octaves, lacunarity, gain, time, 0);
         ctx.stroke();
 
         // ---- Medium glow ----
         ctx.globalAlpha = 0.5;
-        ctx.lineWidth = 3;
-        ctx.filter = 'blur(1.5px)';
+        ctx.lineWidth = 4;
+        ctx.filter = 'blur(2px)';
         this._strokeBorderPath(ctx, scale, displacement, octaves, lacunarity, gain, time, 0);
         ctx.stroke();
 
@@ -239,9 +250,9 @@ class ElectricGlow {
         for (let strand = 0; strand < 2; strand++) {
             ctx.globalAlpha = 0.8 - strand * 0.3;
             ctx.strokeStyle = '#FFFFFF';
-            ctx.lineWidth = 1;
+            ctx.lineWidth = 1.5;
             ctx.shadowColor = color;
-            ctx.shadowBlur = 6;
+            ctx.shadowBlur = 7;
             this._strokeBorderPath(ctx, scale, displacement, octaves, lacunarity, gain, time, strand * 0.5);
             ctx.stroke();
         }
