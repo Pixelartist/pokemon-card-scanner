@@ -1661,6 +1661,23 @@ select {
 }
 .set-item-badges { display: flex; gap: 4px; flex-wrap: wrap; }
 
+.sets-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex-basis: 100%;
+}
+.sets-filters select { width: auto; min-height: 34px; min-width: 148px; }
+.sets-count {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-dim);
+}
+
 .series-filter { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
 .series-btn {
   padding: 6px 10px;

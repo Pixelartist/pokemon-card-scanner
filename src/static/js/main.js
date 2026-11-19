@@ -3451,6 +3451,35 @@ document.addEventListener('DOMContentLoaded', () => {
 // ============================================
 let setsData = [];
 let setsSearchQuery = '';
+let setsLanguage = 'all';
+let setsEra = 'all';
+
+const SET_LANGUAGE_LABELS = {
+    en: 'English',
+    de: 'German',
+    fr: 'French',
+    es: 'Spanish',
+    it: 'Italian',
+    pt: 'Portuguese',
+    ja: 'Japanese'
+};
+
+// Set codes carry their language as a prefix (de_sv01); plain codes are English.
+function setLanguage(set) {
+    const code = String(set.code || set.id || '').toLowerCase();
+    if (!code.includes('_')) return 'en';
+    return code.split('_')[0] || 'en';
+}
+
+function setReleaseYear(set) {
+    const match = /^(\d{4})/.exec(String(set.release_date || ''));
+    return match ? Number(match[1]) : 0;
+}
+
+function setEra(set) {
+    const year = setReleaseYear(set);
+    return year ? `${Math.floor(year / 10) * 10}s` : 'undated';
+}
 
 async function loadSets() {
     const grid = document.getElementById('sets-grid');
@@ -3473,6 +3502,7 @@ async function loadSets() {
             return dateB - dateA;
         });
 
+        buildSetFilters();
         renderSets();
     } catch (error) {
         console.error('Error loading sets:', error);
@@ -3480,19 +3510,49 @@ async function loadSets() {
     }
 }
 
+// Fill the filter dropdowns from whatever the catalogue actually contains, so
+// no option can come back empty and new languages/decades appear on their own.
+function buildSetFilters() {
+    const languageSelect = document.getElementById('sets-language');
+    if (languageSelect) {
+        const languages = [...new Set(setsData.map(setLanguage))].sort((a, b) =>
+            (SET_LANGUAGE_LABELS[a] || a).localeCompare(SET_LANGUAGE_LABELS[b] || b)
+        );
+        languageSelect.innerHTML = '<option value="all">All languages</option>' +
+            languages.map(code => `<option value="${code}">${SET_LANGUAGE_LABELS[code] || code.toUpperCase()}</option>`).join('');
+        languageSelect.value = languages.includes(setsLanguage) ? setsLanguage : 'all';
+        setsLanguage = languageSelect.value;
+    }
+
+    const eraSelect = document.getElementById('sets-era');
+    if (eraSelect) {
+        const eras = [...new Set(setsData.map(setEra))];
+        const decades = eras.filter(era => era !== 'undated').sort().reverse();
+        if (eras.includes('undated')) decades.push('undated');
+        eraSelect.innerHTML = '<option value="all">All dates</option>' +
+            decades.map(era => `<option value="${era}">${era === 'undated' ? 'No date' : era}</option>`).join('');
+        eraSelect.value = decades.includes(setsEra) ? setsEra : 'all';
+        setsEra = eraSelect.value;
+    }
+}
+
 function renderSets() {
     const grid = document.getElementById('sets-grid');
     if (!grid) return;
 
-    let filtered = setsData;
-    if (setsSearchQuery) {
-        const query = setsSearchQuery.toLowerCase();
-        filtered = setsData.filter(s =>
-            s.name.toLowerCase().includes(query) ||
-            s.code.toLowerCase().includes(query) ||
-            (s.series && s.series.toLowerCase().includes(query))
-        );
-    }
+    const query = setsSearchQuery.trim().toLowerCase();
+    const filtered = setsData.filter(set => {
+        if (query) {
+            const haystack = `${set.name || ''} ${set.code || ''} ${set.series || ''}`.toLowerCase();
+            if (!haystack.includes(query)) return false;
+        }
+        if (setsLanguage !== 'all' && setLanguage(set) !== setsLanguage) return false;
+        if (setsEra !== 'all' && setEra(set) !== setsEra) return false;
+        return true;
+    });
+
+    const count = document.getElementById('sets-count');
+    if (count) count.textContent = `${filtered.length} of ${setsData.length} sets`;
 
     if (filtered.length === 0) {
         grid.innerHTML = '<div class="no-sets"><p>No sets found</p></div>';
@@ -3643,6 +3703,25 @@ function initSets() {
                 setsSearchQuery = e.target.value;
                 renderSets();
             }, 300);
+        });
+    }
+
+    // Setup filters (bound once — the tab can be re-activated)
+    const languageSelect = document.getElementById('sets-language');
+    if (languageSelect && !languageSelect.dataset.bound) {
+        languageSelect.dataset.bound = '1';
+        languageSelect.addEventListener('change', (e) => {
+            setsLanguage = e.target.value;
+            renderSets();
+        });
+    }
+
+    const eraSelect = document.getElementById('sets-era');
+    if (eraSelect && !eraSelect.dataset.bound) {
+        eraSelect.dataset.bound = '1';
+        eraSelect.addEventListener('change', (e) => {
+            setsEra = e.target.value;
+            renderSets();
         });
     }
 }

@@ -334,6 +334,17 @@
                         <div class="search-box">
                             <input type="text" id="sets-search" placeholder="Search sets...">
                         </div>
+                        <div class="sets-filters">
+                            <label for="sets-language">Language</label>
+                            <select id="sets-language">
+                                <option value="all">All languages</option>
+                            </select>
+                            <label for="sets-era">Released</label>
+                            <select id="sets-era">
+                                <option value="all">All dates</option>
+                            </select>
+                            <span id="sets-count" class="sets-count"></span>
+                        </div>
                     </div>
                     <div id="sets-grid" class="sets-grid grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                         <div class="loading">
