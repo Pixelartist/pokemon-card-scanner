@@ -280,6 +280,15 @@ if os.path.exists(german_images_dir):
     placeholder_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/static/images", StaticFiles(directory=placeholder_dir), name="placeholder_images")
 
+# Mount set logos/symbols (scripts/fetch_set_images.py writes them to data/images/sets)
+# Windows' mimetypes registry has no .webp, so StaticFiles would label the set
+# logos application/octet-stream and some browsers refuse to render them.
+import mimetypes
+mimetypes.add_type("image/webp", ".webp")
+sets_images_dir = DATA_ROOT / "images" / "sets"
+if sets_images_dir.exists():
+    app.mount("/static/sets", StaticFiles(directory=sets_images_dir), name="set_images")
+
 # Mount static files (JS, CSS, etc.) - MUST be after /static/clip_images
 if os.path.exists(static_dir):
     class NoCacheStaticFiles(StaticFiles):
@@ -919,6 +928,102 @@ async def get_stats(current_user: UserResponse = Depends(get_current_user)):
     return collection_service.get_stats(user_id=current_user.id)
 
 
+_SET_IMAGES_CACHE: dict = {}
+
+
+def _local_set_images() -> dict:
+    """ptcg_id (lowercase, de_ prefix dropped) -> {"logo": url, "symbol": url}.
+
+    Built once from the sets table, which scripts/fetch_set_images.py fills with
+    the TCGdex artwork it downloaded to data/images/sets.
+    """
+    if _SET_IMAGES_CACHE:
+        return _SET_IMAGES_CACHE
+    try:
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT ptcg_id, images FROM sets WHERE images IS NOT NULL AND images != ''"
+            ).fetchall()
+        finally:
+            conn.close()
+        for row in rows:
+            try:
+                images = json.loads(row["images"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(images, dict):
+                continue
+            code = (row["ptcg_id"] or "").lower()
+            if code.startswith("de_"):
+                code = code[3:]
+            _SET_IMAGES_CACHE[code] = images
+    except Exception as e:
+        logger.warning(f"set image index failed: {e}")
+    return _SET_IMAGES_CACHE
+
+
+def _annotate_set_images(sets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach locally cached set artwork to each set in a listing."""
+    index = _local_set_images()
+    for s in sets:
+        code = str(s.get("code") or s.get("id") or "").lower()
+        if code.startswith("de_"):
+            code = code[3:]
+        existing = s.get("images") if isinstance(s.get("images"), dict) else {}
+        images = {**existing, **(index.get(code) or {})}
+        if not images:
+            continue
+        s["images"] = images
+        s["logo_url"] = images.get("logo")
+        s["symbol_url"] = images.get("symbol")
+    return sets
+
+
+def _local_set_card_counts(codes: List[str]) -> Dict[str, int]:
+    """ptcg_id -> number of cards actually stored for those sets."""
+    if not codes:
+        return {}
+    try:
+        conn = get_db_connection()
+        try:
+            placeholders = ",".join("?" for _ in codes)
+            rows = conn.execute(
+                f"SELECT s.ptcg_id, COUNT(c.id) AS n FROM sets s "
+                f"LEFT JOIN cards c ON c.set_id = s.id "
+                f"WHERE LOWER(s.ptcg_id) IN ({placeholders}) GROUP BY s.id",
+                codes,
+            ).fetchall()
+        finally:
+            conn.close()
+        return {(row["ptcg_id"] or "").lower(): row["n"] for row in rows}
+    except Exception as e:
+        logger.warning(f"set card counts failed: {e}")
+        return {}
+
+
+def _annotate_set_totals(sets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Replace unusable TCGdex set sizes with what is actually stored locally.
+
+    TCGdex reports cardCount.total = 1 for a handful of German sets whose card
+    list it never filled in (de_30th, de_sv03, ...), which the Sets tab showed
+    as "1 card". Only counts that low are replaced, so official sizes stand.
+    """
+    missing = []
+    for s in sets:
+        if (s.get("total") or 0) > 1:
+            continue
+        code = str(s.get("code") or s.get("id") or "").lower()
+        if code:
+            missing.append((code, s))
+    counts = _local_set_card_counts([code for code, _ in missing])
+    for code, s in missing:
+        local = counts.get(code) or 0
+        if local > (s.get("total") or 0):
+            s["total"] = local
+    return sets
+
+
 @app.get("/api/sets")
 async def get_sets():
     """Get all available sets."""
@@ -930,7 +1035,7 @@ async def get_sets():
         client = get_client()
         sets = client.get_sets()
         if sets:
-            return {"sets": sets}
+            return {"sets": _annotate_set_totals(_annotate_set_images(sets))}
     except Exception as e:
         import logging
         logging.warning(f"API sets fetch failed: {e}")
@@ -958,7 +1063,7 @@ async def get_sets():
                         'symbol_url': None,
                         'logo_url': None,
                     })
-                return {"sets": api_format_sets}
+                return {"sets": _annotate_set_totals(_annotate_set_images(api_format_sets))}
     except Exception as e:
         import logging
         logging.error(f"Failed to load cached sets: {e}")
@@ -1079,6 +1184,13 @@ async def get_set_cards(set_code: str):
             "images": {"small": small, "large": large},
         })
 
+    try:
+        set_images = json.loads(set_row["images"]) if set_row["images"] else {}
+    except (TypeError, ValueError):
+        set_images = {}
+    if not isinstance(set_images, dict):
+        set_images = {}
+
     return {
         "set": {
             "id": set_row["id"],
@@ -1087,6 +1199,9 @@ async def get_set_cards(set_code: str):
             "series": set_row["series"],
             "release_date": set_row["release_date"],
             "total_cards": set_row["total_cards"],
+            "images": set_images,
+            "logo_url": set_images.get("logo"),
+            "symbol_url": set_images.get("symbol"),
         },
         "cards": cards,
         "total": len(cards),

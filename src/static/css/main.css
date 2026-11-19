@@ -274,8 +274,7 @@ p { color: var(--muted); }
 .candidate-set,
 .candidate-number,
 .set-item-total,
-.set-item-date,
-.set-item-code {
+.set-item-date {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.14em;
@@ -1614,6 +1613,11 @@ select {
 }
 .set-item:hover { border-color: var(--gold); background: #172136; }
 
+.set-item-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.set-item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.set-item-logo { height: 34px; width: auto; max-width: 150px; flex: none; object-fit: contain; object-position: left center; }
+
+
 .set-symbol, .set-symbol-placeholder {
   width: 26px;
   height: 26px;
@@ -1686,7 +1690,7 @@ select {
   margin-bottom: 18px;
   overflow: hidden;
 }
-.set-hero-img { width: 68px; height: 68px; object-fit: contain; }
+.set-hero-img { width: auto; height: 64px; max-width: 240px; object-fit: contain; }
 .set-hero-overlay { position: absolute; inset: 0; background: none; pointer-events: none; }
 
 .set-meta { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px; }

@@ -44,6 +44,21 @@
             border: 1px solid var(--border);
         }
 
+        .set-header-main {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            min-width: 0;
+        }
+
+        .set-logo {
+            height: 64px;
+            width: auto;
+            max-width: 240px;
+            flex: none;
+            object-fit: contain;
+        }
+
         .set-header h1 {
             font-size: 2rem;
             margin: 0 0 15px 0;
@@ -242,17 +257,28 @@
                     cardsHtml = '<div class="error-set"><p>No cards found in this set.</p></div>';
                 }
 
+                const setImages = set.images || {};
+                const setMark = setImages.logo || setImages.symbol || '';
+
                 container.innerHTML = `
                     <div class="set-header">
-                        <h1>${set.name || setCode}</h1>
-                        <div class="set-meta">
-                            ${set.series
-                                ? `<div class="set-meta-item"><span class="set-meta-label">Series:</span> ${set.series}</div>`
+                        <div class="set-header-main">
+                            ${setMark
+                                ? `<img class="set-logo" src="${setMark}" alt="${set.name || setCode} set logo">`
                                 : ''
                             }
-                            <div class="set-meta-item"><span class="set-meta-label">Released:</span> ${releaseDate}</div>
-                            <div class="set-meta-item"><span class="set-meta-label">Total Cards:</span> ${set.total_cards || cards.length}</div>
-                            <div class="set-meta-item"><span class="set-meta-label">In Database:</span> ${cards.length}</div>
+                            <div>
+                                <h1>${set.name || setCode}</h1>
+                                <div class="set-meta">
+                                    ${set.series
+                                        ? `<div class="set-meta-item"><span class="set-meta-label">Series:</span> ${set.series}</div>`
+                                        : ''
+                                    }
+                                    <div class="set-meta-item"><span class="set-meta-label">Released:</span> ${releaseDate}</div>
+                                    <div class="set-meta-item"><span class="set-meta-label">Total Cards:</span> ${set.total_cards || cards.length}</div>
+                                    <div class="set-meta-item"><span class="set-meta-label">In Database:</span> ${cards.length}</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 

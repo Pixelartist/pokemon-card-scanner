@@ -3499,17 +3499,35 @@ function renderSets() {
         return;
     }
 
-    grid.innerHTML = filtered.map(set => `
+    grid.innerHTML = filtered.map(set => {
+        // The corner symbol is a square, so it fits beside the name without
+        // eating it; the wide logo stands in when a set only has one of the two.
+        const setImages = set.images || {};
+        const logoUrl = setImages.logo || '';
+        const symbolUrl = setImages.symbol || '';
+        const mark = symbolUrl
+            ? `<img class="set-symbol" src="${symbolUrl}" alt="" loading="lazy">`
+            : (logoUrl
+                ? `<img class="set-item-logo" src="${logoUrl}" alt="" loading="lazy">`
+                : `<span class="set-symbol-placeholder">${(set.code || '?').slice(0, 3).toUpperCase()}</span>`);
+
+        return `
         <div class="set-item" onclick="showSetView('${set.code}')">
             <div class="set-item-header">
                 <span class="set-item-code">${set.code}</span>
                 ${set.total ? `<span class="set-item-total">${set.total} cards</span>` : ''}
             </div>
-            <div class="set-item-name">${set.name}</div>
-            ${set.series ? `<div class="set-item-series">${set.series}</div>` : ''}
+            <div class="set-item-main">
+                ${mark}
+                <div class="set-item-text">
+                    <div class="set-item-name">${set.name}</div>
+                    ${set.series ? `<div class="set-item-series">${set.series}</div>` : ''}
+                </div>
+            </div>
             ${set.release_date ? `<div class="set-item-date">${new Date(set.release_date).toLocaleDateString()}</div>` : ''}
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 async function showSetView(setCode) {
@@ -3571,17 +3589,23 @@ async function showSetView(setCode) {
             cardsHtml = '<div class="no-cards">No cards found in this set.</div>';
         }
 
+        const setImages = set.images || {};
+        const setMark = setImages.logo || setImages.symbol || '';
+
         content.innerHTML = `
-            <div class="set-header">
-                <h2>${set.name || setCode}</h2>
-                <div class="set-meta">
-                    ${set.series ? `<span class="set-meta-item"><strong>Series:</strong> ${set.series}</span>` : ''}
-                    ${set.release_date
-                        ? `<span class="set-meta-item"><strong>Released:</strong> ${new Date(set.release_date).toLocaleDateString()}</span>`
-                        : ''
-                    }
-                    <span class="set-meta-item"><strong>Total:</strong> ${totalCards} cards</span>
-                    <span class="set-meta-item"><strong>In Database:</strong> ${cards.length} cards</span>
+            <div class="set-hero">
+                ${setMark ? `<img class="set-hero-img" src="${setMark}" alt="${set.name || setCode} set logo" loading="lazy">` : ''}
+                <div>
+                    <h2>${set.name || setCode}</h2>
+                    <div class="set-meta">
+                        ${set.series ? `<span class="set-meta-item"><strong>Series:</strong> ${set.series}</span>` : ''}
+                        ${set.release_date
+                            ? `<span class="set-meta-item"><strong>Released:</strong> ${new Date(set.release_date).toLocaleDateString()}</span>`
+                            : ''
+                        }
+                        <span class="set-meta-item"><strong>Total:</strong> ${totalCards} cards</span>
+                        <span class="set-meta-item"><strong>In Database:</strong> ${cards.length} cards</span>
+                    </div>
                 </div>
             </div>
             <div class="set-cards-header">
