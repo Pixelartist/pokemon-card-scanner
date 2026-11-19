@@ -289,6 +289,11 @@ sets_images_dir = DATA_ROOT / "images" / "sets"
 if sets_images_dir.exists():
     app.mount("/static/sets", StaticFiles(directory=sets_images_dir), name="set_images")
 
+# Booster pack art used as the set-box backdrop (scripts/fetch_booster_art.py)
+booster_images_dir = DATA_ROOT / "images" / "boosters"
+if booster_images_dir.exists():
+    app.mount("/static/boosters", StaticFiles(directory=booster_images_dir), name="booster_images")
+
 # Mount static files (JS, CSS, etc.) - MUST be after /static/clip_images
 if os.path.exists(static_dir):
     class NoCacheStaticFiles(StaticFiles):
@@ -963,20 +968,46 @@ def _local_set_images() -> dict:
     return _SET_IMAGES_CACHE
 
 
+_BOOSTER_INDEX: Dict[str, List[str]] = {}
+
+
+def _local_booster_art() -> Dict[str, List[str]]:
+    """set code -> booster art paths, written by scripts/fetch_booster_art.py.
+
+    The manifest is the single store for pack art: unlike the sets table it
+    also covers sets that never got a row there (older Japanese sets).
+    """
+    if _BOOSTER_INDEX:
+        return _BOOSTER_INDEX
+    try:
+        index_path = DATA_ROOT / "cache" / "booster_art.json"
+        if index_path.exists():
+            with open(index_path) as f:
+                for code, files in json.load(f).items():
+                    _BOOSTER_INDEX[code.lower()] = files
+    except Exception as e:
+        logger.warning(f"booster art index failed: {e}")
+    return _BOOSTER_INDEX
+
+
 def _annotate_set_images(sets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Attach locally cached set artwork to each set in a listing."""
     index = _local_set_images()
+    boosters = _local_booster_art()
     for s in sets:
         code = str(s.get("code") or s.get("id") or "").lower()
         if code.startswith("de_"):
             code = code[3:]
         existing = s.get("images") if isinstance(s.get("images"), dict) else {}
         images = {**existing, **(index.get(code) or {})}
+        if boosters.get(code):
+            images["boosters"] = boosters[code]
         if not images:
             continue
         s["images"] = images
         s["logo_url"] = images.get("logo")
         s["symbol_url"] = images.get("symbol")
+        s["booster_urls"] = images.get("boosters") or []
     return sets
 
 

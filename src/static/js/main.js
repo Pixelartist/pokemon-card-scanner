@@ -3536,6 +3536,20 @@ function buildSetFilters() {
     }
 }
 
+// A set owns several pack arts; pick one per page view so the wall of boxes
+// looks varied without reshuffling whenever a filter re-renders the grid.
+const SET_ART_PICKS = new Map();
+
+function setArtUrl(set) {
+    const boosters = (set.images && set.images.boosters) || [];
+    if (!boosters.length) return '';
+    const key = set.code || set.id;
+    if (!SET_ART_PICKS.has(key)) {
+        SET_ART_PICKS.set(key, boosters[Math.floor(Math.random() * boosters.length)]);
+    }
+    return SET_ART_PICKS.get(key);
+}
+
 function renderSets() {
     const grid = document.getElementById('sets-grid');
     if (!grid) return;
@@ -3560,31 +3574,32 @@ function renderSets() {
     }
 
     grid.innerHTML = filtered.map(set => {
-        // The corner symbol is a square, so it fits beside the name without
-        // eating it; the wide logo stands in when a set only has one of the two.
+        // Symbol and logo share one fixed-height slot so every box lines up,
+        // whatever the artwork's proportions are.
         const setImages = set.images || {};
         const logoUrl = setImages.logo || '';
         const symbolUrl = setImages.symbol || '';
         const mark = symbolUrl
-            ? `<img class="set-symbol" src="${symbolUrl}" alt="" loading="lazy">`
-            : (logoUrl
-                ? `<img class="set-item-logo" src="${logoUrl}" alt="" loading="lazy">`
-                : `<span class="set-symbol-placeholder">${(set.code || '?').slice(0, 3).toUpperCase()}</span>`);
+            ? `<img class="set-mark-symbol" src="${symbolUrl}" alt="" loading="lazy" decoding="async">`
+            : (logoUrl ? `<img src="${logoUrl}" alt="" loading="lazy" decoding="async">` : '');
+        const artUrl = setArtUrl(set);
+        const released = set.release_date
+            ? new Date(set.release_date).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
+            : '';
 
         return `
         <div class="set-item" onclick="showSetView('${set.code}')">
-            <div class="set-item-header">
-                <span class="set-item-code">${set.code}</span>
-                ${set.total ? `<span class="set-item-total">${set.total} cards</span>` : ''}
-            </div>
-            <div class="set-item-main">
-                ${mark}
-                <div class="set-item-text">
-                    <div class="set-item-name">${set.name}</div>
-                    ${set.series ? `<div class="set-item-series">${set.series}</div>` : ''}
+            ${artUrl ? `<img class="set-item-art" src="${artUrl}" alt="" loading="lazy" decoding="async">` : ''}
+            <div class="set-item-body">
+                <span class="set-mark">${mark}</span>
+                <div class="set-item-name">${set.name}</div>
+                ${(set.series && set.series !== set.code) ? `<div class="set-item-series">${set.series}</div>` : ''}
+                <div class="set-item-foot">
+                    ${set.total ? `<span class="set-item-total">${set.total} cards</span>` : ''}
+                    ${(set.total && released) ? '<span class="set-item-dot">·</span>' : ''}
+                    ${released ? `<span class="set-item-date">${released}</span>` : ''}
                 </div>
             </div>
-            ${set.release_date ? `<div class="set-item-date">${new Date(set.release_date).toLocaleDateString()}</div>` : ''}
         </div>
     `;
     }).join('');

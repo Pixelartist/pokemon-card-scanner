@@ -1595,17 +1595,19 @@ select {
 
 .sets-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
   gap: 10px;
 }
 
+/* Set box: pack artwork fades in from the right, the human set name takes the
+   top-left slot the technical code used to hold. */
 .set-item {
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  gap: 5px;
-  min-height: 92px;
-  padding: 11px 12px;
+  min-height: 130px;
+  padding: 12px 14px;
   border: 1px solid var(--line);
   background: var(--panel);
   cursor: pointer;
@@ -1613,52 +1615,92 @@ select {
 }
 .set-item:hover { border-color: var(--gold); background: #172136; }
 
-.set-item-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.set-item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.set-item-logo { height: 34px; width: auto; max-width: 150px; flex: none; object-fit: contain; object-position: left center; }
+.set-item-art {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 44%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 28%;
+  opacity: 0.85;
+  pointer-events: none;
+  transition: opacity 120ms linear;
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, rgba(0, 0, 0, 0.35) 30%, #000 72%);
+  mask-image: linear-gradient(to right, transparent 0%, rgba(0, 0, 0, 0.35) 30%, #000 72%);
+}
+.set-item:hover .set-item-art { opacity: 1; }
 
-
-.set-symbol, .set-symbol-placeholder {
-  width: 26px;
-  height: 26px;
-  flex: none;
-  border: 1px solid var(--line);
-  background: #0a0f1c;
-  display: grid;
-  place-items: center;
-  font-size: 9px;
-  color: var(--muted-dim);
-  object-fit: contain;
+.set-item-body {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  height: 100%;
+  padding-right: 24%;
 }
 
-.set-item-header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+/* One footprint for every mark, so wide logos and square symbols line up. */
+.set-mark { display: flex; align-items: center; height: 28px; margin-bottom: 7px; }
+.set-mark img { max-height: 100%; max-width: 92px; width: auto; height: auto; object-fit: contain; }
+.set-mark-symbol { width: 28px; height: 28px; }
+.set-mark-code {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  background: #0a0f1c;
+  font-size: 9px;
+  color: var(--muted-dim);
+}
+
 .set-item-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 1.25;
   color: var(--paper);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.set-item-series {
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 2px;
 }
-.set-item-code {
-  font-size: 10px;
+.set-item-foot {
+  margin-top: auto;
+  padding-top: 10px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.set-item-total {
+  font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--gold);
   white-space: nowrap;
 }
-.set-item-total { font-size: 9px; white-space: nowrap; color: var(--muted-dim); }
-.set-item-date { font-size: 9px; color: var(--muted-dim); }
-.set-item-series {
-  font-size: 10px;
-  color: var(--muted);
+.set-item-date {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-dim);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
+.set-item-dot { font-size: 9.5px; color: var(--line-strong); }
 .set-item-badges { display: flex; gap: 4px; flex-wrap: wrap; }
 
 .sets-filters {
