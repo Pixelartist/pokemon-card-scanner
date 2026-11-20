@@ -1117,6 +1117,17 @@ const REGION_TOLERANCE = 0.35;   // how far the quad may drift between frames
 // held by hand moves a few percent of the bits.
 const APPEARANCE_MAX = 0.25;
 
+// A candidate can arrive with no `card.images` and no `image_url` at all — the
+// German/local index only fills `img` — and an empty src renders as a broken
+// image, not as "no picture". Ask every field the matcher fills, in the order
+// the rest of the UI prefers them, and land on the placeholder rather than ''.
+function cardImageSrc(c, size = 'large') {
+  if (!c) return '/static/images/placeholder.png';
+  return c.card?.images?.[size] || c.card?.images?.small
+    || c.image_url || c.img || c.image
+    || '/static/images/placeholder.png';
+}
+
 function noteNearMiss(data) {
   const pool = (data && data.candidates && data.candidates.length)
     ? data.candidates
@@ -1144,7 +1155,7 @@ function noteNearMiss(data) {
     name: guess ? `Unidentified — looks like ${guess.name}` : 'Unidentified card',
     meta: [guess && (guess.number || (guess.set && guess.set.name)),
            `best ${Math.round(best * 100)}%`].filter(Boolean).join(' · '),
-    img: guess ? (guess.image_url || guess.card?.images?.large || '') : '',
+    img: guess ? cardImageSrc(guess) : '',
     score: best,
     source: 'near_miss',
     scan: (data && data.scan_image_path) || lastScanImages?.scan_image_path || null,
@@ -1212,7 +1223,7 @@ function displayScanResult(data, container) {
                 <h3>Card Identified</h3>
                 <div class="card-main">
                     <div class="card-image">
-                        <img src="${card.card?.images?.large || card.image_url || ''}" alt="${card.name}">
+                        <img src="${cardImageSrc(card)}" alt="${card.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
                     </div>
                     <div class="card-details">
                         <div class="card-name">${card.name}</div>
@@ -1236,7 +1247,7 @@ function displayScanResult(data, container) {
         data.candidates.forEach(candidate => {
             html += `
                 <div class="candidate" onclick="showCandidateDetail('${candidate.id}', 'picked')">
-                    <img src="${candidate.card?.images?.small || candidate.image_url || candidate.image || '/static/images/placeholder.png'}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
+                    <img src="${cardImageSrc(candidate, 'small')}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
                     <div class="candidate-name">${candidate.name}</div>
                     <div class="candidate-number">${candidate.number || ''}</div>
                 </div>
@@ -1256,7 +1267,7 @@ function displayScanResult(data, container) {
         id: c.id,
         name: c.name || c.id,
         meta: [c.number, c.rarity, c.set?.name].filter(Boolean).join(' · '),
-        img: c.card?.images?.large || c.image_url || c.image || '',
+        img: cardImageSrc(c),
         score: c.similarity || 0,
         source: 'cloud',
         scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
@@ -1908,7 +1919,7 @@ function queueCandidates(list) {
     name: c.name || c.id,
     number: c.number || '',
     set: (c.set && (c.set.name || c.set)) || c.set_name || '',
-    img: c.card?.images?.small || c.image_url || c.image || '',
+    img: cardImageSrc(c, 'small'),
     score: c.similarity || 0,
   }));
 }
@@ -1918,7 +1929,7 @@ function updateScanOverlay(c) {
   const el = document.getElementById('scan-overlay-result');
   if (!el || !c) return;
   el.innerHTML = `
-    ${c.card?.images?.small || c.image_url || c.image ? `<img src="${c.card?.images?.small || c.image_url || c.image}" alt="">` : ''}
+    ${cardImageSrc(c, 'small') ? `<img src="${cardImageSrc(c, 'small')}" alt="">` : ''}
     <div>
       <div class="so-name">${c.name || c.id}</div>
       <div class="so-meta">${[c.number, c.rarity, c.set?.name].filter(Boolean).join(' · ')}</div>
@@ -2682,11 +2693,13 @@ displayScanResult = async function(data, container) {
                 }
             });
             const details = await response.json();
+            // A guest scan, or a card the details endpoint does not hold, answers
+            // without basic_info. Rendering that threw halfway through this block
+            // and left the card frame blank, so fall back to the plain renderer.
+            if (!details.basic_info) throw new Error('details unavailable');
             const detailImg = details.basic_info.images?.large
                 || details.basic_info.images?.small
-                || card.image_url
-                || card.card?.images?.large
-                || '';
+                || cardImageSrc(card);
             
             container.innerHTML = `
                 <div class="card-result">
@@ -2708,9 +2721,9 @@ displayScanResult = async function(data, container) {
                             <div class="card-actions" style="margin-top: 20px;">
                                 ${ownedQty > 0 ? `
                                     <div class="owned-badge">✓ In Collection · ${ownedQty}×</div>
-                                    <button class="btn btn-secondary" onclick="addToCollection('${cardId}', null, '${source}')">+ Add Another</button>
+                                    <button class="btn btn-secondary" onclick="addToCollection('${cardId}', null, 'accepted')">+ Add Another</button>
                                 ` : `
-                                    <button class="btn btn-primary" onclick="addToCollection('${cardId}', null, '${source}')">Add to Collection</button>
+                                    <button class="btn btn-primary" onclick="addToCollection('${cardId}', null, 'accepted')">Add to Collection</button>
                                 `}
                                 <button class="btn btn-secondary" onclick="showEnhancedCardDetail('${cardId}')">View Details</button>
                             </div>
@@ -2744,7 +2757,7 @@ displayScanResult = async function(data, container) {
             if (data.candidates.length > 1) {
                 const rows = data.candidates.slice(1).map(candidate => `
                         <div class="candidate" onclick="showCandidateDetail('${candidate.id}')">
-                            <img src="${candidate.card?.images?.small || candidate.image_url || candidate.image || '/static/images/placeholder.png'}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
+                            <img src="${cardImageSrc(candidate, 'small')}" alt="${candidate.name}" onerror="this.src='/static/images/placeholder.png'; this.onerror=null;">
                             <div class="candidate-name">${candidate.name}</div>
                             <div class="candidate-number">${candidate.number || ''}</div>
                         </div>
