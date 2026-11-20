@@ -731,6 +731,7 @@ window.__cardScanner = {
         if (verdict.ok) {
           this._lastReject = null;
           if (best.cropDataUrl) this._lastCropDataUrl = best.cropDataUrl;
+          if (best.cropThumb) this._lastCropThumb = best.cropThumb;
           return { ...best, agreement: agreeing.length, frames: frames.length };
         }
         this._lastReject = verdict;
@@ -748,11 +749,13 @@ window.__cardScanner = {
       if (verdict.ok) {
         this._lastReject = null;
         if (single.cropDataUrl) this._lastCropDataUrl = single.cropDataUrl;
+        if (single.cropThumb) this._lastCropThumb = single.cropThumb;
         return { ...single, agreement: 1, frames: frames.length };
       }
       this._lastReject = verdict;
     }
     this._lastCropDataUrl = null;
+    this._lastCropThumb = null;
     return { noCard: true, candidates: [], nearMiss: [],
              bestSimilarity: (hits[0]?.bestSimilarity || 0), frames: frames.length };
   },
@@ -811,6 +814,7 @@ window.__cardScanner = {
       if (!verdict.ok) {
         this._lastReject = verdict;   // shown by the no-card UI
         this._lastCropDataUrl = null;
+        this._lastCropThumb = null;
         return { noCard: true, bestSimilarity: (uniq[0]?.similarity || 0) / 100,
                  candidates: [], nearMiss: [], reject: verdict };
       }
@@ -847,10 +851,13 @@ window.__cardScanner = {
     // /api/scan — the server stores it directly instead of re-detecting on
     // the raw frame (which produced garbage 140x175 crops of table edges).
     if (cropDataUrl) this._lastCropDataUrl = cropDataUrl;
+    const cropThumb = queueThumbnail(crop);
+    if (cropThumb) this._lastCropThumb = cropThumb;
     return {
       detection: det,
       bestSimilarity,
       cropDataUrl,
+      cropThumb,
       cropCanvas: crop,
       queryHash,
       // quickdraw never discards a near-miss: it stashes the best guesses so the
@@ -942,8 +949,9 @@ if (scanBtn) {
                             // The crop this frame produced, so the review row keeps
                             // its own photo: with no image of its own it fell back
                             // to the last upload's crop and every "Not this"
-                            // comparison showed that one card.
-                            crop_data_url: res.cropDataUrl || null,
+                            // comparison showed that one card. The thumbnail, not
+                            // the full crop — see QUEUE_THUMB_WIDTH.
+                            crop_data_url: res.cropThumb || null,
                             meta: { source: 'browser_hash' },
                         }, document.getElementById('scan-result'));
                         return;
@@ -1117,6 +1125,30 @@ const REGION_TOLERANCE = 0.35;   // how far the quad may drift between frames
 // held by hand moves a few percent of the bits.
 const APPEARANCE_MAX = 0.25;
 
+// The queue exists so the comparison dialog can show the photo you took, and
+// that dialog draws it at a few hundred pixels. Keeping the full crop instead
+// cost 150-260 KB per row, so a few dozen scans filled the 5 MB localStorage
+// budget and RQ.save started dropping the oldest rows to make room. 360 px wide
+// at quality 0.6 measures ~25 KB — still sharp at the size the dialog uses.
+const QUEUE_THUMB_WIDTH = 360;
+const QUEUE_THUMB_QUALITY = 0.6;
+
+function queueThumbnail(canvas) {
+  try {
+    if (!canvas || !canvas.width || !canvas.height) return null;
+    const scale = Math.min(1, QUEUE_THUMB_WIDTH / canvas.width);
+    const thumb = document.createElement('canvas');
+    thumb.width = Math.max(1, Math.round(canvas.width * scale));
+    thumb.height = Math.max(1, Math.round(canvas.height * scale));
+    const ctx = thumb.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(canvas, 0, 0, thumb.width, thumb.height);
+    return thumb.toDataURL('image/jpeg', QUEUE_THUMB_QUALITY);
+  } catch (e) {
+    return null;   // a queue thumbnail is a convenience; never break a scan for it
+  }
+}
+
 // A candidate can arrive with no `card.images` and no `image_url` at all — the
 // German/local index only fills `img` — and an empty src renders as a broken
 // image, not as "no picture". Ask every field the matcher fills, in the order
@@ -1148,7 +1180,8 @@ function noteNearMiss(data) {
   // upload stored, so it is only a stand-in for a frame that left no image —
   // preferring it queued every row with that one card's photo.
   const crop = (data && (data.crop_image_path || data.crop_data_url))
-    || (window.__cardScanner && window.__cardScanner._lastCropDataUrl)
+    || (window.__cardScanner && (window.__cardScanner._lastCropThumb
+                               || window.__cardScanner._lastCropDataUrl))
     || lastScanImages?.crop_image_path || null;
   if (!RQ.add({
     id,
