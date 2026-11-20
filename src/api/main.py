@@ -492,6 +492,12 @@ async def scan_card(
             lang=lang,
         )
 
+        # The cloud reader and the near-miss queue answer with id shapes the
+        # catalogue never uses ("ex14:56" for "ex14-56", or a queue key like
+        # "unknown:de_sv04-212:30"). Fix them before hydration looks them up,
+        # so the correction the user made lands on the real card.
+        _canonicalize_candidate_ids(result)
+
         # If we got candidates from offline matcher, they already have image_url and name
         # If from API, we need to hydrate with full card details
         if result.get("candidates"):
@@ -553,6 +559,82 @@ def _resolve_card_id(card_id):
     except Exception as exc:
         logger.warning("scan label: could not resolve card id %s: %s", card_id, exc)
         return card_id
+
+
+def _known_card_ids(card_ids: List[str]) -> set:
+    """Which of these ptcg ids exist in the catalogue."""
+    ids = [cid for cid in card_ids if cid]
+    if not ids:
+        return set()
+    try:
+        conn = get_db_connection()
+        try:
+            marks = ",".join("?" for _ in ids)
+            rows = conn.execute(
+                f"SELECT ptcg_id FROM cards WHERE ptcg_id IN ({marks})", ids
+            ).fetchall()
+            return {r["ptcg_id"] for r in rows}
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("scan: could not check candidate ids: %s", exc)
+        return set()
+
+
+def _canonicalize_candidate_ids(result: Dict[str, Any]) -> None:
+    """Rewrite reader id shapes onto catalogue ids, in place.
+
+    Only an id the catalogue does not know is touched, and only when its
+    canonical form does exist - so "me02.5-088" and other valid ids stay as
+    they are. The guess the reader made is kept in ``id_normalized_from``.
+    """
+    if not isinstance(result, dict):
+        return
+    candidates = result.get("candidates") or []
+    raw_ids = [str(c.get("id") or "") for c in candidates if isinstance(c, dict)]
+    raw_ids = [cid for cid in raw_ids if cid]
+    if not raw_ids:
+        return
+    try:
+        from services.misread_training import canonical_card_id
+    except Exception as exc:  # pragma: no cover - module always ships
+        logger.debug("scan: canonical ids unavailable: %s", exc)
+        return
+    changed = {}
+    for cid in set(raw_ids):
+        canon = canonical_card_id(cid)
+        if canon and canon != cid:
+            changed[cid] = canon
+    if not changed:
+        return
+    known = _known_card_ids(list(set(raw_ids) | set(changed.values())))
+    if not known:
+        return
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        cid = str(candidate.get("id") or "")
+        canon = changed.get(cid)
+        if canon and cid not in known and canon in known:
+            candidate["id"] = canon
+            candidate["id_normalized_from"] = cid
+            logger.info("scan: candidate id %s normalized to %s", cid, canon)
+
+    # Normalising can leave the same card twice (raw guess plus real id); keep
+    # the better-scoring one so the top-k is not spent on a duplicate.
+    kept: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        cid = str(candidate.get("id") or "")
+        if cid not in kept:
+            kept[cid] = candidate
+            order.append(cid)
+        elif float(candidate.get("similarity") or 0) > float(kept[cid].get("similarity") or 0):
+            kept[cid] = candidate
+    if len(order) != len(candidates):
+        result["candidates"] = [kept[cid] for cid in order]
 
 
 def _write_scan_label(scan_path, user_id, labels):
@@ -1833,9 +1915,19 @@ async def log_misread(payload: Dict[str, Any], request: Request):
             ),
         )
         conn.commit()
-        return {"status": "ok", "id": cur.lastrowid}
+        row_id = cur.lastrowid
     finally:
         conn.close()
+
+    # The matcher reads data/confuser_pairs.json on every scan. Rebuild it off
+    # the request path so this correction pins the pair without a manual run.
+    try:
+        from services.misread_training import build_confuser_index
+        threading.Thread(target=build_confuser_index, daemon=True,
+                         name="confuser-rebuild").start()
+    except Exception as exc:
+        logger.warning("confuser rebuild not started: %s", exc)
+    return {"status": "ok", "id": row_id}
 
 
 @app.get("/api/misreads")
