@@ -600,19 +600,38 @@ window.__cardScanner = {
 
   // Ask the server's fingerprint matcher whether the crop is a card at all.
   // Its distances separate what the hash cannot: on the same data/scans crops,
-  // real cards measured 0.06-0.12 and face crops 0.30-0.33.
+  // real cards measured 0.06-0.12 and face crops 0.30-0.33. One strict cutoff
+  // and no slack: the band above it was a guess, made before any refused crop
+  // had been measured, and it could only let unmeasured crops through.
+  // Returns a verdict ({ok, distance, id, name, crop, cropDataUrl}) rather than
+  // a bare boolean so a refusal can be explained on screen instead of vanishing.
   async confirmWithServer(canvas) {
     try {
       const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
       const body = new FormData();
       body.append('image', blob, 'crop.jpg');
-      const response = await fetch('/api/quickdraw/match?top_k=1', { method: 'POST', body });
-      if (!response.ok) return true;   // unknown: keep the previous behaviour
+      // `limit` tells the server which cutoff this gate applies, so it stores
+      // and returns exactly the crops the browser will refuse.
+      const response = await fetch(
+        `/api/quickdraw/match?top_k=1&limit=${MAX_SERVER_DISTANCE}`,
+        { method: 'POST', body });
+      if (!response.ok) return { ok: true, reason: 'server-unavailable' };
       const data = await response.json();
       const top = (data.candidates && data.candidates[0]) || null;
-      return !!top && top.distance <= MAX_SERVER_DISTANCE;
+      if (!top) return { ok: false, reason: 'no-candidate', crop: data.refused_crop || null };
+      const distance = Number(top.distance);
+      const ok = distance <= MAX_SERVER_DISTANCE;
+      const verdict = { ok, distance, id: top.id, name: top.name,
+                        crop: data.refused_crop || null };
+      if (!ok) {
+        // Show the exact crop that was judged: a distance alone cannot tell a
+        // soft card from a face, but its shape and border can.
+        try { verdict.cropDataUrl = canvas.toDataURL('image/jpeg', 0.8); } catch (e) {}
+        console.warn('[Scanner] server gate refused card crop', verdict);
+      }
+      return verdict;
     } catch (e) {
-      return true;                     // offline: do not block scanning
+      return { ok: true, reason: 'offline' };  // offline: do not block scanning
     }
   },
 
@@ -657,6 +676,7 @@ window.__cardScanner = {
   // the hash index, and the server fingerprint.
   async identifyWithConsensus(video) {
     if (!this.ready || !video || !video.videoWidth) return null;
+    this._lastReject = null;   // no stale reason from the previous burst
     const frames = [];
     let anchor = null;
     for (let i = 0; i < CONSENSUS_FRAMES; i++) {
@@ -705,10 +725,15 @@ window.__cardScanner = {
         // Consensus therefore gates presence, and the identity sources still
         // decide whether a card is there: a strong hash, or the server fingerprint.
         const strong = best.bestSimilarity * 100 >= MIN_TRUSTED_SIM;
-        if (strong || await this.confirmWithServer(best.cropCanvas)) {
+        const verdict = strong
+          ? { ok: true }
+          : await this.confirmWithServer(best.cropCanvas);
+        if (verdict.ok) {
+          this._lastReject = null;
           if (best.cropDataUrl) this._lastCropDataUrl = best.cropDataUrl;
           return { ...best, agreement: agreeing.length, frames: frames.length };
         }
+        this._lastReject = verdict;
       }
     }
 
@@ -718,9 +743,14 @@ window.__cardScanner = {
     // anything at all: frames that saw *different* cards are a card sliding
     // past, and no amount of server confirmation makes that one card.
     const single = hits.length === 1 ? hits[0] : null;
-    if (single && await this.confirmWithServer(single.cropCanvas)) {
-      if (single.cropDataUrl) this._lastCropDataUrl = single.cropDataUrl;
-      return { ...single, agreement: 1, frames: frames.length };
+    if (single) {
+      const verdict = await this.confirmWithServer(single.cropCanvas);
+      if (verdict.ok) {
+        this._lastReject = null;
+        if (single.cropDataUrl) this._lastCropDataUrl = single.cropDataUrl;
+        return { ...single, agreement: 1, frames: frames.length };
+      }
+      this._lastReject = verdict;
     }
     this._lastCropDataUrl = null;
     return { noCard: true, candidates: [], nearMiss: [],
@@ -773,13 +803,18 @@ window.__cardScanner = {
     // or a card that is merely hard to read would be dropped before the burst
     // and the consensus layer could see it at all.
     if (server) {
-      const corroborated = strong ||
-        (uniq.length > 0 && await this.confirmWithServer(crop));
-      if (!corroborated) {
+      const verdict = strong
+        ? { ok: true }
+        : (uniq.length
+            ? await this.confirmWithServer(crop)
+            : { ok: false, reason: 'no-hash' });
+      if (!verdict.ok) {
+        this._lastReject = verdict;   // shown by the no-card UI
         this._lastCropDataUrl = null;
         return { noCard: true, bestSimilarity: (uniq[0]?.similarity || 0) / 100,
-                 candidates: [], nearMiss: [] };
+                 candidates: [], nearMiss: [], reject: verdict };
       }
+      this._lastReject = null;
     }
     // A flat 78 cutoff passes a crowded band, so a near-threshold hit is a coin
     // flip. Requiring the top hit to lead the nearest *different* card by >= 8
@@ -882,13 +917,20 @@ if (scanBtn) {
                         // camera is the common case, and uploading its crop
                         // stored a face as an unidentified card; say so instead.
                         const auto = !!(window.__autoScan && window.__autoScan.active);
+                        const rej = window.__cardScanner && window.__cardScanner._lastReject;
                         if (!auto) {
                             const box = document.getElementById('scan-result');
-                            if (box) box.innerHTML = '<p class="error">No card detected — hold a card in front of the camera, or use Upload.</p>';
+                            if (box) box.innerHTML = rejectHtml(rej, false);
                             const ov = document.getElementById('scan-overlay-result');
-                            if (ov) ov.innerHTML = '<span class="so-empty">No card in frame</span>';
+                            if (ov) ov.innerHTML = rejectHtml(rej, true);
                         }
-                        if (auto) window.__autoScan.retry(3000);
+                        if (auto) {
+                            // Auto mode has no result panel: the overlay is the
+                            // only place the refusal can be seen.
+                            const ov = document.getElementById('scan-overlay-result');
+                            if (ov) ov.innerHTML = rejectHtml(rej, true);
+                        }
+                        if (auto) window.__autoScan.miss();
                         return;
                     }
                     if (res && res.candidates.length) {
@@ -897,6 +939,11 @@ if (scanBtn) {
                             candidates: res.candidates,
                             scan_image_path: null,
                             crop_image_path: null,
+                            // The crop this frame produced, so the review row keeps
+                            // its own photo: with no image of its own it fell back
+                            // to the last upload's crop and every "Not this"
+                            // comparison showed that one card.
+                            crop_data_url: res.cropDataUrl || null,
                             meta: { source: 'browser_hash' },
                         }, document.getElementById('scan-result'));
                         return;
@@ -1014,6 +1061,48 @@ const MIN_TRUSTED_SIM = 90;
 // 0.06-0.12, face crops 0.30-0.33, so 0.20 sits between them.
 const MAX_SERVER_DISTANCE = 0.20;
 
+// One line explaining why a detected card was refused, so the gate is visible
+// instead of a bare "no card in frame" after a 95%-confidence detection.
+function rejectReason(r) {
+  if (!r) return null;
+  if (r.distance == null || !isFinite(r.distance)) {
+    return r.reason === 'no-hash' ? 'nothing local to confirm it against'
+                                  : 'the server could not read the crop';
+  }
+  const best = r.name ? ` (closest ${r.name})` : '';
+  return `server distance ${Number(r.distance).toFixed(3)} vs limit ${MAX_SERVER_DISTANCE.toFixed(2)}${best}`;
+}
+function noCardMessage(r) {
+  r = r || (window.__cardScanner && window.__cardScanner._lastReject);
+  const why = rejectReason(r);
+  if (!why) return 'No card detected — hold a card in front of the camera, or use Upload.';
+  const saved = r.crop ? ` (saved ${r.crop})` : '';
+  return 'No card confirmed — ' + why + saved;
+}
+function noCardOverlay(r) {
+  r = r || (window.__cardScanner && window.__cardScanner._lastReject);
+  const why = rejectReason(r);
+  return why ? 'Card seen, not confirmed — ' + why : 'No card in frame';
+}
+// The crop that was refused travels with the verdict: without it the distance
+// alone cannot say whether the gate was wrong or the crop was.
+function rejectCropSrc(r) {
+  if (!r) return '';
+  if (r.cropDataUrl) return r.cropDataUrl;
+  return r.crop ? '/data/' + r.crop : '';
+}
+// Overlay and result panel both render the reason next to that crop.
+function rejectHtml(r, overlay) {
+  const why = overlay ? noCardOverlay(r) : noCardMessage(r);
+  const src = rejectCropSrc(r);
+  if (overlay) {
+    return (src ? `<img src="${src}" alt="">` : '') +
+           `<span class="so-empty">${why}</span>`;
+  }
+  return (src ? `<img class="reject-crop" src="${src}" alt="">` : '') +
+         `<p class="error">${why}</p>`;
+}
+
 // Multi-frame capture, adapted from quickdraw.cards' FrameConsensus: they never
 // accept a card from one frame, and one frame is exactly what let a face
 // through here. A capture samples a short burst and requires agreement on both
@@ -1043,9 +1132,13 @@ function noteNearMiss(data) {
   if (!guess && auto) return;              // nothing to key on; don't spam
   const id = guess ? `unknown:${guess.id}:${Math.round(best * 40)}`
                    : `unknown:frame:${Date.now()}`;
+  // The frame this verdict judged comes first: the server's stored crop, then
+  // the browser crop still in memory. `lastScanImages` is whatever the last
+  // upload stored, so it is only a stand-in for a frame that left no image —
+  // preferring it queued every row with that one card's photo.
   const crop = (data && (data.crop_image_path || data.crop_data_url))
-    || lastScanImages?.crop_image_path
-    || (window.__cardScanner && window.__cardScanner._lastCropDataUrl) || null;
+    || (window.__cardScanner && window.__cardScanner._lastCropDataUrl)
+    || lastScanImages?.crop_image_path || null;
   if (!RQ.add({
     id,
     name: guess ? `Unidentified — looks like ${guess.name}` : 'Unidentified card',
@@ -1103,9 +1196,9 @@ function displayScanResult(data, container) {
             if (inp) inp.focus();
             panel.scrollIntoView({behavior: 'smooth', block: 'center'});
         }
-        // Keep the auto-scan loop alive — a no-match frame just means the
-        // card moved; try again shortly.
-        if (window.__autoScan && window.__autoScan.active) window.__autoScan.retry(2000);
+        // This frame was a capture. Wait for the card to move instead of
+        // re-shooting the same still view.
+        if (window.__autoScan && window.__autoScan.active) window.__autoScan.miss();
         return;
     }
     
@@ -1167,17 +1260,16 @@ function displayScanResult(data, container) {
         score: c.similarity || 0,
         source: 'cloud',
         scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
-        crop: (data.crop_image_path || lastScanImages?.crop_image_path) || null,
+        crop: (data.crop_image_path || data.crop_data_url
+               || lastScanImages?.crop_image_path) || null,
         candidates: queueCandidates(data.candidates),
       })) {
         if (window.refreshReviewQueues) window.refreshReviewQueues();
       }
-      // Auto-capture loop: if the top match is confident, keep scanning
-      // (only when the camera is active — upload mode is a one-shot)
+      // Auto-capture bookkeeping: the capture that produced this match is done.
+      // Nothing is scheduled — the loop re-arms when the card moves.
       if (window.__autoScan && window.__autoScan.active) {
-        if (window.__autoScan._ready) {
-          window.__autoScan.check(c.similarity || 0, c.id);
-        }
+        window.__autoScan.check(c.similarity || 0, c.id);
       }
     } else {
       noteNearMiss(data);
@@ -1185,14 +1277,16 @@ function displayScanResult(data, container) {
       // Show the best browser-hash score so a near-miss is visible, not silent.
       const bestPct = lastBrowserBest ? ` (best ${Math.round(lastBrowserBest * 100)}%)` : '';
       if (el) el.innerHTML = `<span class="so-empty">No confident match${bestPct} — move the card closer</span>`;
-      if (window.__autoScan && window.__autoScan.active) window.__autoScan.retry(2000);
+      if (window.__autoScan && window.__autoScan.active) window.__autoScan.miss();
     }
 }
 
 // ── Auto-scan loop (cloud) ────────────────────────────────────────
-// Triggered by the toggle button. When the top CLIP match is >= 88% it
-// re-captures after a brief pause so the user can flip the card and keep
-// scanning. Upload mode is single-shot.
+// Triggered by the toggle button. A capture is taken when the live detector has
+// a stable card in view that has not been shot yet; after that the loop idles
+// until the card moves, is swapped or leaves the frame, so a card left sitting
+// under the camera is not re-captured (which strobed the shutter). Upload mode
+// is single-shot.
 window.__autoScan = {
   active: false,
   THRESHOLD: 0.88,
@@ -1205,10 +1299,33 @@ window.__autoScan = {
   _lastQuad: null,
   _lastTime: 0,
   _ready: false,
+  // One burst at a time. A capture is a 3-frame consensus that takes a second
+  // or more; without this a countdown that was already running could start a
+  // second burst and the two results would fight over the overlay. Time-boxed
+  // rather than a plain flag so a dropped result path cannot wedge the loop.
+  _busyUntil: 0,
+  _timer: 0,
+  // Empty-burst retry ladder. A burst that found nothing is retried after 1.5s,
+  // then 4s, then 10s; after that the loop stays quiet until the card moves.
+  _misses: 0,
+  _missTimer: 0,
+  _retryDelays: [1500, 4000, 10000],
+  // Armed = the card in view is worth another frame. A real capture disarms the
+  // loop. A burst that found nothing re-arms on a backoff (see miss()); a card
+  // that moves, is swapped, or leaves the frame and comes back re-arms at once
+  // and resets the backoff.
+  _armed: true,
 
   noteDetection(quad) {
     const now = Date.now();
-    if (now - this._lastTime > 1500) { this._votes = 0; this._ready = false; }
+    if (now - this._lastTime > 1500) {
+      // Nothing was detected for a full beat: the card left the frame, so the
+      // next one to settle is a new shot even if it lands in the same place.
+      this._votes = 0;
+      this._ready = false;
+      this._armed = true;
+      this._resetMisses();   // a different card gets a fresh set of retries
+    }
     this._lastTime = now;
     if (this._lastQuad && this._quadsSimilar(quad, this._lastQuad)) {
       this._votes++;
@@ -1216,8 +1333,23 @@ window.__autoScan = {
       this._votes = 1;
       this._ready = false;  // card moved = new card; demand fresh consensus
       this._lastQuad = quad;
+      this._armed = true;   // moved or swapped: worth another frame
+      this._resetMisses();  // and a fresh set of empty-burst retries
     }
-    if (this._votes >= 2) this._ready = true;
+    if (this._votes >= 2) {
+      this._ready = true;
+      // Stable, and only captured if it is not the card we already shot.
+      this._captureNow();
+    }
+  },
+
+  // Shoot the card the live detector just settled on, unless it is the one
+  // already captured or a burst is still in flight.
+  _captureNow() {
+    if (!this.active) return;
+    if (!this._armed) return;                 // same card as the last capture
+    if (Date.now() < this._busyUntil) return; // a burst is still being identified
+    this.capture(true);
   },
 
   _quadsSimilar(a, b) {
@@ -1234,26 +1366,67 @@ window.__autoScan = {
       btn.textContent = this.active ? '⏹ Auto-Scan: ON' : '▶ Auto-Scan: OFF';
       btn.classList.toggle('active', this.active);
     }
+    clearTimeout(this._timer);
+    this._timer = 0;
+    this._resetMisses();
+    this._busyUntil = 0;
     // Start the loop right away: the first capture must not wait for a
     // previous score, or the button looks like it does nothing.
-    if (this.active) { this.lastId = null; this._votes = 0; this._ready = false; this.capture(); }
+    if (this.active) { this.lastId = null; this._votes = 0; this._ready = false; this._armed = true; this._misses = 0; this.capture(true); }
   },
-  // Re-capture after a delay while auto-scan is still on. Every terminal
-  // result path (match / no-match / error) must funnel through capture()
-  // or retry(), otherwise the loop dies silently.
-  retry(ms = 2000) {
+  // Retry the same frame after a delay. Only a transient failure uses this: a
+  // normal result leaves the loop idle until the live detector sees the card
+  // move (noteDetection -> _captureNow), because re-shooting a card that is
+  // still sitting there just strobes the shutter.
+  retry(ms = 1200) {
     if (!this.active) return;
+    this._busyUntil = 0;
+    this._resetMisses();
+    clearTimeout(this._timer);
     this._startCountdown(ms);
-    setTimeout(() => this.capture(), ms);
+    this._timer = setTimeout(() => this.capture(true), ms);
   },
-  // After a successful match the scanner holds for `holdMs` so the user can
-  // swap cards; a live countdown is shown instead of a dead 2.5s pause.
-  hold(ms = 2500) {
-    if (!this.active) return;
-    this._startCountdown(ms);
-    setTimeout(() => this.capture(), ms);
+  // A burst that found nothing took no frame, so the loop must not stay
+  // disarmed for good: arming on card movement alone left a card held still
+  // un-captured forever after one empty burst (the one fired the instant
+  // Auto-Scan was toggled). Re-arming immediately every beat strobed the
+  // shutter on a card the matcher cannot read, so each empty burst buys a
+  // longer wait — miss(), 1.5s, 4s, 10s — and then the loop stays quiet until
+  // the card actually moves or is swapped (noteDetection -> _resetMisses).
+  miss() {
+    this._ready = false;
+    this._armed = false;   // only the backoff timer or a card change re-arms
+    clearTimeout(this._missTimer);
+    this._missTimer = 0;
+    const wait = this._retryDelays[this._misses];
+    if (wait === undefined) {
+      // Several empty bursts on an unmoving card: stop spending flash frames.
+      this._busyUntil = 0;
+      return;
+    }
+    this._misses++;
+    this._busyUntil = Date.now() + wait;
+    this._missTimer = setTimeout(() => {
+      this._missTimer = 0;
+      if (!this.active) return;
+      this._armed = true;
+      this._ready = false;
+    }, wait);
   },
-  // Live countdown on the scan overlay: "3… 2… 1… scanning next"
+  // The card is new: forget the backoff ladder and any pending retry, including
+  // the cooldown it pinned, so the new card is shot right away.
+  _resetMisses() {
+    this._misses = 0;
+    clearTimeout(this._missTimer);
+    this._missTimer = 0;
+    this._busyUntil = 0;
+  },
+  done() {
+    this._busyUntil = 0;
+    this._ready = false;
+  },
+  // Live countdown on the scan overlay: "3… 2… 1… scanning next". Only the
+  // transient-failure retry waits like this; a normal capture does not.
   _startCountdown(ms) {
     const overlay = document.getElementById('scan-overlay-result');
     if (!overlay) return;
@@ -1269,41 +1442,60 @@ window.__autoScan = {
     };
     tick();
   },
-  // Capture a fresh frame and identify it. The result handler calls check()
-  // and, on a high-confidence match, calls capture() again.
-  capture() {
+  // Capture a fresh frame and identify it. The result handler releases the loop
+  // (check/done); the next capture is triggered by the live detector seeing the
+  // card change, not by this frame finishing.
+  capture(force = false) {
     if (!this.active) return;
+    // Retire the queued countdown first: from here on the burst (or its early
+    // return) owns the loop, so a stale timer id must not block _captureNow().
+    clearTimeout(this._timer);
+    this._timer = 0;
     // Only auto-capture from the live camera; upload mode is one-shot.
     const cam = document.getElementById('camera-section');
     if (!cam || cam.classList.contains('hidden')) return;
+    if (Date.now() < this._busyUntil) return;
+    // The card in front of the camera has not changed since it was captured.
+    if (!force && !this._armed) return;
+    // Nothing in frame: a burst would spend a detector pass plus three hash
+    // lookups on a table edge, and flash the shutter at nothing. The live
+    // detector calls _captureNow() the moment a card settles, so idle instead
+    // of polling. Skipped when the browser detector is unavailable (it is what
+    // supplies lastCardSeenAt) and for the explicit first capture.
+    const liveDetector = !!(window.__cardScanner && window.__cardScanner.ready);
+    if (!force && liveDetector && Date.now() - lastCardSeenAt > 1500) return;
+    // This shot consumes the change: no second frame of the same card.
+    this._armed = false;
+    // Long enough to cover a browser burst plus a server confirmation, short
+    // enough that a lost result cannot hold the loop shut. Every result path
+    // clears it, so this only bounds an identify that never comes back.
+    this._busyUntil = Date.now() + 6000;
     (async () => {
       if (!cameraStream || !document.getElementById('camera-preview').videoWidth) {
         await startCamera(); // wait for the stream — capturing first yields a blank frame
         await new Promise(r => setTimeout(r, 500)); // let the first frame render
       }
       if (this.active) capturePhoto(true);
+      else this._busyUntil = 0;
     })();
   },
-  async check(score, id) {
-    if (score < this.THRESHOLD) {
-      // Weak match — keep scanning instead of stalling forever.
-      this.retry(2000);
-      return;
-    }
-    // Same card still sitting in front of the camera: don't toast it again,
-    // just wait for the user to swap cards and re-check quietly.
+  // A capture finished. Nothing is scheduled here: the loop waits for the live
+  // detector to see the card move or leave before it shoots again.
+  check(score, id) {
+    this._misses = 0;   // an identified card ends the empty-burst runway
+    this.done();
+    // Below the confirm threshold the card is still shown and queued, it just
+    // does not get the toast.
+    if (score < this.THRESHOLD) return;
+    // The same card is not announced again when it is put back down a moment
+    // later.
     const now = Date.now();
-    if (id && id === this.lastId && now - this.lastTime < 2000) {
-      this.retry(1500);
-      return;
-    }
+    const repeat = id && id === this.lastId && now - this.lastTime < 4000;
     this.lastId = id || null;
     this.lastTime = now;
-    this._ready = false;
+    if (repeat) return;
     const pct = (score * 100).toFixed(1);
     showToast(`✓ Auto-captured high-confidence match (${pct}%)`);
-    // Hold so the user can swap cards; the countdown makes the wait visible.
-    this.hold(2500);
   },
 };
 
@@ -1981,6 +2173,23 @@ function stopCamera() {
     }
 }
 
+// Shutter feedback: a captured frame used to be invisible until the result
+// arrived, so an auto-scan attempt looked like nothing was happening (or like
+// the scanner was stuck). The flash marks the instant; the one message that
+// goes with it is the floating scan glass, and the live readout stands off it
+// while the identification runs.
+function showCaptureFeedback(label = 'Captured — identifying…') {
+    const flash = document.getElementById('shutter-flash');
+    if (flash) {
+        flash.classList.remove('fire');
+        void flash.offsetWidth;   // restart the animation for back-to-back frames
+        flash.classList.add('fire');
+    }
+    const soEl = document.getElementById('scan-overlay-result');
+    if (soEl) soEl.innerHTML = `<span class="so-empty">${label}</span>`;
+    window.__captureFeedbackUntil = Date.now() + 2500;
+}
+
 // Capture photo from camera. `keepCamera` keeps the section visible and the
 // stream alive so the auto-scan loop can re-capture the next frame.
 async function capturePhoto(keepCamera = false) {
@@ -1996,6 +2205,10 @@ async function capturePhoto(keepCamera = false) {
     const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.9));
     if (!blob) return;
     currentImage = blob;
+
+    // Both capture paths flash: the frame is taken here, and until now nothing
+    // on screen said so until a result came back.
+    showCaptureFeedback();
 
     if (keepCamera) {
         // Auto-scan: re-identify from the live frame without leaving camera mode
@@ -2015,6 +2228,10 @@ async function capturePhoto(keepCamera = false) {
         if (preview) preview.classList.remove('hidden');
     };
     reader.readAsDataURL(blob);
+
+    // Let the shutter flash finish before the camera closes — hiding the stage in
+    // the same tick leaves the tap with no visible answer at all.
+    await new Promise(r => setTimeout(r, 220));
 
     const cameraSection = document.getElementById('camera-section');
     if (cameraSection) cameraSection.classList.add('hidden');
@@ -2041,6 +2258,7 @@ document.getElementById('stop-camera-btn').addEventListener('click', () => {
 let liveDetectionInterval = null;
 let lastBrowserBest = 0; // best browser-hash similarity of the last scan (near-miss display)
 let lastNearMiss = [];  // top gated-out browser guesses, for the review queue
+let lastCardSeenAt = 0; // last live YOLO detection — auto-scan bursts only run while a card is in frame
 
 function startLiveDetection() {
     if (liveDetectionInterval) return;
@@ -2547,12 +2765,13 @@ displayScanResult = async function(data, container) {
                 score: c.similarity || 0,
                 source: 'cloud',
                 scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
-                crop: (data.crop_image_path || lastScanImages?.crop_image_path) || null,
+                crop: (data.crop_image_path || data.crop_data_url
+                       || lastScanImages?.crop_image_path) || null,
                 candidates: queueCandidates(data.candidates),
             })) {
                 if (window.refreshReviewQueues) window.refreshReviewQueues();
             }
-            if (window.__autoScan && window.__autoScan.active && window.__autoScan._ready) {
+            if (window.__autoScan && window.__autoScan.active) {
                 window.__autoScan.check(c.similarity || 0, cardId || c.id);
             }
             
@@ -2794,8 +3013,12 @@ function updateOverlayDetection(det, accepted = false) {
     if (!soEl || !overlay) return;
     if (document.getElementById('camera-section').classList.contains('hidden')) return;
     if (Date.now() < (window.__countdownUntil || 0)) return;
+    // While a burst is being identified the capture feedback owns the glass'
+    // text: a live tick must not overwrite "Captured — identifying…" with
+    // "Card in view". The outline keeps tracking, so the viewfinder stays live.
+    const fbHeld = Date.now() < (window.__captureFeedbackUntil || 0);
     if (!det || !det.points) {
-        soEl.innerHTML = '<span class="so-empty">Point camera at a card</span>';
+        if (!fbHeld) soEl.innerHTML = '<span class="so-empty">Point camera at a card</span>';
         overlay.setAttribute('hidden', '');
         return;
     }
@@ -2804,7 +3027,7 @@ function updateOverlayDetection(det, accepted = false) {
     if (pts.length < 4 || pts.some(p => !isFinite(p.x) || !isFinite(p.y))) {
         // Bad YOLO output (NaN coords) — clear the overlay instead of
         // feeding NaN into the SVG polygon.
-        soEl.innerHTML = '<span class="so-empty">Point camera at a card</span>';
+        if (!fbHeld) soEl.innerHTML = '<span class="so-empty">Point camera at a card</span>';
         overlay.setAttribute('hidden', '');
         return;
     }
@@ -2821,9 +3044,11 @@ function updateOverlayDetection(det, accepted = false) {
     const hint = !inside || !sized ? 'Hold the whole card in view'
         : !centred ? 'Move the card to the centre'
         : accepted ? 'Card confirmed' : 'Card in view';
-    soEl.innerHTML =
-        `<span class="${cls}">${confidence}% confidence</span>` +
-        `<span class="so-hint">${hint}</span>`;
+    if (!fbHeld) {
+        soEl.innerHTML =
+            `<span class="${cls}">${confidence}% confidence</span>` +
+            `<span class="so-hint">${hint}</span>`;
+    }
     // Update SVG polygon with glide
     glideTo(pts, vw, vh);
     overlay.classList.toggle('confirmed', accepted);

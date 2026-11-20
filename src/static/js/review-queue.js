@@ -255,18 +255,36 @@ async function postMisread(payload) {
 // --------------------------------------------------------------------------- Modal
 const MODAL_ID = 'rq-modal';
 
+// A background read can take a few seconds (OCR, then a vision LLM). The modal
+// polls its own job so the answer lands in the comparison instead of only in
+// the queue row behind it.
+async function rqWaitForJob(jobId, timeout = 90000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    try {
+      const r = await fetch('/api/identify/jobs?ids=' + encodeURIComponent(jobId),
+                            { headers: rqAuthHeaders() });
+      if (r.ok) {
+        const job = ((await r.json()).jobs || [])[0];
+        if (job && ['done', 'exhausted', 'unavailable', 'error'].includes(job.status)) return job;
+      }
+    } catch { /* keep waiting until the deadline */ }
+    await new Promise(res => setTimeout(res, 1500));
+  }
+  return null;
+}
+
 // "Not this" — the capture stays on the left no matter what is picked on the
 // right, so you always compare the photo you took against the card you file.
+// That comparison owns the top of the dialog at the largest size the viewport
+// allows; the pickers, the manual search and the OCR/AI read sit below it.
 function rqOpenCorrection(item) {
   if (document.getElementById(MODAL_ID)) return;
 
   const original = {
     id: item.id,
     name: item.name,
-    number: '',
-    set: '',
     meta: item.meta || '',
-    img: item.img || '',
     score: item.score || 0,
   };
   // The current guess is the first choice, then every other match the scan
@@ -275,9 +293,13 @@ function rqOpenCorrection(item) {
     .filter(c => c && c.id && c.id !== item.id)
     .map(c => ({ id: c.id, name: c.name || c.id, number: c.number || '', set: c.set || '', meta: '', img: c.img || '', score: c.score || 0 }))];
   let selected = original;
+  // The queue row this dialog will clear. A completed OCR/AI read renames the
+  // row to the card it found, so this has to follow it.
+  let rowId = item.id;
 
   const captureSrc = rqImgSrc(item.crop) || rqImgSrc(item.scan) || RQ_PLACEHOLDER;
-  const captureLabel = item.crop ? 'Your card crop' : (item.scan ? 'Your capture' : 'No capture');
+  const captureLabel = item.crop ? 'Your capture' : (item.scan ? 'Your frame' : 'No capture');
+  const canAssist = !!rqQueueableCrop(item);
 
   const overlay = document.createElement('div');
   overlay.className = 'rq-modal-backdrop';
@@ -290,20 +312,28 @@ function rqOpenCorrection(item) {
         <div class="rqm-title">Not this card?</div>
         <button class="rqm-close" type="button" aria-label="Close">✕</button>
       </div>
-      <div class="rqm-body">
-        <div class="rqm-column rqm-column-capture">
+      <div class="rqm-compare">
+        <div class="rqm-shot">
           <div class="rqm-label">${rqEsc(captureLabel)}</div>
-          <div class="rqm-capture"><img src="${rqEsc(captureSrc)}" alt="Your capture"></div>
+          <div class="rqm-photo"><img src="${rqEsc(captureSrc)}" alt="Your capture"></div>
         </div>
-        <div class="rqm-column">
-          <div class="rqm-label">Identified as</div>
-          <div class="rqm-guess" id="rqm-guess"></div>
-          <div class="rqm-label rqm-label-gap">Other options</div>
-          <div class="rqm-options" id="rqm-options"></div>
-          <div class="rqm-label rqm-label-gap">Or search for the right card</div>
-          <input type="text" class="rqm-input" id="rqm-input" placeholder="Type card name or set…" autocomplete="off">
-          <div class="rqm-results" id="rqm-results"></div>
+        <div class="rqm-shot rqm-shot-selected">
+          <div class="rqm-label">Selected card</div>
+          <div class="rqm-photo"><img id="rqm-selected-img" alt=""></div>
         </div>
+      </div>
+      <div class="rqm-details">
+        <div class="rqm-selected-name" id="rqm-selected-name"></div>
+        <div class="rqm-selected-meta" id="rqm-selected-meta"></div>
+        <div class="rqm-assist">
+          <button class="rqm-assist-btn" id="rqm-assist" type="button">OCR / AI</button>
+          <span class="rqm-assist-status" id="rqm-assist-status" role="status" aria-live="polite"></span>
+        </div>
+        <div class="rqm-label rqm-label-gap">Other options</div>
+        <div class="rqm-options" id="rqm-options"></div>
+        <div class="rqm-label rqm-label-gap">Or search for the right card</div>
+        <input type="text" class="rqm-input" id="rqm-input" placeholder="Type card name or set…" autocomplete="off">
+        <div class="rqm-results" id="rqm-results"></div>
       </div>
       <div class="rqm-footer">
         <button class="rqm-btn-cancel" type="button">Cancel</button>
@@ -312,25 +342,30 @@ function rqOpenCorrection(item) {
     </div>`;
   document.body.appendChild(overlay);
 
-  const guessBox = overlay.querySelector('#rqm-guess');
+  const selectedImg = overlay.querySelector('#rqm-selected-img');
+  const selectedName = overlay.querySelector('#rqm-selected-name');
+  const selectedMeta = overlay.querySelector('#rqm-selected-meta');
   const optionsBox = overlay.querySelector('#rqm-options');
   const resultsBox = overlay.querySelector('#rqm-results');
   const input = overlay.querySelector('#rqm-input');
   const saveBtn = overlay.querySelector('.rqm-btn-save');
+  const assistBtn = overlay.querySelector('#rqm-assist');
+  const assistStatus = overlay.querySelector('#rqm-assist-status');
 
   function guessMeta(c) {
     return [c.number, c.set, c.meta].filter(Boolean).join(' · ');
   }
 
-  function renderGuess() {
+  // The right-hand frame is the card this dialog will file. Everything that can
+  // change that answer goes through here, so the comparison never goes stale
+  // behind the controls.
+  function renderSelected() {
+    selectedImg.src = rqImgSrc(selected.img) || RQ_PLACEHOLDER;
+    selectedImg.alt = selected.name || '';
+    selectedName.textContent = selected.name || selected.id;
     const meta = guessMeta(selected);
     const score = selected.score ? Math.round(selected.score * 100) + '%' : '';
-    guessBox.innerHTML = `
-      <img src="${rqEsc(rqImgSrc(selected.img) || RQ_PLACEHOLDER)}" alt="${rqEsc(selected.name || '')}">
-      <div class="rqm-guess-text">
-        <div class="rqm-guess-name">${rqEsc(selected.name || selected.id)}</div>
-        <div class="rqm-guess-meta">${rqEsc(meta)}${score ? (meta ? ' · ' : '') + score : ''}</div>
-      </div>`;
+    selectedMeta.textContent = [meta, score].filter(Boolean).join(' · ');
   }
 
   function renderOptions() {
@@ -340,14 +375,82 @@ function rqOpenCorrection(item) {
       btn.type = 'button';
       btn.className = 'rqm-option' + (c.id === selected.id ? ' active' : '');
       btn.innerHTML = `<img src="${rqEsc(rqImgSrc(c.img) || RQ_PLACEHOLDER)}" alt=""><span>${rqEsc(c.name)}</span>`;
-      btn.addEventListener('click', () => {
-        selected = c;
-        renderGuess();
-        renderOptions();
-      });
+      btn.addEventListener('click', () => pick(c));
       optionsBox.appendChild(btn);
     });
   }
+
+  function pick(c) {
+    selected = c;
+    renderSelected();
+    renderOptions();
+  }
+
+  function setAssistStatus(text, tone = '') {
+    assistStatus.textContent = text || '';
+    assistStatus.className = 'rqm-assist-status' + (tone ? ' ' + tone : '');
+  }
+
+  if (!canAssist) {
+    assistBtn.disabled = true;
+    assistBtn.title = 'This row has no stored crop to read';
+    setAssistStatus('No stored crop to read');
+  }
+
+  // Read the card's printed name and number (OCR first, then a vision LLM) and
+  // put the answer straight into the comparison, without leaving the dialog.
+  assistBtn.addEventListener('click', async () => {
+    if (!canAssist || assistBtn.disabled) return;
+    assistBtn.disabled = true;
+    setAssistStatus('Queuing OCR…');
+    if (!await rqEnqueueIdentify(item.id, { userAsk: true })) {
+      setAssistStatus('Could not queue the read', 'bad');
+      assistBtn.disabled = false;
+      return;
+    }
+    const stored = RQ.load().find(q => q.id === item.id);
+    const jobId = stored && stored.jobId;
+    if (!jobId) {
+      setAssistStatus('Queued — watch the row for the result');
+      assistBtn.disabled = false;
+      return;
+    }
+    setAssistStatus('Reading the card…');
+    const job = await rqWaitForJob(jobId);
+    if (!job) {
+      setAssistStatus('Still reading — check the row in a moment');
+      assistBtn.disabled = false;
+      return;
+    }
+    if (job.status === 'done' && job.result_id) {
+      // rqPollJobs turns the queue row into the card that was read, so the row
+      // this dialog clears moves with it.
+      await rqPollJobs();
+      const rows = RQ.load();
+      rowId = rows.some(q => q.id === job.result_id) ? job.result_id
+            : (rows.some(q => q.id === item.id) ? item.id : rowId);
+      const img = await rqResolveLocalImage(job.result_id);
+      const found = {
+        id: job.result_id,
+        name: job.result_name || job.result_id,
+        number: '', set: '',
+        meta: `OCR/AI via ${job.provider || 'worker'}`,
+        img: img || '',
+        score: 0,
+      };
+      const at = choices.findIndex(c => c.id === found.id);
+      if (at >= 0) choices[at] = found; else choices.unshift(found);
+      pick(found);
+      setAssistStatus(`Read: ${found.name}`, 'ok');
+    } else if (job.status === 'unavailable') {
+      setAssistStatus('No OCR/AI configured on the server', 'bad');
+    } else if (job.status === 'exhausted') {
+      setAssistStatus('OCR + AI could not read it', 'bad');
+    } else {
+      setAssistStatus('Read failed', 'bad');
+    }
+    assistBtn.disabled = false;
+  });
 
   function close() { rqCloseCorrection(); }
   function onKey(e) { if (e.key === 'Escape') close(); }
@@ -378,7 +481,10 @@ function rqOpenCorrection(item) {
             + `<div class="rqm-row-info"><span class="rqm-row-name">${rqEsc(card.name)}</span>`
             + `<span class="rqm-row-meta">${rqEsc(card.number)} · ${rqEsc(card.set_name || card.set || '')}</span></div>`;
           row.addEventListener('click', () => {
-            selected = {
+            [...resultsBox.querySelectorAll('.rqm-row')].forEach(r => r.classList.remove('rqm-row-hl'));
+            row.classList.add('rqm-row-hl');
+            input.value = card.name;
+            pick({
               id: card.ptcg_id || card.id || card.name,
               name: card.name,
               number: card.number || '',
@@ -386,12 +492,7 @@ function rqOpenCorrection(item) {
               meta: '',
               img,
               score: 0,
-            };
-            [...resultsBox.querySelectorAll('.rqm-row')].forEach(r => r.classList.remove('rqm-row-hl'));
-            row.classList.add('rqm-row-hl');
-            input.value = card.name;
-            renderGuess();
-            renderOptions();
+            });
           });
           resultsBox.appendChild(row);
         });
@@ -403,11 +504,13 @@ function rqOpenCorrection(item) {
     if (saveBtn.disabled) return;
     saveBtn.disabled = true;
     saveBtn.textContent = 'Opening…';
-    // A correction is training data; a failed log must not block the add.
-    if (selected.id !== item.id) {
+    // A correction is training data; a failed log must not block the add. The
+    // wrong id is always the guess the row arrived with, even when the OCR/AI
+    // read has since renamed the row.
+    if (selected.id !== original.id) {
       postMisread({
-        wrong_id: item.id,
-        wrong_name: item.name,
+        wrong_id: original.id,
+        wrong_name: original.name,
         correct_id: selected.id,
         correct_name: selected.name,
         score: item.score,
@@ -415,7 +518,7 @@ function rqOpenCorrection(item) {
         scan_image_path: item.scan,
         crop_image_path: item.crop,
       }).catch(() => {});
-      try { localStorage.setItem('last_misread_' + item.id, Date.now()); } catch { /* quota */ }
+      try { localStorage.setItem('last_misread_' + original.id, Date.now()); } catch { /* quota */ }
     }
     close();
     try {
@@ -423,10 +526,10 @@ function rqOpenCorrection(item) {
         // Same contract as "Keep": the row id rides along with the add form and
         // is cleared only when that form is submitted, so cancelling or adding
         // something else cannot remove this entry.
-        await window.addToCollectionById(selected.id, selected.name, item.id, 'corrected',
+        await window.addToCollectionById(selected.id, selected.name, rowId, 'corrected',
           window.queueScanFrame ? window.queueScanFrame(item) : null);
       } else {
-        RQ.remove(item.id);
+        RQ.remove(rowId);
         if (window.refreshReviewQueues) window.refreshReviewQueues();
       }
     } catch (e) {
@@ -436,7 +539,7 @@ function rqOpenCorrection(item) {
     }
   });
 
-  renderGuess();
+  renderSelected();
   renderOptions();
 }
 

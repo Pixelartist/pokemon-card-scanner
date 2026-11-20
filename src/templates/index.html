@@ -148,6 +148,10 @@
                             <div class="stage-container">
                                 <div class="camera-stage">
                                     <video id="camera-preview" autoplay playsinline></video>
+                                    <!-- Shutter flash: a captured frame used to be invisible
+                                         until the result arrived. The message that goes
+                                         with it lives on the floating scan glass. -->
+                                    <div id="shutter-flash" class="shutter-flash" aria-hidden="true"></div>
                                     <!-- Gradient fades at top/bottom of viewport -->
                                     <div class="stage-fade stage-fade-top" aria-hidden="true"></div>
                                     <div class="stage-fade stage-fade-bottom" aria-hidden="true"></div>

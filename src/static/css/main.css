@@ -643,6 +643,22 @@ select {
 .stage-fade-top { top: 0; background: linear-gradient(#000, transparent); }
 .stage-fade-bottom { bottom: 0; background: linear-gradient(transparent, #000); }
 
+/* shutter feedback for a captured frame */
+.shutter-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+}
+.shutter-flash.fire { animation: shutter-flash 200ms ease-out; }
+@keyframes shutter-flash {
+  0% { opacity: 0; }
+  20% { opacity: 0.7; }
+  100% { opacity: 0; }
+}
+
 .top-bar {
   position: absolute;
   top: 0;
@@ -896,6 +912,15 @@ select {
   flex: none;
   border: 1px solid var(--line);
 }
+/* The crop a refused gate judged, in the result panel. Natural size would be
+   several hundred pixels wide; 96px is enough to see a card border. */
+.reject-crop {
+  display: block;
+  width: 96px;
+  height: auto;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+}
 .so-score {
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -1096,8 +1121,9 @@ select {
 .qi-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---------- "Not this" comparison modal ----------
-   Left column is the capture and never changes; the right column swaps between
-   the current guess, the other scan matches and a manual search. */
+   The top of the dialog belongs to the comparison: the capture you took and the
+   card it will be filed as, side by side at the largest size the viewport
+   allows. Every control that picks a different card sits underneath. */
 .rq-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1105,12 +1131,13 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 20px;
-  background: rgba(0, 0, 0, 0.8);
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.82);
 }
 .rqm-panel {
-  width: min(760px, 100%);
-  max-height: calc(100vh - 40px);
+  width: min(1080px, 100%);
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
   display: flex;
   flex-direction: column;
   margin: auto;
@@ -1142,14 +1169,39 @@ select {
   cursor: pointer;
 }
 .rqm-close:hover { border-color: var(--gold); color: var(--gold); }
-.rqm-body {
+.rqm-compare {
   display: grid;
-  grid-template-columns: 230px 1fr;
-  gap: 18px;
-  padding: 16px;
-  overflow-y: auto;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  padding: 12px 14px;
+  background: #05070d;
+  border-bottom: 1px solid var(--line);
 }
-.rqm-column { min-width: 0; }
+.rqm-shot { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rqm-photo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: clamp(200px, 50vh, 560px);
+  height: clamp(200px, 50dvh, 560px);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #000;
+}
+.rqm-photo img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.rqm-shot-selected .rqm-photo { border-color: rgba(255, 203, 5, 0.5); }
+
+.rqm-details {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+}
 .rqm-label {
   font-size: 9px;
   font-weight: 700;
@@ -1159,35 +1211,37 @@ select {
   margin-bottom: 8px;
 }
 .rqm-label-gap { margin-top: 16px; }
-.rqm-column-capture { position: sticky; top: 0; align-self: start; }
-.rqm-capture {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 150px;
-  border: 1px solid var(--line);
-  background: #000;
-  overflow: hidden;
-}
-.rqm-capture img { display: block; width: 100%; height: auto; }
-.rqm-guess {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
-  padding: 10px;
-  border: 1px solid var(--line);
-  background: var(--panel-2);
-}
-.rqm-guess img { width: 62px; height: auto; flex: none; border: 1px solid var(--line); }
-.rqm-guess-text { min-width: 0; }
-.rqm-guess-name { font-size: 14px; font-weight: 600; color: var(--paper); }
-.rqm-guess-meta {
-  margin-top: 5px;
+.rqm-selected-name { font-size: 16px; font-weight: 600; color: var(--paper); }
+.rqm-selected-meta {
+  margin-top: 3px;
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
 }
+.rqm-assist { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.rqm-assist-btn {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--paper);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.rqm-assist-btn:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
+.rqm-assist-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.rqm-assist-status {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.rqm-assist-status.ok { color: var(--ok); }
+.rqm-assist-status.bad { color: var(--amber, #e0a32e); }
 .rqm-options {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(86px, 1fr));
@@ -1259,6 +1313,20 @@ select {
   cursor: pointer;
 }
 .rqm-btn-save { border-color: var(--gold); background: var(--gold); color: #0a0f1c; }
+
+@media (max-width: 640px) {
+  .rqm-panel {
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+  .rqm-compare { gap: 8px; padding: 8px; }
+  .rqm-photo {
+    height: clamp(170px, 38vh, 360px);
+    height: clamp(170px, 38dvh, 360px);
+  }
+  .rqm-details { padding: 12px; }
+  .rqm-selected-name { font-size: 14px; }
+}
 .rqm-btn-save:disabled { opacity: 0.45; cursor: default; }
 .rqm-btn-cancel:hover { border-color: var(--gold); color: var(--gold); }
 .rqm-none, .rqm-loading { padding: 10px; font-size: 11px; color: var(--muted); }
