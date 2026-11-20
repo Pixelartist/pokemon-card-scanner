@@ -643,7 +643,8 @@ select {
 .stage-fade-top { top: 0; background: linear-gradient(#000, transparent); }
 .stage-fade-bottom { bottom: 0; background: linear-gradient(transparent, #000); }
 
-/* shutter feedback for a captured frame */
+/* shutter feedback for a captured frame; the pulse itself is set inline by
+   showCaptureFeedback(), so reduced-motion users still see the capture land */
 .shutter-flash {
   position: absolute;
   inset: 0;
@@ -651,12 +652,6 @@ select {
   background: #fff;
   opacity: 0;
   pointer-events: none;
-}
-.shutter-flash.fire { animation: shutter-flash 200ms ease-out; }
-@keyframes shutter-flash {
-  0% { opacity: 0; }
-  20% { opacity: 0.7; }
-  100% { opacity: 0; }
 }
 
 .top-bar {

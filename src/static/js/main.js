@@ -2192,9 +2192,13 @@ function stopCamera() {
 function showCaptureFeedback(label = 'Captured — identifying…') {
     const flash = document.getElementById('shutter-flash');
     if (flash) {
-        flash.classList.remove('fire');
-        void flash.offsetWidth;   // restart the animation for back-to-back frames
-        flash.classList.add('fire');
+        // Deliberately not a CSS animation: main.css collapses every animation
+        // to 0.001ms for users who ask for reduced motion, which left those
+        // captures with no visible answer at all. A one-off flash is a state
+        // change, not movement, so it is driven here instead.
+        clearTimeout(showCaptureFeedback._timer);
+        flash.style.opacity = '0.7';
+        showCaptureFeedback._timer = setTimeout(() => { flash.style.opacity = '0'; }, 120);
     }
     const soEl = document.getElementById('scan-overlay-result');
     if (soEl) soEl.innerHTML = `<span class="so-empty">${label}</span>`;
