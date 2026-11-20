@@ -109,6 +109,41 @@ SCAN_DIR.mkdir(parents=True, exist_ok=True)
 CROP_DIR = SCAN_DIR / "crops"
 CROP_DIR.mkdir(parents=True, exist_ok=True)
 
+# Crops the browser's presence gate refused. The gate logged a verdict but kept
+# no image, so a refusal could only be argued about; one file per refusal, served
+# at /data/scans/refused/... for the on-screen thumbnail.
+REFUSED_DIR = SCAN_DIR / "refused"
+REFUSED_DIR.mkdir(parents=True, exist_ok=True)
+REFUSED_KEEP = 50
+
+
+def save_refused_crop(image_bytes: bytes) -> Optional[str]:
+    """Store a refused crop; return its data-relative path, or None on failure.
+
+    Never raises: a diagnostic save must not change the match response.
+    """
+    try:
+        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
+        (REFUSED_DIR / f"refused_{stamp}.jpg").write_bytes(image_bytes)
+        prune_refused_crops()
+        return f"scans/refused/refused_{stamp}.jpg"
+    except Exception as e:
+        logger.warning("Refused crop save failed: %s", e)
+        return None
+
+
+def prune_refused_crops() -> None:
+    """Keep only the newest REFUSED_KEEP refused crops.
+
+    Names carry a fixed-width timestamp, so name order is age order. Never
+    raises: pruning must not change the match response.
+    """
+    try:
+        for old in sorted(REFUSED_DIR.glob("refused_*.jpg"), reverse=True)[REFUSED_KEEP:]:
+            old.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning("Refused crop prune failed: %s", e)
+
 
 def _safe_upload_name(filename: Optional[str]) -> str:
     """Return a filesystem-safe basename for a client-supplied upload name.
@@ -2464,8 +2499,15 @@ async def quickdraw_build(current_user: UserResponse = Depends(get_current_user)
 
 
 @app.post("/api/quickdraw/match")
-async def quickdraw_match(image: UploadFile = File(...), top_k: int = Query(5)):
-    """Direct Quickdraw-style fingerprint match — pure CPU, no model, ~10-50ms."""
+async def quickdraw_match(image: UploadFile = File(...), top_k: int = Query(5),
+                          limit: float = Query(0.20)):
+    """Direct Quickdraw-style fingerprint match — pure CPU, no model, ~10-50ms.
+
+    `limit` is the cutoff the client's presence gate applies. A crop it refuses
+    (no candidate, or a top distance beyond `limit`) is saved under
+    data/scans/refused/ and returned as `refused_crop`, so the next failure
+    leaves both the distance and the image behind.
+    """
     from services.quickdraw_matcher import get_quickdraw_matcher
 
     _enforce(_scan_limiter, "scan", "Too many scans in a row. Try again in a moment.")
@@ -2479,7 +2521,25 @@ async def quickdraw_match(image: UploadFile = File(...), top_k: int = Query(5)):
         raise HTTPException(status_code=503, detail="Quickdraw index not built — POST /api/quickdraw/build")
 
     result = await asyncio.to_thread(matcher.recognize, image_bytes, top_k)
-    return JSONResponse(result)
+    top = (result.get("candidates") or [{}])[0]
+    distance = top.get("distance")
+    payload = dict(result)
+    # The client's presence gate calls this on every burst it cannot confirm, so
+    # record what it was told and keep the image it judged: a refusal used to
+    # leave no trace beyond a log line.
+    refused = distance is None or float(distance) > limit
+    if refused:
+        saved = await asyncio.to_thread(save_refused_crop, image_bytes)
+        payload["refused_crop"] = saved
+        logger.info("quickdraw match: REFUSED decision=%s bytes=%d top=%s "
+                    "distance=%s limit=%.2f crop=%s",
+                    result.get("decision"), len(image_bytes), top.get("id"),
+                    distance, limit, saved)
+    else:
+        logger.info("quickdraw match: decision=%s bytes=%d top=%s distance=%s",
+                    result.get("decision"), len(image_bytes), top.get("id"),
+                    distance)
+    return JSONResponse(payload)
 
 
 @app.get("/api/index/status")
