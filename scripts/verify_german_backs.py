@@ -52,9 +52,8 @@ BACKUPS = [ROOT / "data" / "german_art_sources.pre-upgrade.json"]
 REPORT = ROOT / "data" / "german_back_audit.json"
 IMG_DIR = F.IMG_DIR
 
-BACK_URL = ("https://media.bisafans.de/44646cd/sammelkarten/sets/"
-            "ex-rubin-saphir/001.jpg")     # the site's generic card back
-BACK_TOL = 0.05        # at or below this the image *is* the back
+BACK_URL = F.BACK_URL  # the site's generic card back
+BACK_TOL = F.BACK_TOL  # at or below this the image *is* the back
 SUSPECT_TOL = 0.12     # worth a human look, but not replaced
 GOOD_TOL = 0.20        # a replacement must be at least this far from the back
 
@@ -75,7 +74,7 @@ def installed_paths(all_de: bool) -> dict:
     """{card_id: path} for the manifest, or for every de_ image on disk."""
     if all_de:
         return {p.stem: p for p in sorted(IMG_DIR.glob("de_*.png"))}
-    cards = json.loads(MANIFEST.read_text())["cards"]
+    cards = json.loads(MANIFEST.read_text(encoding="utf-8"))["cards"]
     return {cid: IMG_DIR / f"{cid}.png" for cid in cards}
 
 
@@ -93,8 +92,9 @@ def scan(paths: dict, back, back_md5: str, workers: int) -> dict:
             fp = fingerprint(raw)
         except Exception as exc:                       # noqa: BLE001
             return cid, {"error": str(exc)[:120]}
+        digest = md5(raw)
         return cid, {"d": distance(fp, back), "bytes": len(raw), "px": px,
-                     "md5": md5(raw), "same_png": md5(raw) == back_md5}
+                     "md5": digest, "same_png": digest == back_md5}
 
     with cf.ThreadPoolExecutor(max_workers=workers) as pool:
         for i, (cid, rec) in enumerate(pool.map(one, paths.items()), 1):
@@ -106,41 +106,45 @@ def scan(paths: dict, back, back_md5: str, workers: int) -> dict:
 
 def source_tcgdex_en(cid: str, code: str, num: str):
     """Last resort: the English scan beats showing the card back."""
-    r = F.get(f"{F.TGDEX_EN}/cards/{code}-{num}")
-    if r is None:
-        return None
-    img = r.json().get("image")
-    if not img:
-        return None
-    for ext in ("high.png", "high.webp", "normal.png"):
-        rr = F.get(f"{img}/{ext}")
-        if rr is not None and len(rr.content) > 20000:
-            return {"bytes": rr.content, "url": f"{img}/{ext}", "page": ""}
-    return None
+    got = F.tcgdex_image(F.TGDEX_EN, code, num)
+    return {**got, "page": ""} if got else None
 
 
 def replacement(cid: str, backups: list):
-    """Every non-Bisafans scan for this card, German sources first."""
+    """Every non-Bisafans scan for this card, German sources first.
+
+    PokéWiki's category and title lookups, and the pre-upgrade backup, often
+    resolve to the same file, so candidates are deduped by url: the first hit
+    keeps its source label and the duplicates are not validated or fingerprinted
+    again.  The backup is skipped before it is fetched when its url is known
+    already.
+    """
     code, _, num = cid[3:].partition("-")
-    found = []
-    for name, fetch in (("pokewiki", F.source_pokewiki),
-                        ("tcgdex", F.source_tcgdex),
-                        ("pokewiki-title", F.source_pokewiki_title)):
+    found, seen = [], set()
+
+    def add(cand):
+        if cand and cand["url"] not in seen:
+            seen.add(cand["url"])
+            found.append(cand)
+
+    for name, fetch in ((n, f) for n, f in F.SOURCES if n != "bisafans"):
         got = fetch(cid, code, num)
         if got:
-            found.append({"source": name, "bytes": got["bytes"],
-                          "url": got["url"], "page": got.get("page", "")})
+            add({"source": name, "bytes": got["bytes"], "url": got["url"],
+                 "page": got.get("page", "")})
     for backup in backups:
         rec = backup.get(cid) or {}
         if rec.get("url") and rec.get("source") != "bisafans":
+            if rec["url"] in seen:
+                continue
             r = F.get(rec["url"])
             if r is not None:
-                found.append({"source": rec["source"], "bytes": r.content,
-                              "url": rec["url"], "page": rec.get("page", "")})
+                add({"source": rec["source"], "bytes": r.content,
+                     "url": rec["url"], "page": rec.get("page", "")})
     got = source_tcgdex_en(cid, code, num)
     if got:
-        found.append({"source": "tcgdex-en", "bytes": got["bytes"],
-                      "url": got["url"], "page": ""})
+        add({"source": "tcgdex-en", "bytes": got["bytes"],
+             "url": got["url"], "page": ""})
     return found
 
 
@@ -149,7 +153,7 @@ def best_candidate(cid: str, backups: list, back):
     german, english = [], []
     for cand in replacement(cid, backups):
         png, size = F.validate(cand["bytes"])
-        if png is None or size[0] < 200:
+        if png is None:
             continue
         dist = distance(fingerprint(png), back)
         if dist <= GOOD_TOL:
@@ -160,15 +164,14 @@ def best_candidate(cid: str, backups: list, back):
     return max(pool, key=lambda c: c["px"][0]) if pool else None
 
 
-def fix(cid: str, backups: list, back, workers_log: dict):
+def fix(cid: str, backups: list, back, fixed: dict):
     best = best_candidate(cid, backups, back)
     if best is None:
         return False
     F.install(cid, best["png"])
     # an observed fetch replaces the entry, so no "reconstructed" flag is written
-    workers_log[cid] = {"source": best["source"], "url": best["url"],
-                        "page": best["page"], "px": best["px"],
-                        "d": best["d"]}
+    fixed[cid] = {"source": best["source"], "url": best["url"],
+                  "page": best["page"], "px": best["px"], "d": best["d"]}
     return True
 
 
@@ -200,7 +203,7 @@ def main():
     print(f"card back: {len(back_resp.content)} B, normalised md5 {back_md5}")
 
     if args.from_report and REPORT.exists():
-        prior = json.loads(REPORT.read_text())
+        prior = json.loads(REPORT.read_text(encoding="utf-8"))
         results = {b["card"]: {"d": b["d"], "bytes": b["bytes"],
                                 "md5": "", "same_png": False}
                    for b in prior.get("backs", [])}
@@ -217,7 +220,7 @@ def main():
     print(f"\nchecked {len(ok)} | unreadable {len(errs)}")
     print(f"distance to back: min {ds.min():.3f}  p01 {np.percentile(ds, 1):.3f}  "
           f"p50 {np.percentile(ds, 50):.3f}  max {ds.max():.3f}")
-    cards = json.loads(MANIFEST.read_text())["cards"]
+    cards = json.loads(MANIFEST.read_text(encoding="utf-8"))["cards"]
     m_checked = [c for c in ok if c in cards]
     m_backs = [c for c in backs if c in cards]
     recon = [c for c in m_checked if cards[c].get("reconstructed") is True]
@@ -245,7 +248,7 @@ def main():
     backups = []
     for p in BACKUPS:
         if p.exists():
-            backups.append(json.loads(p.read_text()).get("cards", {}))
+            backups.append(json.loads(p.read_text(encoding="utf-8")).get("cards", {}))
 
     fixed, stuck = {}, []
     if args.probe and backs:
@@ -267,14 +270,13 @@ def main():
                 print(f"  {i}/{len(backs)} fixed={len(fixed)} stuck={len(stuck)}",
                       flush=True)
         if fixed:
-            manifest = {**json.loads(MANIFEST.read_text()).get("cards", {})}
+            prior = json.loads(MANIFEST.read_text(encoding="utf-8"))
+            manifest = {**prior.get("cards", {})}
             for cid, rec in fixed.items():
                 manifest[cid] = {"source": rec["source"], "url": rec["url"],
                                  "page": rec["page"], "px": rec["px"],
                                  "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-            MANIFEST.write_text(json.dumps(
-                {"updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                 "cards": manifest}, ensure_ascii=False, indent=1))
+            F.save_manifest(manifest)
             print(f"manifest updated for {len(fixed)} cards")
 
     REPORT.write_text(json.dumps({
@@ -292,7 +294,7 @@ def main():
         "manifest_reconstructed": len(recon),
         "reconstructed_px_mismatch": drift,
         "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }, indent=1))
+    }, indent=1), encoding="utf-8")
     print(f"\nreport: {REPORT.relative_to(ROOT)}")
     if args.apply:
         print(f"fixed {len(fixed)} | unfixable {len(stuck)}")

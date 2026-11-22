@@ -56,6 +56,10 @@ TGDEX_EN = "https://api.tcgdex.net/v2/en"
 POKEWIKI = "https://www.pokewiki.de/api.php"
 BISAFANS_INDEX = "https://www.bisafans.de/sammelkarten/sets"
 MIN_WIDTH = 500  # below this a scan is kept only if no source does better
+MIN_BYTES = 20000  # smaller responses are placeholders or error pages
+BACK_URL = ("https://media.bisafans.de/44646cd/sammelkarten/sets/"
+            "ex-rubin-saphir/001.jpg")     # the site's generic card back
+BACK_TOL = 0.05        # at or below this the image *is* the back
 
 # TCGdex set code -> PokéWiki category for sets whose German TCGdex name does
 # not match the wiki's category ("Sammelkarte aus <name>").
@@ -105,6 +109,14 @@ def get(url, **kw):
     return None
 
 
+def fetch_image(url, min_bytes: int = MIN_BYTES):
+    """An image URL's bytes, or None when it is missing or too small to be art."""
+    r = get(url)
+    if r is None or len(r.content) < min_bytes:
+        return None
+    return r.content
+
+
 # --------------------------------------------------------------------------- #
 # sources
 # --------------------------------------------------------------------------- #
@@ -121,20 +133,24 @@ def set_meta(code: str) -> dict:
     return d
 
 
-def source_tcgdex(card_id: str, code: str, num: str):
-    """Official German asset (only exists for sets TCGdex has German scans of)."""
-    base = f"{TGDEX}/cards/{code}-{num}"
-    r = get(base)
+def tcgdex_image(api: str, code: str, num: str):
+    """The first asset TCGdex publishes for a card in that locale."""
+    r = get(f"{api}/cards/{code}-{num}")
     if r is None:
         return None
     img = r.json().get("image")
     if not img:
         return None
     for ext in ("high.png", "high.webp", "normal.png"):
-        rr = get(f"{img}/{ext}")
-        if rr is not None and len(rr.content) > 20000:
-            return {"bytes": rr.content, "url": f"{img}/{ext}"}
+        data = fetch_image(f"{img}/{ext}")
+        if data is not None:
+            return {"bytes": data, "url": f"{img}/{ext}"}
     return None
+
+
+def source_tcgdex(card_id: str, code: str, num: str):
+    """Official German asset (only exists for sets TCGdex has German scans of)."""
+    return tcgdex_image(TGDEX, code, num)
 
 
 def _imageinfo(titles):
@@ -210,7 +226,7 @@ def pokewiki_files(code: str) -> dict:
             mapping.setdefault(norm_num(n.group(2)), []).append(title)
         if mapping:
             break
-    # ponytail: several files can describe one card (re-uploads, German vs
+    # note: several files can describe one card (re-uploads, German vs
     # English art); the artwork should be the largest rendition available.
     flat = sorted({t for titles in mapping.values() for t in titles})
     info = _imageinfo(flat)
@@ -227,12 +243,10 @@ def pokewiki_files(code: str) -> dict:
 
 def source_pokewiki(card_id: str, code: str, num: str):
     hit = pokewiki_files(code).get(norm_num(num))
-    if not hit:
+    data = fetch_image(hit["url"]) if hit else None
+    if data is None:
         return None
-    r = get(hit["url"])
-    if r is None or len(r.content) < 20000:
-        return None
-    return {"bytes": r.content, "url": hit["url"], "page": hit["title"],
+    return {"bytes": data, "url": hit["url"], "page": hit["title"],
             "w": hit["w"]}
 
 
@@ -261,10 +275,10 @@ def source_pokewiki_title(card_id: str, code: str, num: str):
         return None
     title = max(info, key=lambda t: info[t][1])
     url, w, _ = info[title]
-    rr = get(url)
-    if rr is None or len(rr.content) < 20000:
+    data = fetch_image(url)
+    if data is None:
         return None
-    return {"bytes": rr.content, "url": url, "page": title, "w": w}
+    return {"bytes": data, "url": url, "page": title, "w": w}
 
 
 def bisafans_sets() -> dict:
@@ -274,7 +288,7 @@ def bisafans_sets() -> dict:
             return _cache["bf"]
     cached = CACHE / "bisafans_sets.json"
     if cached.exists():
-        data = json.loads(cached.read_text())
+        data = json.loads(cached.read_text(encoding="utf-8"))
     else:
         data = {}
         idx = get(BISAFANS_INDEX)
@@ -299,7 +313,7 @@ def bisafans_sets() -> dict:
             if cards:
                 data[norm_name(label)] = cards
         CACHE.mkdir(parents=True, exist_ok=True)
-        cached.write_text(json.dumps(data))
+        cached.write_text(json.dumps(data), encoding="utf-8")
     with LOCK:
         _cache["bf"] = data
     return data
@@ -326,14 +340,12 @@ def source_bisafans(card_id: str, code: str, num: str):
     if not cards:
         return None
     url = cards.get(norm_num(num))
-    if not url:
+    data = fetch_image(url) if url else None
+    if data is None:
         return None
-    r = get(url)
-    if r is None or len(r.content) < 20000:
-        return None
-    if _is_card_back(r.content):
+    if _is_card_back(data):
         return None      # the site answers 200 with a generic card back
-    return {"bytes": r.content, "url": url}
+    return {"bytes": data, "url": url}
 
 
 def _is_card_back(data: bytes) -> bool:
@@ -347,7 +359,7 @@ def _is_card_back(data: bytes) -> bool:
     except Exception:
         return False
     return float(_weighted_sq_rows(np.stack([fine]), np.stack([back]),
-                                   FINE_DIM)[0]) < 0.05
+                                   FINE_DIM)[0]) < BACK_TOL
 
 
 def _back_fingerprint():
@@ -355,8 +367,7 @@ def _back_fingerprint():
     with LOCK:
         if _BACK_FP is not False:
             return _BACK_FP
-    r = get("https://media.bisafans.de/44646cd/sammelkarten/sets/"
-            "ex-rubin-saphir/001.jpg")
+    r = get(BACK_URL)
     value = None
     if r is not None:
         try:
@@ -411,8 +422,16 @@ def install(card_id: str, png: bytes):
     """Write the card art at the path the app serves."""
     dest = IMG_DIR / f"{card_id}.png"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if not (dest.exists() and dest.stat().st_size == len(png)):
+    # compare the bytes, not the size: different art can be the same length
+    if not (dest.exists() and dest.read_bytes() == png):
         dest.write_bytes(png)
+
+
+def save_manifest(cards: dict):
+    """Write the manifest; the format lives here, not in the callers."""
+    MANIFEST.write_text(json.dumps(
+        {"updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "cards": cards},
+        ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def targets_from_db(sets=None, cards=None):
@@ -475,12 +494,12 @@ def main():
 
     manifest = {}
     if MANIFEST.exists():
-        manifest = json.loads(MANIFEST.read_text()).get("cards", {})
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8")).get("cards", {})
 
     card_filter = {s.strip() for s in args.cards.split(",")} if args.cards else None
     if args.retry_failed:
         failed_path = ROOT / "data" / "german_art_failed.json"
-        card_filter = set(json.loads(failed_path.read_text()))
+        card_filter = set(json.loads(failed_path.read_text(encoding="utf-8")))
     if args.upgrade_below:
         card_filter = {cid for cid, rec in manifest.items()
                        if (rec.get("px") or [0])[0] < args.upgrade_below}
@@ -514,7 +533,6 @@ def main():
             if cid in manifest:
                 return ("exists", None)
             if args.skip_newer_than and dest.stat().st_mtime > args.skip_newer_than:
-                install(cid, dest.read_bytes())   # relink the index copy
                 return ("exists", None)
         candidates = []
         for name, fn in active:
@@ -549,11 +567,6 @@ def main():
         install(cid, png)
         return (name, record)
 
-    def save():
-        MANIFEST.write_text(json.dumps(
-            {"updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "cards": manifest},
-            ensure_ascii=False, indent=1))
-
     with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
         for i, (status, info) in enumerate(ex.map(one, cards), 1):
             if status == "exists":
@@ -569,16 +582,17 @@ def main():
                     manifest[info["card"]] = {k: v for k, v in info.items()
                                               if k != "card"}
             if not args.dry_run and i % 25 == 0:
-                save()                       # survive an interrupted run
+                save_manifest(manifest)      # survive an interrupted run
             if i % 100 == 0:
                 print(f"  {i}/{len(cards)}  " +
                       "  ".join(f"{k}={v}" for k, v in stats.items()), flush=True)
 
     if not args.dry_run:
-        save()
+        save_manifest(manifest)
     print("\n" + "  ".join(f"{k}={v}" for k, v in stats.items()))
     if failed:
-        (ROOT / "data" / "german_art_failed.json").write_text(json.dumps(failed, indent=1))
+        (ROOT / "data" / "german_art_failed.json").write_text(
+            json.dumps(failed, indent=1), encoding="utf-8")
         print(f"{len(failed)} cards had no usable art; see data/german_art_failed.json")
 
 
