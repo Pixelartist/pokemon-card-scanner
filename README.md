@@ -133,6 +133,37 @@ cp data/backups/pokemon_cards.db.20261117-130515 data/pokemon_cards.db
 python -c "import sqlite3;print(sqlite3.connect('data/pokemon_cards.db').execute('PRAGMA integrity_check').fetchone())"
 ```
 
+## German card art provenance
+
+`data/german_art_sources.json` records where each German scan under
+`data/german_cards/images/` came from: `source`, `url`, `page`, `px` and `at`
+when it was fetched, written by `scripts/fetch_german_art.py`. The vintage art
+was installed before that manifest existed, so its entries were rebuilt from the
+files themselves — `px` from the PNG header, `at` from the file's mtime, no `url`
+and no `page` — and carry `"reconstructed": true`. Those fields are generated,
+not observed.
+
+Which entries carry it: currently 14,787 of 17,348, every one with
+`source: "unknown"` and an empty `url` and `page`. The other 2,561 record a real
+fetch and carry no flag at all — absence means observed, so `false` is never
+written, and the counts move as cards are re-fetched. An entry with that same
+signature is backfilled even when the flag is missing, which is how a later
+backfill can be spotted.
+
+What an audit should do with it:
+
+- treat a reconstructed `px` as the installed file's own size rather than a
+  measurement from a source, so it can be compared against the file to catch art
+  replaced behind the manifest's back;
+- read the flag as "origin lost", not "art unverified": the files were installed,
+  are served, and pass the same checks as any other;
+- expect `scripts/verify_german_backs.py` to report how many reconstructed
+  entries it checked and any whose `px` no longer matches the installed file —
+  `manifest_reconstructed` and `reconstructed_px_mismatch` in
+  `data/german_back_audit.json`;
+- expect the flag to disappear when a card is re-fetched: a repair writes a fresh
+  observed record and drops it.
+
 ## Tests
 
 The tests need the app's requirements plus the dev ones (`requirements-dev.txt`),
