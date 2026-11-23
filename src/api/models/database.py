@@ -16,30 +16,39 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = DATA_DIR / "pokemon_cards.db"
 
 
-def _ensure_wal(attempts=5):
+def _ensure_wal(budget=1.0):
     """Switch the file to WAL, waiting out anyone starting beside us.
 
     PRAGMA journal_mode needs an exclusive lock, so workers booting together
     each lost the race, the caller swallowed the error, and the file stayed in
-    rollback-journal mode until some later connection happened to win. Retrying
-    makes the switch stick. It uses its own short-lived connection so it never
-    has to borrow, and then restore, the timeout of the caller's connection.
+    rollback-journal mode until some later connection happened to win. A
+    moment of retrying settles that: a sibling holds the lock for milliseconds.
+
+    That moment is a second in total, not a count of attempts. Something
+    outside the process is the only thing that holds the lock longer, and it
+    will not hand it over in the next few seconds either: retrying further only
+    delays the schema work below, which cannot run until the lock is gone, so
+    startup spent twenty seconds here before reporting what it already knew.
+    It uses its own short-lived connection so it never has to borrow, and then
+    restore, the timeout of the caller's connection.
     """
-    conn = sqlite3.connect(DATABASE_URL, timeout=2.0)
+    conn = sqlite3.connect(DATABASE_URL, timeout=0.25)
     try:
         last = None
-        for attempt in range(attempts):
+        deadline = time.monotonic() + budget
+        while True:
             try:
-                mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+                if str(conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]).lower() == "wal":
+                    return
             except sqlite3.OperationalError as exc:
-                last, mode = exc, None
-            if str(mode).lower() == "wal":
-                return
-            time.sleep(0.2 * (attempt + 1))
+                last = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
         logging.warning(
-            "Could not switch the database to WAL after %d attempts (%s): it "
-            "keeps its current journal mode, so readers queue behind a writer "
-            "instead of reading a snapshot", attempts, last)
+            "Could not switch the database to WAL within %ss (%s): it keeps "
+            "its current journal mode, so readers queue behind a writer "
+            "instead of reading a snapshot", budget, last)
     finally:
         conn.close()
 
@@ -59,7 +68,11 @@ def init_db():
     # the per-request connections only ask for it best effort, which is not
     # enough when four workers start at the same moment.
     _ensure_wal()
-    conn = sqlite3.connect(DATABASE_URL)
+    # Two seconds, not the five-second default: the only thing that holds the
+    # file for longer than that is another process, and the statements below
+    # cannot run until it lets go, so the wait buys nothing and the resulting
+    # "database is locked" is the answer either way.
+    conn = sqlite3.connect(DATABASE_URL, timeout=2.0)
     cursor = conn.cursor()
     
     # Create sets table
