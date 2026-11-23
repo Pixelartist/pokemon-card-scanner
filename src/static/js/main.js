@@ -679,19 +679,33 @@ window.__cardScanner = {
     this._lastReject = null;   // no stale reason from the previous burst
     const frames = [];
     let anchor = null;
+    // Take the frames first, and only then say so. The flash used to fire before
+    // this burst had sampled anything, so a user who took it as "done" and
+    // lowered the card left the burst looking at an empty table: nothing was
+    // shown and nothing reached the queue. Grabbing all three up front also
+    // frees the card immediately — the analysis below runs from the stills.
+    const seq = nextCapture();
+    const shots = [];
     for (let i = 0; i < CONSENSUS_FRAMES; i++) {
+      shots.push(this._grabFrame(video));
+      if (i < CONSENSUS_FRAMES - 1) await new Promise(r => setTimeout(r, CONSENSUS_GAP_MS));
+    }
+    showCaptureFeedback();
+    // The capture is in hand; let the loop arm for the next card while this one
+    // is read, instead of holding the shutter shut until the answer arrives.
+    if (window.__autoScan && window.__autoScan.active) window.__autoScan.done();
+    for (let i = 0; i < shots.length; i++) {
       let res = null;
       try {
         // The first frame locates the card; the rest reuse its quad, so a
         // capture costs one detector pass and three hashes instead of three of
         // each. A card that moves shows up in the appearance check below, not
         // in a second detection.
-        res = await this.analyseFrame(this._grabFrame(video),
+        res = await this.analyseFrame(shots[i],
                                       { server: false, quad: i > 0 ? anchor : null });
       } catch (e) { res = null; }
       if (i === 0 && res && res.detection && res.detection.points) anchor = res.detection.points;
       frames.push(res);
-      if (i < CONSENSUS_FRAMES - 1) await new Promise(r => setTimeout(r, CONSENSUS_GAP_MS));
     }
 
     // A frame "saw something" when the detector fired; the identity gate is
@@ -732,7 +746,7 @@ window.__cardScanner = {
           this._lastReject = null;
           if (best.cropDataUrl) this._lastCropDataUrl = best.cropDataUrl;
           if (best.cropThumb) this._lastCropThumb = best.cropThumb;
-          return { ...best, agreement: agreeing.length, frames: frames.length };
+          return { ...best, captureSeq: seq, agreement: agreeing.length, frames: frames.length };
         }
         this._lastReject = verdict;
       }
@@ -750,13 +764,13 @@ window.__cardScanner = {
         this._lastReject = null;
         if (single.cropDataUrl) this._lastCropDataUrl = single.cropDataUrl;
         if (single.cropThumb) this._lastCropThumb = single.cropThumb;
-        return { ...single, agreement: 1, frames: frames.length };
+        return { ...single, captureSeq: seq, agreement: 1, frames: frames.length };
       }
       this._lastReject = verdict;
     }
     this._lastCropDataUrl = null;
     this._lastCropThumb = null;
-    return { noCard: true, candidates: [], nearMiss: [],
+    return { noCard: true, captureSeq: seq, candidates: [], nearMiss: [],
              bestSimilarity: (hits[0]?.bestSimilarity || 0), frames: frames.length };
   },
 
@@ -923,6 +937,11 @@ if (scanBtn) {
                         // Nothing card-like in the frame. A face under the
                         // camera is the common case, and uploading its crop
                         // stored a face as an unidentified card; say so instead.
+                        // A burst that finished after a newer capture started is
+                        // silent: its refusal belongs to a card the user has
+                        // already taken away, and its miss() would back off the
+                        // loop the newer card needs.
+                        if (!isCurrentCapture(res.captureSeq)) return;
                         const auto = !!(window.__autoScan && window.__autoScan.active);
                         const rej = window.__cardScanner && window.__cardScanner._lastReject;
                         if (!auto) {
@@ -952,6 +971,7 @@ if (scanBtn) {
                             // comparison showed that one card. The thumbnail, not
                             // the full crop — see QUEUE_THUMB_WIDTH.
                             crop_data_url: res.cropThumb || null,
+                            capture_seq: res.captureSeq,
                             meta: { source: 'browser_hash' },
                         }, document.getElementById('scan-result'));
                         return;
@@ -972,7 +992,12 @@ if (scanBtn) {
         }
 
         if (!currentImage) return;
-        
+
+        // Whatever this upload is about to show belongs to the capture current
+        // right now; a newer capture starting before the answer lands makes this
+        // one stale for the glass (it still reaches the queue).
+        const myCapture = captureSeq;
+
         const resultDiv = document.getElementById('scan-result');
         resultDiv.innerHTML = '<div class="loading"><div class="spinner"></div><p>Identifying card...</p></div>';
         const soEl = document.getElementById('scan-overlay-result');
@@ -1030,6 +1055,7 @@ if (scanBtn) {
                     crop_image_path: result.crop_image_path || null,
                 };
             }
+            result.capture_seq = myCapture;
             displayScanResult(result, resultDiv);
         } catch (error) {
             if (error.name === 'AbortError') {
@@ -1170,6 +1196,14 @@ function noteNearMiss(data) {
   
   // Guard: don't queue near-misses below confidence threshold (false positives)
   if (best < MIN_NEAR_MISS_SIM) return;
+
+  // The hash similarity cannot tell a face from a card — face crops measured
+  // 76-81 where real cards measure 82-96 — but the server fingerprint can:
+  // cards land at 0.06-0.12 and faces at 0.30-0.33. A guess that far from every
+  // card is not a card, so it never becomes a queue row and never spends an OCR
+  // or LLM attempt on a face. Matchers that report no distance are unaffected.
+  const guessDistance = guess ? Number(guess.distance) : NaN;
+  if (isFinite(guessDistance) && guessDistance > MAX_SERVER_DISTANCE) return;
   
   const auto = !!(window.__autoScan && window.__autoScan.active);
   if (!guess && auto) return;              // nothing to key on; don't spam
@@ -1294,8 +1328,10 @@ function displayScanResult(data, container) {
       const c = data.candidates[0];
       // Always update the fullscreen glass with the latest identification,
       // regardless of whether the card was already in the queue (RQ.add
-      // returns false on dedupe — that's not a reason to stop showing it).
-      updateScanOverlay(c);
+      // returns false on dedupe — that's not a reason to stop showing it). A
+      // result from an older capture is the exception: it must not paint over
+      // the glass a newer capture already owns.
+      if (isCurrentCapture(data.capture_seq)) updateScanOverlay(c);
       if (c.id && RQ.add({
         id: c.id,
         name: c.name || c.id,
@@ -1320,7 +1356,9 @@ function displayScanResult(data, container) {
       const el = document.getElementById('scan-overlay-result');
       // Show the best browser-hash score so a near-miss is visible, not silent.
       const bestPct = lastBrowserBest ? ` (best ${Math.round(lastBrowserBest * 100)}%)` : '';
-      if (el) el.innerHTML = `<span class="so-empty">No confident match${bestPct} — move the card closer</span>`;
+      if (el && isCurrentCapture(data.capture_seq)) {
+        el.innerHTML = `<span class="so-empty">No confident match${bestPct} — move the card closer</span>`;
+      }
       if (window.__autoScan && window.__autoScan.active) window.__autoScan.miss();
     }
 }
@@ -1968,6 +2006,10 @@ function updateScanOverlay(c) {
       <div class="so-meta">${[c.number, c.rarity, c.set?.name].filter(Boolean).join(' · ')}</div>
     </div>
     <div class="so-score">${Math.round((c.similarity || 0) * 100)}%</div>`;
+  // Every match reaches the glass through here, including the enhanced renderer
+  // that returns before the plain one, so this is the one place that can ask for
+  // the next card once the identification is on screen.
+  promptNextCard();
 }
 
 async function initializeApp() {
@@ -2217,12 +2259,39 @@ function stopCamera() {
     }
 }
 
+// Which capture owns the screen. A capture bumps this the moment it takes its
+// frames, and anything that finishes later carries the number it started with,
+// so a slow identification cannot paint over a newer capture's glass or replace
+// its next-card prompt. Results with no number (uploads, manual adds) are taken
+// as current.
+let captureSeq = 0;
+function nextCapture() { return ++captureSeq; }
+function isCurrentCapture(seq) { return seq == null || seq === captureSeq; }
+
+// After the flash and the identification, say what to do next. The result stays
+// up for a moment first, then the glass asks for the next card and holds that
+// text for a beat so the live readout cannot overwrite the ask.
+function promptNextCard(delay = 1400, label = 'Show the next card') {
+    clearTimeout(promptNextCard._timer);
+    const seq = captureSeq;
+    promptNextCard._timer = setTimeout(() => {
+        if (!isCurrentCapture(seq)) return;   // a newer capture owns the glass now
+        const cam = document.getElementById('camera-section');
+        if (!cam || cam.classList.contains('hidden')) return;   // upload mode
+        const el = document.getElementById('scan-overlay-result');
+        if (!el) return;
+        el.innerHTML = `<span class="so-empty">${label}</span>`;
+        window.__captureFeedbackUntil = Date.now() + 1800;
+    }, delay);
+}
+
 // Shutter feedback: a captured frame used to be invisible until the result
 // arrived, so an auto-scan attempt looked like nothing was happening (or like
 // the scanner was stuck). The flash marks the instant; the one message that
 // goes with it is the floating scan glass, and the live readout stands off it
 // while the identification runs.
-function showCaptureFeedback(label = 'Captured — identifying…') {
+function showCaptureFeedback(label = 'Captured — next card') {
+    clearTimeout(promptNextCard._timer);   // a new frame supersedes the ask
     const flash = document.getElementById('shutter-flash');
     if (flash) {
         // Deliberately not a CSS animation: main.css collapses every animation
@@ -2253,19 +2322,21 @@ async function capturePhoto(keepCamera = false) {
     const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.9));
     if (!blob) return;
     currentImage = blob;
-
-    // Both capture paths flash: the frame is taken here, and until now nothing
-    // on screen said so until a result came back.
-    showCaptureFeedback();
+    nextCapture();   // this photo is now the one the screen belongs to
 
     if (keepCamera) {
-        // Auto-scan: re-identify from the live frame without leaving camera mode
+        // Auto-scan: re-identify from the live frame without leaving camera mode.
+        // The burst flashes once it holds its frames, so the flash means the
+        // photo is taken rather than that sampling is about to start.
         if (window.__autoScan && window.__autoScan.active) {
             window.__autoScan.pending = true;
         }
         scanBtn.click();
         return;
     }
+
+    // Manual capture: the canvas above is the photo, so mark it now.
+    showCaptureFeedback();
 
     // Normal capture: show preview and exit camera mode
     const reader = new FileReader();
@@ -2806,7 +2877,11 @@ displayScanResult = async function(data, container) {
             // not skip the hooks the base implementation had, or the camera
             // overlay stays "Identifying…" while results land off-screen.
             const c = card;
-            updateScanOverlay({ ...c, name: c.name || details.basic_info.name, similarity: c.similarity || 0 });
+            // This renderer returns before the plain one, so it carries the same
+            // rule: only the newest capture may write the glass.
+            if (isCurrentCapture(data.capture_seq)) {
+                updateScanOverlay({ ...c, name: c.name || details.basic_info.name, similarity: c.similarity || 0 });
+            }
             if (cardId && RQ.add({
                 id: cardId,
                 name: localName || details.basic_info.name || c.name || cardId,

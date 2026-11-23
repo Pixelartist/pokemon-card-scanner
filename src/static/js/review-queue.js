@@ -44,20 +44,34 @@ const RQ_JOB_LABEL = {
   exhausted: 'OCR + AI exhausted',
   unavailable: 'no OCR/AI configured',
   error: 'background attempt failed',
+  // The read happened, but this session cannot ask the server about it any more.
+  unverified: 'sign in to check the read',
 };
+const RQ_JOB_FINAL = ['done', 'exhausted', 'unavailable', 'error', 'unverified'];
+
+// A row whose read the server still has: pressing OCR/AI again would queue a
+// second job for the same crop, and the button has to stay down when the dialog
+// is closed and reopened, because the row — not the dialog — owns that state.
+function rqJobPending(q) {
+  return !!(q && q.jobId && !RQ_JOB_FINAL.includes(q.jobStatus));
+}
 
 // A row the user believes is wrong can ask for the OCR/AI read by hand, even
 // though the matcher named it: that is exactly when it is worth paying for.
 function rqAssistButton(q) {
   const ready = !!rqQueueableCrop(q);
-  return `<button class="assist" type="button"${ready ? '' : ' disabled'}`
-    + `${ready ? ' title="Read this card again with OCR, then AI"' : ' title="No stored crop to read"'}>OCR / AI</button>`;
+  const busy = rqJobPending(q);
+  const title = !ready ? 'No stored crop to read'
+    : busy ? 'This crop is already being read'
+    : 'Read this card again with OCR, then AI';
+  return `<button class="assist" type="button"${ready && !busy ? '' : ' disabled'}`
+    + ` title="${title}">OCR / AI</button>`;
 }
 
 function rqJobBadge(q) {
   const label = RQ_JOB_LABEL[q.jobStatus];
   if (!label) return '';
-  const spent = ['exhausted', 'unavailable', 'error'].includes(q.jobStatus);
+  const spent = ['exhausted', 'unavailable', 'error', 'unverified'].includes(q.jobStatus);
   return `<div class="qi-job${spent ? ' spent' : ''}">${rqEsc(label)}</div>`;
 }
 
@@ -88,6 +102,9 @@ async function rqEnqueueIdentify(id, opts = {}) {
   // when the user asks for it — `Not this` may have told us the name is wrong,
   // or they may simply disagree with it.
   if (item.source !== 'near_miss' && !opts.userAsk) return false;
+  // One read per row at a time. A pending job means the answer is already on its
+  // way; a finished one can be asked again.
+  if (rqJobPending(item)) return false;
   if (item.jobId && !opts.userAsk) return false;
   try {
     const r = await fetch('/api/identify/enqueue', {
@@ -117,11 +134,26 @@ async function rqEnqueueIdentify(id, opts = {}) {
 
 async function rqPollJobs() {
   let items = RQ.load();
-  const pending = items.filter(q => q.jobId && !['done', 'exhausted', 'unavailable', 'error'].includes(q.jobStatus));
+  const pending = items.filter(rqJobPending);
   if (!pending.length) return;
   try {
     const r = await fetch('/api/identify/jobs?ids=' + pending.map(q => q.jobId).join(','),
                           { headers: rqAuthHeaders() });
+    if (r.status === 401) {
+      // Signed out. The server has an answer we are not allowed to read, and a
+      // row left at "OCR queued" would look like it is still being worked on
+      // forever (and, since a pending row keeps its button down, never be
+      // readable again). Say so and let the button go.
+      let stale = false;
+      for (const q of items) {
+        if (rqJobPending(q)) { q.jobStatus = 'unverified'; stale = true; }
+      }
+      if (stale) {
+        RQ.save(items);
+        if (window.refreshReviewQueues) window.refreshReviewQueues();
+      }
+      return;
+    }
     if (!r.ok) return;
     const jobs = (await r.json()).jobs || [];
     const byId = new Map(jobs.map(j => [j.id, j]));
@@ -264,9 +296,10 @@ async function rqWaitForJob(jobId, timeout = 90000) {
     try {
       const r = await fetch('/api/identify/jobs?ids=' + encodeURIComponent(jobId),
                             { headers: rqAuthHeaders() });
+      if (r.status === 401) return { status: 'unverified' };
       if (r.ok) {
         const job = ((await r.json()).jobs || [])[0];
-        if (job && ['done', 'exhausted', 'unavailable', 'error'].includes(job.status)) return job;
+        if (job && RQ_JOB_FINAL.includes(job.status)) return job;
       }
     } catch { /* keep waiting until the deadline */ }
     await new Promise(res => setTimeout(res, 1500));
@@ -286,6 +319,10 @@ function rqOpenCorrection(item) {
     name: item.name,
     meta: item.meta || '',
     score: item.score || 0,
+    // The row's own thumbnail. Without it the dialog had no picture for the card
+    // the matcher actually named, so the selected frame fell back to the
+    // placeholder even when the row beside it showed the card.
+    img: item.img || '',
   };
   // The current guess is the first choice, then every other match the scan
   // offered. Corrections therefore never need a re-scan.
@@ -360,8 +397,11 @@ function rqOpenCorrection(item) {
   // change that answer goes through here, so the comparison never goes stale
   // behind the controls.
   function renderSelected() {
-    selectedImg.src = rqImgSrc(selected.img) || RQ_PLACEHOLDER;
     selectedImg.alt = selected.name || '';
+    // Same cascade as the queue rows: the row's image, then the in-page index or
+    // the details endpoint, then the placeholder. A candidate the index does not
+    // carry (German/Pocket prints) still resolves instead of showing a gap.
+    rqSetImage(selectedImg, { id: selected.id, img: selected.img || '' });
     selectedName.textContent = selected.name || selected.id;
     const meta = guessMeta(selected);
     const score = selected.score ? Math.round(selected.score * 100) + '%' : '';
@@ -374,7 +414,9 @@ function rqOpenCorrection(item) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'rqm-option' + (c.id === selected.id ? ' active' : '');
-      btn.innerHTML = `<img src="${rqEsc(rqImgSrc(c.img) || RQ_PLACEHOLDER)}" alt=""><span>${rqEsc(c.name)}</span>`;
+      btn.innerHTML = `<img alt=""><span>${rqEsc(c.name)}</span>`;
+      const thumb = btn.querySelector('img');
+      if (thumb) rqSetImage(thumb, { id: c.id, img: c.img || '' });
       btn.addEventListener('click', () => pick(c));
       optionsBox.appendChild(btn);
     });
@@ -395,6 +437,14 @@ function rqOpenCorrection(item) {
     assistBtn.disabled = true;
     assistBtn.title = 'This row has no stored crop to read';
     setAssistStatus('No stored crop to read');
+  } else if (rqJobPending(item)) {
+    // Reopening the dialog must not hand back a button the server is already
+    // working for; the row remembers the job, so the button starts pressed.
+    assistBtn.disabled = true;
+    assistBtn.title = 'This crop is already being read';
+    setAssistStatus(item.jobStatus === 'running'
+      ? 'Reading the card…'
+      : 'Queued — waiting for the worker');
   }
 
   // Read the card's printed name and number (OCR first, then a vision LLM) and
@@ -418,8 +468,9 @@ function rqOpenCorrection(item) {
     setAssistStatus('Reading the card…');
     const job = await rqWaitForJob(jobId);
     if (!job) {
+      // The wait gave up, not the job: stay pressed while the server still has it.
       setAssistStatus('Still reading — check the row in a moment');
-      assistBtn.disabled = false;
+      assistBtn.disabled = rqJobPending(RQ.load().find(q => q.jobId === jobId));
       return;
     }
     if (job.status === 'done' && job.result_id) {
@@ -442,6 +493,17 @@ function rqOpenCorrection(item) {
       if (at >= 0) choices[at] = found; else choices.unshift(found);
       pick(found);
       setAssistStatus(`Read: ${found.name}`, 'ok');
+    } else if (job.status === 'unverified') {
+      // A lapsed session, not a failed read: say which, so signing in again is
+      // the obvious next step instead of pressing the button once more.
+      const rows = RQ.load();
+      const row = rows.find(q => q.jobId === jobId);
+      if (row) {
+        row.jobStatus = 'unverified';
+        RQ.save(rows);
+        if (window.refreshReviewQueues) window.refreshReviewQueues();
+      }
+      setAssistStatus('Session expired — sign in, then read again', 'bad');
     } else if (job.status === 'unavailable') {
       setAssistStatus('No OCR/AI configured on the server', 'bad');
     } else if (job.status === 'exhausted') {

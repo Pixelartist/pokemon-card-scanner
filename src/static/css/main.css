@@ -2121,7 +2121,11 @@ select {
 
 .enhanced-card-grid {
   display: grid;
-  grid-template-columns: minmax(0, 300px) minmax(0, 1fr);
+  /* Two columns only when the panel is wide enough for them. The scan result
+     lives in the 340px sidebar: a fixed 300px artwork column plus the gap left
+     the details column at 0px, so the name and buttons spilled out over the
+     queue beside it. auto-fit gives one column there and two in a wide panel. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 26px;
   align-items: start;
 }
