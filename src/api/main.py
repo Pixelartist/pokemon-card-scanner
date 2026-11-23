@@ -683,7 +683,7 @@ async def scan_card(
         raise  # 400/413/429 from the guards above are answers, not failures
     except Exception as e:
         logger.error(f"Scan error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 def _resolve_card_id(card_id):
@@ -952,7 +952,7 @@ async def add_to_collection(card_id: str = Form(...),
         return {"success": True, "id": item["id"]}
     except Exception as e:
         logger.error(f"Add to collection error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 @app.post("/api/collection/add-batch")
@@ -970,7 +970,7 @@ async def add_to_collection_batch(
         }
     except Exception as e:
         logger.error(f"Batch add error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 @app.get("/api/collection")
@@ -1157,7 +1157,7 @@ async def create_binder(binder_data: BinderCreate,
         )
         return binder
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 @app.get("/api/binders")
@@ -2271,7 +2271,7 @@ async def create_or_get_card(card_id: str):
         raise
     except Exception as e:
         logger.error(f"Error creating card: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 
@@ -2334,7 +2334,7 @@ async def scan_card_advanced(
 
     except Exception as e:
         logger.error(f"Advanced scan error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 
@@ -2890,7 +2890,7 @@ async def detect_card(
         raise  # 413/429 from the guards above are answers, not failures
     except Exception as e:
         logger.error(f"Detection error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 # ============================================================
@@ -2929,7 +2929,7 @@ async def register_user(user_data: UserRegister):
         raise HTTPException(status_code=409, detail="Username or email already exists")
     except Exception as e:
         logger.error("Registration error: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 @app.post("/api/auth/login")
@@ -2955,7 +2955,7 @@ async def login_user(login_data: UserLogin):
         raise
     except Exception as e:
         logger.error(f"Login error: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise _busy_or_internal(e)
 
 
 @app.post("/api/auth/refresh")
@@ -3238,9 +3238,12 @@ async def admin_search_cards(
 # Global exception handlers to prevent HTML error pages
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request, exc):
+    # Headers such as Retry-After on a 503 are part of the answer, so pass them
+    # through instead of dropping them here.
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.detail, "error": "HTTP Exception"}
+        content={"detail": exc.detail, "error": "HTTP Exception"},
+        headers=getattr(exc, "headers", None)
     )
 
 
@@ -3274,6 +3277,51 @@ async def validation_exception_handler(request, exc):
     return JSONResponse(
         status_code=422,
         content={"detail": jsonable_encoder(exc.errors()), "error": "Validation Error"}
+    )
+
+
+# The words SQLite uses when the lock it wanted was held by another connection.
+_BUSY_SIGNS = ("database is locked", "database table is locked",
+               "database schema is locked", "database is busy")
+_BUSY_DETAIL = "Database is busy, retry shortly"
+_BUSY_HEADERS = {"Retry-After": "2"}
+
+
+def _is_busy_db(exc: BaseException) -> bool:
+    """Was this a write that waited out SQLite's busy timeout?"""
+    return isinstance(exc, sqlite3.OperationalError) and any(
+        sign in str(exc).lower() for sign in _BUSY_SIGNS)
+
+
+def _busy_or_internal(exc: Exception) -> HTTPException:
+    """Map a locked database to 503 + Retry-After, anything else to 500.
+
+    A write that waited out the busy timeout is contention, not a bug: the same
+    request usually succeeds a second later, so telling the client to come back
+    beats reporting the database as broken. Routes that would otherwise flatten
+    every exception into a 500 raise this instead.
+    """
+    if _is_busy_db(exc):
+        logger.warning("Database busy, answering 503: %s", exc)
+        return HTTPException(status_code=503, detail=_BUSY_DETAIL,
+                             headers=dict(_BUSY_HEADERS))
+    return HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.exception_handler(sqlite3.OperationalError)
+async def sqlite_busy_handler(request, exc):
+    """Same mapping for the routes that let the error escape unwrapped."""
+    if _is_busy_db(exc):
+        logger.warning(f"Database busy on {request.method} {request.url.path}: {exc}")
+        return JSONResponse(
+            status_code=503,
+            content={"detail": _BUSY_DETAIL, "error": "Service Unavailable"},
+            headers=dict(_BUSY_HEADERS)
+        )
+    logger.error(f"Unhandled exception: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "error": "Internal Server Error"}
     )
 
 
