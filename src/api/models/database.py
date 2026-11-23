@@ -2,6 +2,7 @@
 import os
 import sqlite3
 import logging
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -15,9 +16,44 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = DATA_DIR / "pokemon_cards.db"
 
 
+def _ensure_wal(conn, attempts=5):
+    """Switch the file to WAL, waiting out anyone starting beside us.
+
+    PRAGMA journal_mode needs an exclusive lock, so workers booting together
+    each lost the race, the caller swallowed the error, and the file stayed in
+    rollback-journal mode until some later connection happened to win. Retrying
+    with a bounded wait makes the switch stick; when it truly cannot be made
+    (an outside process is holding the file) the mode that remains gets logged,
+    because WAL is what keeps readers from queueing behind a writer.
+    """
+    try:
+        conn.execute("PRAGMA busy_timeout = 2000")
+        last = None
+        for attempt in range(attempts):
+            try:
+                mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+            except sqlite3.OperationalError as exc:
+                last, mode = exc, None
+            if str(mode).lower() == "wal":
+                return True
+            time.sleep(0.2 * (attempt + 1))
+        logging.warning(
+            "Could not switch the database to WAL after %d attempts (%s): it "
+            "keeps its current journal mode, so readers queue behind a writer "
+            "instead of reading a snapshot", attempts, last)
+        return False
+    finally:
+        conn.execute("PRAGMA busy_timeout = 5000")
+
+
 def init_db():
     """Initialize SQLite database with required tables and indexes."""
-    conn = sqlite3.connect(DATABASE_URL)
+    conn = sqlite3.connect(DATABASE_URL, timeout=2.0)
+    # WAL belongs to the file, and the per-request connections only ask for it
+    # best effort (get_db_connection), which is not enough when four workers
+    # start at the same moment. Asking again here, before any schema work and
+    # with retries, is what makes the mode actually take effect at startup.
+    _ensure_wal(conn)
     cursor = conn.cursor()
     
     # Create sets table
