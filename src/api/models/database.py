@@ -244,7 +244,12 @@ def init_db():
 
 def get_db_connection():
     """Get a database connection with WAL mode and optimized pragmas."""
-    conn = sqlite3.connect(DATABASE_URL, check_same_thread=False)
+    # Opening must not queue behind a lock either: each pragma below waits out
+    # the busy timeout, so an outside writer made a new connection spend it
+    # three times over before the statement that wanted the lock even ran.
+    # Setup gets a short grace period, and the connection takes the real wait
+    # back at the end for the work it was opened to do.
+    conn = sqlite3.connect(DATABASE_URL, timeout=0.25, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     # WAL belongs to the database file, not to this connection, and asking to
     # switch needs an exclusive lock: a connection opened while another was
@@ -262,6 +267,7 @@ def get_db_connection():
     conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA mmap_size = 268435456")  # 256 MB mmap
+    conn.execute("PRAGMA busy_timeout = 5000")  # a blocked write still waits
     return conn
 
 

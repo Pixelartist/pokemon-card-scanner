@@ -954,7 +954,7 @@ async def add_to_collection(card_id: str = Form(...),
 
 
 @app.post("/api/collection/add-batch")
-async def add_to_collection_batch(
+def add_to_collection_batch(
     items: List[CollectionItemCreate],
     current_user: UserResponse = Depends(get_current_user)
 ):
@@ -1143,7 +1143,7 @@ async def delete_collection_item(item_id: int,
 # ==================== Binder Endpoints ====================
 
 @app.post("/api/binders")
-async def create_binder(binder_data: BinderCreate,
+def create_binder(binder_data: BinderCreate,
                         current_user: UserResponse = Depends(get_current_user)):
     """Create a new personal binder."""
     try:
@@ -2219,7 +2219,7 @@ async def get_card(card_id: str):
 
 
 @app.post("/api/cards/{card_id}/create-or-get")
-async def create_or_get_card(card_id: str):
+def create_or_get_card(card_id: str):
     """Find or create a card in the local database. Returns DB ID for collection."""
     try:
         # Schema is created once at startup (see the lifespan handler).
@@ -2892,7 +2892,10 @@ async def detect_card(
 # ============================================================
 
 @app.post("/api/auth/register")
-async def register_user(user_data: UserRegister):
+# Sync on purpose: this route is nothing but SQLite calls, and FastAPI runs a
+# sync endpoint in its thread pool, so waiting out a lock holds a thread instead
+# of the event loop that every other request in this worker needs.
+def register_user(user_data: UserRegister):
     """Register a new user account."""
     _enforce(_register_limiter, user_data.email.strip().lower(),
              "Too many sign-up attempts. Try again later.")
@@ -2926,7 +2929,7 @@ async def register_user(user_data: UserRegister):
 
 
 @app.post("/api/auth/login")
-async def login_user(login_data: UserLogin):
+def login_user(login_data: UserLogin):
     """Login and receive access token + httpOnly refresh cookie."""
     _enforce(_login_limiter, login_data.username.strip().lower(),
              "Too many login attempts. Wait a minute and try again.")
