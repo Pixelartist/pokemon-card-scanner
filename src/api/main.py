@@ -27,6 +27,7 @@ load_dotenv(os.environ.get("ENV_FILE", PROJECT_ROOT / ".env"))
 
 import requests
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from api.models.database import init_db, get_db_connection, DATABASE_URL
 db_path = DATABASE_URL  # backward-compatible alias
@@ -304,23 +305,96 @@ async def lifespan(application):
 
 app = FastAPI(title="Pokemon Card Scanner", version="1.0.0", lifespan=lifespan)
 
+# Origins allowed to make credentialed cross-origin calls. One list, shared
+# with the admin write guard below so the two cannot drift apart.
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "CORS_ALLOWED_ORIGINS",
+        "https://pixelartist.myqnapcloud.com:679,http://localhost:5005",
+    ).split(",")
+    if o.strip()
+]
+# Extra origins the admin area accepts writes from. Only needed when the reverse
+# proxy rewrites Host without forwarding X-Forwarded-Host, so the app cannot
+# tell which origin the browser actually used.
+ADMIN_EXTRA_ORIGINS = [
+    o.strip() for o in os.environ.get("ADMIN_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+
 # CORS middleware - explicit origins only. Never combine "*" with
 # allow_credentials=True: Starlette then reflects any Origin, which lets any
 # website make credentialed cross-origin calls with the refresh cookie.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        o.strip()
-        for o in os.environ.get(
-            "CORS_ALLOWED_ORIGINS",
-            "https://pixelartist.myqnapcloud.com:679,http://localhost:5005",
-        ).split(",")
-        if o.strip()
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# A write to /api/admin has to prove it came from this deployment. The refresh
+# cookie is SameSite=None (the QNAP proxy needs that) and get_current_user
+# accepts it on every route, so without this check a page on any other site
+# could ride the cookie into a password reset or a correction rewrite; CORS and
+# the JSON body alone were what stood in the way. Browsers always send Origin on
+# a non-GET request, so it is the proof we can rely on: the scheme is ignored
+# (the proxy terminates TLS) but the port is kept, because the NAS serves other
+# apps on the same host.
+_ADMIN_PATH = "/api/admin"
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _origin_key(value: Optional[str]) -> Optional[str]:
+    """``https://host:676/x`` -> ``host:676``; None when it is not an origin.
+
+    ``Origin: null`` (a sandboxed iframe, a file:// page) has no host and is
+    rejected with it: it proves nothing about who sent the request.
+    """
+    parts = urlsplit((value or "").strip())
+    if not parts.hostname:
+        return None
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return f"{parts.hostname.lower()}:{port}"
+
+
+def _admin_write_origins(request: Request) -> set:
+    """Origins this request may legitimately have come from."""
+    keys = {_origin_key(o) for o in ALLOWED_ORIGINS + ADMIN_EXTRA_ORIGINS}
+    # What the browser addressed us as: the proxy that keeps Host, or one that
+    # forwards the original host, needs no configuration.
+    for raw in (request.headers.get("x-forwarded-host"), request.headers.get("host")):
+        if raw:
+            keys.add(_origin_key("//" + raw.split(",")[0].strip()))
+    keys.discard(None)
+    return keys
+
+
+@app.middleware("http")
+async def guard_admin_writes(request: Request, call_next):
+    """Reject a cookie-authenticated admin write that came from another site."""
+    if (
+        request.method not in _SAFE_METHODS
+        and request.url.path.startswith(_ADMIN_PATH + "/")
+        and REFRESH_COOKIE_NAME in request.cookies
+    ):
+        origin = request.headers.get("origin")
+        # No Origin at all means a script or CLI client: there is no ambient
+        # session for another site to ride, and an attacker cannot strip the
+        # cookie a browser sends.
+        if origin is not None:
+            allowed = _admin_write_origins(request)
+            if _origin_key(origin) not in allowed:
+                logger.warning(
+                    "Rejected %s %s: Origin %r is not this app (allowed: %s). "
+                    "Behind a proxy that rewrites Host, add the public origin to "
+                    "ADMIN_ALLOWED_ORIGINS.",
+                    request.method, request.url.path, origin, ", ".join(sorted(allowed)),
+                )
+                return JSONResponse(
+                    {"detail": "Cross-site admin request rejected"}, status_code=403
+                )
+    return await call_next(request)
 
 # Mount static files
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
