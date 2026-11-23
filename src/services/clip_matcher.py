@@ -285,8 +285,7 @@ class CLIPCardMatcher:
 
         self._model = None
         self._preprocess = None
-        import torch
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device: Optional[str] = None  # resolved by device, on first use
 
         self._build_lock = threading.Lock()
         self._build_thread: Optional[threading.Thread] = None
@@ -298,6 +297,24 @@ class CLIPCardMatcher:
             "api_rate_limited": False,
             "next_reset": None,
         }
+
+    @property
+    def device(self) -> str:
+        """Torch's device, resolved on first use.
+
+        The constructor used to import torch just to answer this, so /api/status
+        and /api/health answered 500 wherever torch is not installed — even
+        though they only report readiness. Everything that computes runs under
+        torch anyway, and without it there is no GPU to pick, so CPU is the
+        honest answer.
+        """
+        if self._device is None:
+            try:
+                import torch
+                self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:  # no torch: the app still boots and reports
+                self._device = "cpu"
+        return self._device
 
     # ------------------------------------------------------------------ model
 
