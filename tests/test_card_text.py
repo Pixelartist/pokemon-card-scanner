@@ -34,6 +34,43 @@ class ParseCardText(unittest.TestCase):
         parsed = card_text.parse_card_text("077/198\nIllustr. GOTO minori 2023")
         self.assertEqual(parsed["number"], "077")
 
+    def test_a_german_collector_line_with_the_language_marker(self):
+        # Measured on a dark German printing: "PBL" + DE marker + "055/084".
+        # The printed total is the localised one, so only the number is kept.
+        parsed = card_text.parse_card_text("PBL DE 055/084\nMorpeko ex")
+        self.assertEqual(parsed["number"], "055")
+        self.assertEqual(parsed["total"], "084")
+        self.assertIsNone(parsed["set_code"])
+
+    def test_a_dashed_pair_inside_prose_is_not_a_collector_line(self):
+        # Measured OCR noise from the same dark card: this parsed as set "vv"
+        # plus number 4, so resolution chased a card that was never printed.
+        self.assertIsNone(card_text.parse_card_text(
+            "sO ae Vv - 4 A Pee oreseria\nLOW ae F, AZ A. PPE Sreeerres"))
+
+    def test_a_secret_rare_above_its_total_is_a_real_reading(self):
+        # Measured on an English render: the card prints 148/086, an 86-card set
+        # with higher-numbered secret rares. Rejecting number > total threw the
+        # real collector line away and left only OCR noise.
+        parsed = card_text.parse_card_text("148/086\nPidove")
+        self.assertEqual(parsed["number"], "148")
+        self.assertEqual(parsed["total"], "086")
+
+    def test_the_collector_line_wins_over_a_misread_of_itself(self):
+        # Measured on an English render (Pidove 148/086): one pass read
+        # "148/086" and another "198/086" (4 read as 9). The implausible one
+        # must not shadow the real reading.
+        parsed = card_text.parse_card_text("148/086\nEEE 198/086\nEO ak 148/086")
+        self.assertEqual(parsed["number"], "148")
+        self.assertEqual(parsed["total"], "086")
+
+    def test_the_reading_most_passes_agree_on_wins(self):
+        # Both are plausible, so only agreement decides: two passes read
+        # 148/086 off the strip, one read 086/198.
+        parsed = card_text.parse_card_text("086/198\n148/086\n148/086")
+        self.assertEqual(parsed["number"], "148")
+        self.assertEqual(parsed["total"], "086")
+
     def test_garbage_is_not_a_reading(self):
         self.assertIsNone(card_text.parse_card_text("~~~~"))
         self.assertIsNone(card_text.parse_card_text(""))

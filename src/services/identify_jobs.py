@@ -18,6 +18,11 @@ from pathlib import Path
 
 from services import card_text
 
+try:  # the app imports this module as services.identify_jobs
+    from services.misread_training import canonical_card_id
+except ImportError:  # pragma: no cover - relative import from inside the package
+    from .misread_training import canonical_card_id
+
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 2  # OCR, then a vision LLM
@@ -154,6 +159,51 @@ def providers():
     return chain
 
 
+def _canonical_reading(parsed):
+    """Normalise a reader answer that came back as an id instead of set + number.
+
+    Asked for a set code and a number, a vision LLM sometimes answers the id in
+    one field ("ex14:56"), or copies a queue key ("unknown:de_sv04-212:30").
+    Left alone, ``_number_variants`` reduces that to digits and the job reports
+    ``exhausted`` for a card the catalogue does have.
+    """
+    if not parsed:
+        return parsed
+    set_code = str(parsed.get("set_code") or "").strip()
+    number = str(parsed.get("number") or "").strip()
+    if ":" not in set_code and ":" not in number:
+        return parsed
+    raw = f"{set_code}:{number}" if set_code else number
+    canon = canonical_card_id(raw)
+    if not canon or canon == raw or "-" not in canon:
+        return parsed
+    set_code, _, number = canon.rpartition("-")
+    fixed = dict(parsed)
+    fixed["set_code"] = set_code.lower() or None
+    fixed["number"] = number
+    logger.info("identify: reader answer %r normalised to %s-%s", raw, set_code, number)
+    return fixed
+
+
+def _canonical_result_id(db_path, card_id):
+    """Store an id the cards table actually has; readers can hand back "ex14:56"."""
+    canon = canonical_card_id(str(card_id or ""))
+    if not canon or canon == card_id:
+        return card_id
+    try:
+        conn = _connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT ptcg_id FROM cards WHERE ptcg_id = ?", (canon,)
+            ).fetchone()
+            return canon if row else card_id
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.warning("identify: could not check result id %s: %s", card_id, exc)
+        return card_id
+
+
 def _read_sources(db_path, read, sources):
     """Try one reader over each source until one resolves to a card.
 
@@ -162,7 +212,7 @@ def _read_sources(db_path, read, sources):
     frame it was cut from has it. Returns (row, parsed, source) or (None, ...).
     """
     for source, label in sources:
-        parsed = read(source)
+        parsed = _canonical_reading(read(source))
         if not parsed:
             continue
         conn = _connect(db_path)
@@ -194,14 +244,36 @@ def process(db_path, job):
         row, parsed, source = _read_sources(db_path, read, sources)
         if row:
             return {"status": "done", "attempts": attempts, "provider": name,
-                    "result_id": row["ptcg_id"], "result_name": row["name"],
+                    "result_id": _canonical_result_id(db_path, row["ptcg_id"]),
+                    "result_name": row["name"],
                     "detail": f"{name} read {parsed.get('number')} from the {source}"}
         notes.append(f"{name}: inconclusive")
     return {"status": "exhausted", "attempts": attempts,
             "provider": chain[-1][0], "detail": "; ".join(notes)}
 
 
+def _reclaim(db_path):
+    """Requeue jobs an earlier worker left at `running`.
+
+    Called once as the worker starts, when nothing of ours is in flight: a job
+    still marked running then belongs to a process that died or was restarted
+    mid-read, and would otherwise sit in the queue looking busy forever.
+    """
+    conn = _connect(db_path)
+    try:
+        reclaimed = conn.execute(
+            "UPDATE identify_jobs SET status='queued', updated_at=CURRENT_TIMESTAMP"
+            " WHERE status='running'"
+        ).rowcount
+        conn.commit()
+        if reclaimed:
+            logger.info("identify: requeued %s job(s) left running", reclaimed)
+    finally:
+        conn.close()
+
+
 def _run(db_path):
+    _reclaim(db_path)
     while True:
         job = _claim(db_path)
         if not job:

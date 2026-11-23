@@ -27,6 +27,11 @@ from dotenv import load_dotenv
 
 load_dotenv('/opt/data/pokemon-card-scanner/.env')
 
+try:  # the app imports this module as services.clip_matcher
+    from services.misread_training import load_confusers
+except ImportError:  # pragma: no cover - plain module import
+    from .misread_training import load_confusers
+
 logger = logging.getLogger(__name__)
 
 CARD_IMAGE_BASE = "https://images.pokemontcg.io"
@@ -273,6 +278,7 @@ class CLIPCardMatcher:
 
         self.cards: Dict[str, CardEmbedding] = {}
         self.card_list: List[CardEmbedding] = []
+        self._id_rows: Optional[Dict[str, int]] = None
         self._index_loaded = False
         # Set name cache: code -> name
         self._set_names: Dict[str, str] = {}
@@ -1184,6 +1190,94 @@ class CLIPCardMatcher:
             "template_match": True,
         }
 
+    # ------------------------------------------------------ corrected confusers
+
+    def _card_rows(self) -> Dict[str, int]:
+        """card_id -> row in card_list, to score a pinned print the top-k skipped."""
+        rows = self._id_rows
+        if rows is None or len(rows) != len(self.card_list):
+            rows = {c.card_id: i for i, c in enumerate(self.card_list)}
+            self._id_rows = rows
+        return rows
+
+    def _candidate_for(self, card: CardEmbedding, score: float) -> Dict[str, Any]:
+        # Resolve image URL on-demand (fast load skips this); cache for repeats
+        img_url = card.image_url
+        if not img_url:
+            img_url = resolve_card_image_url(card.card_id)
+            card.image_url = img_url
+        candidate: Dict[str, Any] = {
+            "id": card.card_id,
+            "name": card.name,
+            "set": card.set_code,
+            "set_name": card.set_name,
+            "number": card.number,
+            "similarity": round(float(score), 3),
+            "image_url": img_url,
+        }
+        # Add rich metadata if available
+        for key, value in (("rarity", card.rarity), ("types", card.types),
+                           ("hp", card.hp), ("attacks", card.attacks),
+                           ("weaknesses", card.weaknesses), ("retreat", card.retreat),
+                           ("pricing", card.pricing)):
+            if value:
+                candidate[key] = value
+        return candidate
+
+    def _pin_twin(self, template: Dict[str, Any]):
+        """A template row is one print of an artwork; twins need the corrected one."""
+        conf = load_confusers()
+        pair = conf.twin(template.get("id")) if conf else None
+        if not pair:
+            return None, None
+        row = self._card_rows().get(pair["correct_id"])
+        if row is None:
+            return None, None
+        fixed = self._candidate_for(self.card_list[row], template.get("similarity") or 0.0)
+        fixed["template_match"] = True
+        fixed["confuser_of"] = template["id"]
+        note = {
+            "wrong_id": template["id"],
+            "correct_id": pair["correct_id"],
+            "kind": "twin",
+            "gap": 0.0,
+            "template": True,
+        }
+        return fixed, note
+
+    def _apply_confusers(self, candidates: List[Dict[str, Any]], sims):
+        """Promote the corrected print when the guess is a pinned wrong id.
+
+        Only fires for pairs a user actually corrected, and only when the
+        corrected print scores within the pair's margin of the guess -- the two
+        prints the user called confusable have to be neck and neck, so a clear
+        photo of the other print still wins.
+        """
+        conf = load_confusers()
+        if conf is None or not candidates:
+            return candidates, None
+        top = candidates[0]
+        pair = conf.pin(top.get("id"))
+        if not pair or pair["correct_id"] == top.get("id"):
+            return candidates, None
+        row = self._card_rows().get(pair["correct_id"])
+        if row is None or sims is None or row >= len(sims):
+            return candidates, None
+        score = float(sims[row])
+        if score < top["similarity"] - float(pair.get("margin", 0.02)):
+            return candidates, None
+        corrected = self._candidate_for(self.card_list[row], score)
+        guess = dict(top)
+        guess["confuser"] = pair["wrong_id"]
+        rest = [c for c in candidates[1:] if c.get("id") != pair["correct_id"]]
+        note = {
+            "wrong_id": pair["wrong_id"],
+            "correct_id": pair["correct_id"],
+            "kind": pair["kind"],
+            "gap": round(score - top["similarity"], 4),
+        }
+        return [corrected, guess] + rest, note
+
     def match_card(self, image_bytes: bytes, top_k: int = 5) -> Dict[str, Any]:
         if not self.load_index() or not self.cards:
             return {
@@ -1202,14 +1296,25 @@ class CLIPCardMatcher:
         idx = np.argpartition(-sims, top_k)[:top_k]
         idx = idx[np.argsort(-sims[idx])]
 
-        # Template matching is decisive on real photos — when it fires, trust it.
+        # Template matching is decisive on real photos — when it fires, trust it,
+        # except for pinned twins: two prints sharing artwork are one template, so
+        # the row it lands on is whichever of the pair came first in the index.
         template = self._match_template(image_bytes)
         if template is not None:
+            twin, note = self._pin_twin(template)
+            reason = f"Template match ({template['similarity']:.2f})"
+            if twin is not None:
+                template = twin
+                reason += f", pinned twin of {note['wrong_id']}"
+            meta: Dict[str, Any] = {
+                "source": "clip_matcher", "cards_indexed": len(self.card_list)}
+            if note:
+                meta["confuser"] = note
             return {
                 "decision": "match",
-                "decision_reason": f"Template match ({template['similarity']:.2f})",
+                "decision_reason": reason,
                 "candidates": [template],
-                "meta": {"source": "clip_matcher", "cards_indexed": len(self.card_list)},
+                "meta": meta,
             }
 
         candidates = []
@@ -1217,36 +1322,9 @@ class CLIPCardMatcher:
             card = self.card_list[i]
             score = float(sims[i])
             if score >= 0.15:
-                # Resolve image URL on-demand (fast load skips this); cache for repeats
-                img_url = card.image_url
-                if not img_url:
-                    img_url = resolve_card_image_url(card.card_id)
-                    card.image_url = img_url
-                candidate = {
-                    "id": card.card_id,
-                    "name": card.name,
-                    "set": card.set_code,
-                    "set_name": card.set_name,
-                    "number": card.number,
-                    "similarity": round(score, 3),
-                    "image_url": img_url,
-                }
-                # Add rich metadata if available
-                if card.rarity:
-                    candidate["rarity"] = card.rarity
-                if card.types:
-                    candidate["types"] = card.types
-                if card.hp:
-                    candidate["hp"] = card.hp
-                if card.attacks:
-                    candidate["attacks"] = card.attacks
-                if card.weaknesses:
-                    candidate["weaknesses"] = card.weaknesses
-                if card.retreat:
-                    candidate["retreat"] = card.retreat
-                if card.pricing:
-                    candidate["pricing"] = card.pricing
-                candidates.append(candidate)
+                candidates.append(self._candidate_for(card, score))
+
+        candidates, confuser = self._apply_confusers(candidates, sims)
 
         top = candidates[0] if candidates else None
         if top and top["similarity"] > 0.55:
@@ -1255,12 +1333,19 @@ class CLIPCardMatcher:
             decision, reason = "possible_match", f"Possible match ({top['similarity']:.2f})"
         else:
             decision, reason = "no_match", "No similar card in local index"
+        if confuser and top:
+            reason = (f"Pinned pair {confuser['wrong_id']} -> {confuser['correct_id']} "
+                      f"({top['similarity']:.2f}, {confuser['kind']})")
 
+        meta: Dict[str, Any] = {
+            "source": "clip_matcher", "cards_indexed": len(self.card_list)}
+        if confuser:
+            meta["confuser"] = confuser
         return {
             "decision": decision,
             "decision_reason": reason,
             "candidates": candidates,
-            "meta": {"source": "clip_matcher", "cards_indexed": len(self.card_list)},
+            "meta": meta,
         }
 
 

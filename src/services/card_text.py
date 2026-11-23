@@ -13,17 +13,26 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # "077/198" (number/total), "SWSH057", "SV07-077", "ME05 015"
 _NUMBER_TOTAL = re.compile(r"\b(\d{1,3})\s*/\s*(\d{1,3})\b")
-# Spaces and hyphens only: a newline here would pair the last word of one line
-# with the number on the next and invent a set code out of prose.
-_SET_AND_NUMBER = re.compile(r"\b([A-Z]{2,5}\d{0,2})[ \t]*[- ]?[ \t]*(\d{1,3})\b")
+# Anchored to the start of a line: a collector line begins with its set code,
+# while prose produces the same shape mid-sentence (measured OCR noise "sO ae
+# Vv - 4" became set "vv" + number 4). Spaces and hyphens only, so a newline
+# cannot pair the last word of one line with the number on the next.
+_SET_AND_NUMBER = re.compile(
+    r"^[^A-Z]{0,3}([A-Z]{2,5}\d{0,2})[ \t]*[- ]?[ \t]*(\d{1,3})\b")
 _ILLUSTRATOR_LINE = re.compile(r"illustr|illustrator|illus\.", re.IGNORECASE)
 _NAME_WORD = re.compile(r"[^\W\d_]{3,}(?:[ '\-][^\W\d_]{2,})*", re.UNICODE)
+
+# A number above the printed total is how a secret rare prints (measured:
+# "148/086" for a card in an 86-card set), so it is not a misread on its own —
+# but a total too small to be a set size makes the pair nonsense ("077/012").
+SMALLEST_PLAUSIBLE_SET = 30
 
 # A candidate name this close to the printed one is usable when it is also the
 # clear winner among the cards sharing that number.
@@ -69,15 +78,23 @@ def parse_card_text(text):
     body = "\n".join(ln for ln in lines if not _ILLUSTRATOR_LINE.search(ln)).upper()
     # "077/142" first: it is the whole collector line, where a bare set code plus
     # digits can also come from artwork text or the dex number.
-    match = _NUMBER_TOTAL.search(body)
-    if match and _plausible(match.group(1), match.group(2)):
+    # Several passes read the same strip, so a misread of the collector line
+    # ("198/086" for "148/086") sits in the text beside the real one. Taking the
+    # first match means a single bad pass decides; the reading most passes agree
+    # on wins instead, and ties go to the one read first.
+    readings = [(match.group(1), match.group(2))
+                for match in _NUMBER_TOTAL.finditer(body)
+                if _plausible(match.group(1), match.group(2))]
+    if readings:
+        number, total = Counter(readings).most_common(1)[0][0]
         # The printed total is kept for logging only: localised sets print their
         # own size, so it does not match our catalogue's count for the set.
-        return {"set_code": None, "number": match.group(1), "total": match.group(2),
+        return {"set_code": None, "number": number, "total": total,
                 "name": guess_name(text)}
-    match = _SET_AND_NUMBER.search(body)
-    if match:
-        return {"set_code": match.group(1).lower(), "number": match.group(2)}
+    for line in body.splitlines():
+        match = _SET_AND_NUMBER.search(line)
+        if match and _plausible(match.group(2)):
+            return {"set_code": match.group(1).lower(), "number": match.group(2)}
     return None
 
 
@@ -98,7 +115,7 @@ def _plausible(number, total=None):
     if total is not None:
         if not str(total).isdigit() or not 1 <= int(total) <= 999:
             return False
-        if int(total) < int(number):
+        if int(total) < int(number) and int(total) < SMALLEST_PLAUSIBLE_SET:
             return False
     return True
 
@@ -221,14 +238,14 @@ def _scaled(image, factor):
 def ocr_text(image_path):
     """Raw text from the card, or None when OCR is not installed or fails.
 
-    Two passes, because one does not do it: sparse text over the whole card
-    finds the name (and the collector line on a clean shot), while the bottom
-    strip magnified finds "077/142" — measured on a real card, the default
-    single pass returned nothing useful at either size.
+    Several passes, because one does not do it: sparse text over the top band
+    finds the name and over the whole card the collector line on a clean shot,
+    while the bottom strip magnified finds "077/142" — measured on real cards,
+    the default single pass returned nothing useful at any one size.
     """
     try:
         import pytesseract
-        from PIL import Image
+        from PIL import Image, ImageOps
     except Exception:
         return None
     try:
@@ -238,16 +255,34 @@ def ocr_text(image_path):
         return None
     parts = []
     try:
-        parts.append(pytesseract.image_to_string(_scaled(image, 2), config="--psm 11"))
         width, height = image.size
+        # The name is printed on the top band over artwork, where a whole-card
+        # pass dissolves it (measured "en piokpeko eX" for "Morpeko ex"); that
+        # band at 4x with its contrast stretched reads it. Going first also keeps
+        # guess_name() off the artwork noise the full pass leaves above it.
+        banner = image.crop((0, 0, width, int(height * 0.20)))
+        # Both readings of the band earn their place: block mode keeps the name
+        # in one piece on a clean render ("BASIC Pidove:"), where sparse mode
+        # cut it to "Pid", while sparse mode is what survives a dark printing
+        # ("... Morpeko ex 180" on a black card).
+        parts.append(pytesseract.image_to_string(_scaled(banner, 2), config="--psm 6"))
+        parts.append(pytesseract.image_to_string(
+            ImageOps.autocontrast(_scaled(banner, 4)), config="--psm 11"))
+        parts.append(pytesseract.image_to_string(_scaled(image, 2), config="--psm 11"))
         # Two bands and two magnifications: the collector line survives a tighter
         # crop at 4x on a re-encoded JPEG but needs 8x on a soft one, and a 0.88
         # band clips it on a card whose bottom margin is small.
         for top in (0.86, 0.90):
-            strip = image.crop((0, int(height * top), int(width * 0.55), height))
+            strip = image.crop((0, int(height * top), int(width * 0.62), height))
             for factor in (4, 8):
-                parts.append(pytesseract.image_to_string(
-                    _scaled(strip, factor), config="--psm 6"))
+                big = _scaled(strip, factor)
+                parts.append(pytesseract.image_to_string(big, config="--psm 6"))
+                if factor == 4:
+                    # Block mode needs dark print on a light background; a dark
+                    # printing returns only the rule box there. Sparse mode reads
+                    # the same strip at 4x (measured "055/084" off a German
+                    # Morpeko ex that psm 6 never found).
+                    parts.append(pytesseract.image_to_string(big, config="--psm 11"))
     except Exception as exc:
         logger.info("OCR failed for %s: %s", image_path, exc)
         return None
