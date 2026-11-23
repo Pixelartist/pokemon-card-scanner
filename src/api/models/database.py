@@ -16,18 +16,17 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = DATA_DIR / "pokemon_cards.db"
 
 
-def _ensure_wal(conn, attempts=5):
+def _ensure_wal(attempts=5):
     """Switch the file to WAL, waiting out anyone starting beside us.
 
     PRAGMA journal_mode needs an exclusive lock, so workers booting together
     each lost the race, the caller swallowed the error, and the file stayed in
     rollback-journal mode until some later connection happened to win. Retrying
-    with a bounded wait makes the switch stick; when it truly cannot be made
-    (an outside process is holding the file) the mode that remains gets logged,
-    because WAL is what keeps readers from queueing behind a writer.
+    makes the switch stick. It uses its own short-lived connection so it never
+    has to borrow, and then restore, the timeout of the caller's connection.
     """
+    conn = sqlite3.connect(DATABASE_URL, timeout=2.0)
     try:
-        conn.execute("PRAGMA busy_timeout = 2000")
         last = None
         for attempt in range(attempts):
             try:
@@ -35,25 +34,23 @@ def _ensure_wal(conn, attempts=5):
             except sqlite3.OperationalError as exc:
                 last, mode = exc, None
             if str(mode).lower() == "wal":
-                return True
+                return
             time.sleep(0.2 * (attempt + 1))
         logging.warning(
             "Could not switch the database to WAL after %d attempts (%s): it "
             "keeps its current journal mode, so readers queue behind a writer "
             "instead of reading a snapshot", attempts, last)
-        return False
     finally:
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.close()
 
 
 def init_db():
     """Initialize SQLite database with required tables and indexes."""
-    conn = sqlite3.connect(DATABASE_URL, timeout=2.0)
-    # WAL belongs to the file, and the per-request connections only ask for it
-    # best effort (get_db_connection), which is not enough when four workers
-    # start at the same moment. Asking again here, before any schema work and
-    # with retries, is what makes the mode actually take effect at startup.
-    _ensure_wal(conn)
+    # WAL belongs to the file, so it is set here, once, before any schema work:
+    # the per-request connections only ask for it best effort, which is not
+    # enough when four workers start at the same moment.
+    _ensure_wal()
+    conn = sqlite3.connect(DATABASE_URL)
     cursor = conn.cursor()
     
     # Create sets table
@@ -279,21 +276,18 @@ def init_db():
 
 
 def get_db_connection():
-    """Get a database connection with WAL mode and optimized pragmas."""
-    # Opening must not queue behind a lock either: each pragma below waits out
-    # the busy timeout, so an outside writer made a new connection spend it
-    # three times over before the statement that wanted the lock even ran.
-    # Setup gets a short grace period, and the connection takes the real wait
-    # back at the end for the work it was opened to do.
+    """Get a database connection with the pragmas the app expects."""
+    # Setup must not queue behind a lock: each pragma waits out the busy
+    # timeout, so with the 5 s default a new connection spent it three times
+    # over before the statement that wanted the lock even ran. Setup gets a
+    # short grace, and the work itself gets the real wait back at the end.
     conn = sqlite3.connect(DATABASE_URL, timeout=0.25, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    # WAL belongs to the database file, not to this connection, and asking to
-    # switch needs an exclusive lock: a connection opened while another was
-    # mid-write raised "database is locked", which failed 7 of 8 simultaneous
-    # sign-ups. A new connection also cannot prepare synchronous or cache_size
-    # while an outside process holds that exclusive lock, since it cannot read
-    # the schema, so all three are best effort — a busy answer means somebody
-    # else is already there or is about to be, and the defaults still serve.
+    # A connection opened while another process holds the lock can prepare none
+    # of these, so all are best effort: a busy answer means somebody else is
+    # already there or is about to be, and the current settings still serve.
+    # journal_mode is the file's and init_db sets it, repeated here only in
+    # case that lost the lock; synchronous and cache_size are per connection.
     for pragma in ("journal_mode = WAL", "synchronous = NORMAL",
                    "cache_size = -200000"):  # 200 MB page cache
         try:
