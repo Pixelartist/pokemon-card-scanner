@@ -682,7 +682,7 @@ async def scan_card(
     except HTTPException:
         raise  # 400/413/429 from the guards above are answers, not failures
     except Exception as e:
-        logger.error(f"Scan error: {e}")
+        _log_failure("Scan error", e)
         raise _busy_or_internal(e)
 
 
@@ -951,7 +951,7 @@ async def add_to_collection(card_id: str = Form(...),
         })
         return {"success": True, "id": item["id"]}
     except Exception as e:
-        logger.error(f"Add to collection error: {e}")
+        _log_failure("Add to collection error", e)
         raise _busy_or_internal(e)
 
 
@@ -969,7 +969,7 @@ async def add_to_collection_batch(
             "ids": [item.id for item in saved]
         }
     except Exception as e:
-        logger.error(f"Batch add error: {e}")
+        _log_failure("Batch add error", e)
         raise _busy_or_internal(e)
 
 
@@ -1157,6 +1157,7 @@ async def create_binder(binder_data: BinderCreate,
         )
         return binder
     except Exception as e:
+        _log_failure("Binder create error", e)
         raise _busy_or_internal(e)
 
 
@@ -2270,7 +2271,7 @@ async def create_or_get_card(card_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating card: {e}")
+        _log_failure("Error creating card", e)
         raise _busy_or_internal(e)
 
 
@@ -2333,7 +2334,7 @@ async def scan_card_advanced(
         return JSONResponse(result)
 
     except Exception as e:
-        logger.error(f"Advanced scan error: {e}")
+        _log_failure("Advanced scan error", e)
         raise _busy_or_internal(e)
 
 
@@ -2889,7 +2890,7 @@ async def detect_card(
     except HTTPException:
         raise  # 413/429 from the guards above are answers, not failures
     except Exception as e:
-        logger.error(f"Detection error: {e}")
+        _log_failure("Detection error", e)
         raise _busy_or_internal(e)
 
 
@@ -2928,7 +2929,7 @@ async def register_user(user_data: UserRegister):
         logger.warning("Registration conflict for %s: %s", user_data.username, e)
         raise HTTPException(status_code=409, detail="Username or email already exists")
     except Exception as e:
-        logger.error("Registration error: %s", e, exc_info=True)
+        _log_failure("Registration error", e)
         raise _busy_or_internal(e)
 
 
@@ -2954,7 +2955,7 @@ async def login_user(login_data: UserLogin):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Login error: {e}")
+        _log_failure("Login error", e)
         raise _busy_or_internal(e)
 
 
@@ -3302,10 +3303,22 @@ def _busy_or_internal(exc: Exception) -> HTTPException:
     every exception into a 500 raise this instead.
     """
     if _is_busy_db(exc):
-        logger.warning("Database busy, answering 503: %s", exc)
         return HTTPException(status_code=503, detail=_BUSY_DETAIL,
                              headers=dict(_BUSY_HEADERS))
     return HTTPException(status_code=500, detail="Internal server error")
+
+
+def _log_failure(context: str, exc: Exception) -> None:
+    """Log contention as a warning and a real failure with its traceback.
+
+    The route is about to answer 503 for a lock, so an ERROR with a stack trace
+    would read like a fault in the log while nothing is broken; anything else
+    keeps the full traceback.
+    """
+    if _is_busy_db(exc):
+        logger.warning("%s: database busy, answering 503: %s", context, exc)
+        return
+    logger.error("%s: %s", context, exc, exc_info=True)
 
 
 @app.exception_handler(sqlite3.OperationalError)
