@@ -177,7 +177,7 @@ def resolve_card_image_url(card_id: str, raw_url: str = "") -> str:
         return ""
     images_dir = DB_DIR / "images"
     # Already-resolved local static URLs (e.g. German art mounted at
-    # /static/german_cards/images) live outside data/images/ — verify in place.
+    # /static/german_cards/images) live outside data/images/ â€” verify in place.
     if raw_url.startswith("/static/"):
         direct = DB_DIR / raw_url[len("/static/"):]
         if direct.is_file():
@@ -383,7 +383,7 @@ class CLIPCardMatcher:
         if total == 0:
             return False
         # card-index.bin is (N, 512) int16, scale = 32767
-        # no header — memmap reads raw data directly
+        # no header â€” memmap reads raw data directly
         embeddings = np.memmap(bin_path, dtype=np.int16, mode='r', shape=(total, 512))
         scale = 32767.0
         self.cards.clear()
@@ -430,32 +430,29 @@ class CLIPCardMatcher:
         # Use fast binary path; load_index() is ~100s JSON+NPZ, this is ~1s
         return self.load_index_fast() and len(self.cards) >= min_cards
 
-    def health_check(self) -> Dict[str, Any]:
-        """Return health status without blocking on slow index load."""
-        if not self._index_loaded:
-            self.load_index_fast()
-        return {
-            "clip_ready": self._index_loaded,
-            "cards_indexed": len(self.cards),
-        }
-
-    # ------------------------------------------------------------------- fetch
     def status(self) -> Dict[str, Any]:
-        """Build progress + usability. Uses the fast loader, never the ~100s one."""
+        """Readiness and build progress, from the one place the app asks.
+
+        /api/status and /api/health both read this, so a fact about the index is
+        reported under the same name everywhere. Uses load_index_fast() (~1s);
+        load_index() is the ~100s JSON+NPZ path and must not run on a poll.
+        """
         if not self._index_loaded:
             self.load_index_fast()
         p = self._build_progress
         return {
             "indexed": len(self.cards),
+            "usable": len(self.cards) >= 20,
             "loading": p["running"],
             "build_done": p["done"],
             "build_total": p["total"],
             "last_error": p["last_error"],
             "api_rate_limited": p.get("api_rate_limited", False),
             "next_reset": p.get("next_reset"),
-            "usable": len(self.cards) >= 20,
             "device": self.device,
         }
+
+    # ------------------------------------------------------------------- fetch
 
     def build_index(self, max_cards: int = 1000, in_background: bool = True) -> bool:
         """Fetch card list + download artwork + embed. Resumable."""
@@ -1151,7 +1148,7 @@ class CLIPCardMatcher:
         rows_path = self.db_dir / "template-rows.json"
         if not (bin_path.exists() and rows_path.exists()):
             return None
-        # Cache the 774MB matrix — reloading it per scan costs ~4s.
+        # Cache the 774MB matrix â€” reloading it per scan costs ~4s.
         cache = getattr(self.__class__, "_template_cache", None)
         if cache is None or cache[0] != bin_path:
             T = np.fromfile(bin_path, dtype=np.float16,
@@ -1298,7 +1295,7 @@ class CLIPCardMatcher:
         idx = np.argpartition(-sims, top_k)[:top_k]
         idx = idx[np.argsort(-sims[idx])]
 
-        # Template matching is decisive on real photos — when it fires, trust it,
+        # Template matching is decisive on real photos â€” when it fires, trust it,
         # except for pinned twins: two prints sharing artwork are one template, so
         # the row it lands on is whichever of the pair came first in the index.
         template = self._match_template(image_bytes)

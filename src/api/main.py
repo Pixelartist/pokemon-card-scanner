@@ -3248,7 +3248,7 @@ async def health_check():
     from services.clip_matcher import get_clip_matcher
     from services.card_detector import get_detector
     matcher = get_clip_matcher()
-    clip_health = matcher.health_check()
+    clip = await asyncio.to_thread(matcher.status)  # same source as /api/status
     try:
         detector = get_detector()
         detector_status = "ready" if detector else "not_loaded"
@@ -3258,7 +3258,10 @@ async def health_check():
     return {
         "status": "healthy",
         "detector": detector_status,
-        "clip_matcher": clip_health,
+        "clip_matcher": {
+            "clip_ready": clip["usable"],
+            "cards_indexed": clip["indexed"],
+        },
     }
 
 
