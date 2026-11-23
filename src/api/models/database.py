@@ -15,18 +15,6 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = DATA_DIR / "pokemon_cards.db"
 
-# How long a cold start waits for another process to let go of the database
-# before giving up on the schema. A sibling worker holds it for milliseconds; a
-# restore or a backup can hold it far longer, and a server without its schema
-# serves nothing, so waiting is worth more than dying to uvicorn's respawn.
-INIT_LOCK_WAIT = 30
-INIT_RETRY_DELAY = 0.5
-
-
-def _is_locked(exc):
-    """Whether SQLite refused because somebody else holds the file or a table."""
-    text = str(exc).lower()
-    return "locked" in text or "busy" in text
 
 
 def _ensure_wal(budget=1.0):
@@ -298,38 +286,37 @@ def _create_schema():
 def init_db():
     """Initialize SQLite database with required tables and indexes.
 
-    A cold start can arrive while another process holds the file: a restore or
-    backup, or a sibling worker running this same setup. Failing there left
-    uvicorn to respawn the worker straight into the same lock, so the server
-    crash-looped through the schema for as long as the lock lived and answered
-    nothing meanwhile. Waiting is strictly better, because the schema is what
-    every request needs, so wait -- bounded, and said once rather than once per
-    attempt.
+    A cold start can meet a lock held by another process, and dying on it only
+    sent uvicorn to respawn the worker into the same lock, so wait for it: the
+    schema is what every request needs and nothing is served without it.
     """
     # WAL belongs to the file, so it is set here, once, before any schema work:
     # the per-request connections only ask for it best effort, which is not
     # enough when four workers start at the same moment.
     _ensure_wal()
-    deadline = time.monotonic() + INIT_LOCK_WAIT
+    # Long enough for a restore or a backup to finish, short enough that a path
+    # pointing at another process's locked file still ends in a clear failure.
+    wait = 30
+    deadline = time.monotonic() + wait
     waiting_since = None
     while True:
         try:
             _create_schema()
             break
         except sqlite3.OperationalError as exc:
-            if not _is_locked(exc):
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                 raise
             if waiting_since is None:
                 waiting_since = time.monotonic()
                 logging.warning(
                     "Database is locked by another process (%s): waiting up to "
-                    "%ds for it before setting up the schema", exc, INIT_LOCK_WAIT)
+                    "%ds for it before setting up the schema", exc, wait)
             if time.monotonic() >= deadline:
                 logging.error(
                     "Gave up on the schema after waiting %ds for the database "
-                    "lock: %s", INIT_LOCK_WAIT, exc)
+                    "lock: %s", wait, exc)
                 raise
-            time.sleep(INIT_RETRY_DELAY)
+            time.sleep(0.5)
     if waiting_since is not None:
         # The schema got the lock, so WAL can have it now as well: the first
         # attempt gave up while the file was held.
