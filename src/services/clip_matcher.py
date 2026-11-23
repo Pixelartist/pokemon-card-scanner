@@ -440,8 +440,10 @@ class CLIPCardMatcher:
         }
 
     # ------------------------------------------------------------------- fetch
+    def status(self) -> Dict[str, Any]:
+        """Build progress + usability. Uses the fast loader, never the ~100s one."""
         if not self._index_loaded:
-            self.load_index()
+            self.load_index_fast()
         p = self._build_progress
         return {
             "indexed": len(self.cards),
