@@ -3090,7 +3090,7 @@ async def admin_update_correction(
             raise HTTPException(status_code=400, detail=f"Unknown card id '{payload.correct_id}'")
 
     try:
-        updated = corrections_service.update_correction(
+        result = corrections_service.update_correction(
             correction_id,
             review_status=payload.review_status,
             correct_id=correct_id,
@@ -3101,17 +3101,21 @@ async def admin_update_correction(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    if updated is None:
+    if result is None:
         raise HTTPException(status_code=404, detail="Correction not found or nothing to update")
 
+    updated, training_changed = result
     logger.info(
-        "Admin %s (id %s) vetted correction %s: status=%s correct_id=%s",
+        "Admin %s (id %s) vetted correction %s: status=%s correct_id=%s%s",
         admin.username, admin.id, correction_id,
         payload.review_status, updated.get("correct_id"),
+        "" if training_changed else " (no training change, no rebuild)",
     )
-    # The matcher reads confuser_pairs.json; vetting changes what is ground
-    # truth, so rebuild it off the request path.
-    _schedule_confuser_rebuild()
+    # The matcher reads confuser_pairs.json, and a pair is built from the review
+    # status and the corrected card. Only those edits can change the file, so a
+    # note edit must not start a rebuild.
+    if training_changed:
+        _schedule_confuser_rebuild()
     return {
         "success": True,
         "correction": updated,

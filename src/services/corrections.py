@@ -8,7 +8,7 @@ deleted.
 """
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from api.models.database import get_db_connection
 
@@ -107,39 +107,52 @@ def update_correction(
     correct_name: Optional[str] = None,
     admin_note: Optional[str] = None,
     reviewed_by: Optional[int] = None,
-) -> Optional[Dict[str, Any]]:
-    """Apply a vetting decision or re-point the correction; None if not found."""
+) -> Optional[Tuple[Dict[str, Any], bool]]:
+    """Apply a vetting decision or re-point the correction.
+
+    Returns ``(row, training_changed)``, or None when the correction is gone.
+    ``training_changed`` is False when the edit only writes the admin note, or
+    repeats a value the row already has: the confuser index is built from
+    ``review_status`` and ``correct_id``, and the note is not training data.
+    """
     sets: List[str] = []
     params: List[Any] = []
 
-    if review_status is not None:
-        if review_status not in REVIEW_STATES:
-            raise ValueError(f"review_status must be one of {', '.join(REVIEW_STATES)}")
-        sets += ["review_status = ?", "reviewed_by = ?", "reviewed_at = ?"]
-        params += [review_status, reviewed_by, _now()]
-
-    if correct_id is not None:
-        sets.append("correct_id = ?")
-        params.append(correct_id)
-    if correct_name is not None:
-        sets.append("correct_name = ?")
-        params.append(correct_name)
-    if admin_note is not None:
-        sets.append("admin_note = ?")
-        params.append(admin_note[:500])
-
-    if not sets:
-        return None
-
-    params.append(correction_id)
     conn = get_db_connection()
     try:
-        cur = conn.execute(f"UPDATE misreads SET {', '.join(sets)} WHERE id = ?", params)
-        conn.commit()
-        if cur.rowcount == 0:
+        current = conn.execute(
+            "SELECT review_status, correct_id FROM misreads WHERE id = ?", (correction_id,)
+        ).fetchone()
+        if current is None:
             return None
+
+        training_changed = False
+        if review_status is not None:
+            if review_status not in REVIEW_STATES:
+                raise ValueError(f"review_status must be one of {', '.join(REVIEW_STATES)}")
+            training_changed = review_status != (current["review_status"] or "pending")
+            sets += ["review_status = ?", "reviewed_by = ?", "reviewed_at = ?"]
+            params += [review_status, reviewed_by, _now()]
+
+        if correct_id is not None:
+            training_changed = training_changed or correct_id != (current["correct_id"] or "")
+            sets.append("correct_id = ?")
+            params.append(correct_id)
+        if correct_name is not None:
+            sets.append("correct_name = ?")
+            params.append(correct_name)
+        if admin_note is not None:
+            sets.append("admin_note = ?")
+            params.append(admin_note[:500])
+
+        if not sets:
+            return None
+
+        params.append(correction_id)
+        conn.execute(f"UPDATE misreads SET {', '.join(sets)} WHERE id = ?", params)
+        conn.commit()
         row = conn.execute("SELECT * FROM misreads WHERE id = ?", (correction_id,)).fetchone()
-        return dict(row) if row else None
+        return (dict(row), training_changed) if row else None
     finally:
         conn.close()
 
