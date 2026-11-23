@@ -971,7 +971,7 @@ def add_to_collection_batch(
 
 
 @app.get("/api/collection")
-async def get_collection(limit: int = 100, offset: int = 0,
+def get_collection(limit: int = 100, offset: int = 0,
                          current_user: UserResponse = Depends(get_current_user)):
     """Get all collection items."""
     items = collection_service.get_all_items(limit=limit, offset=offset, user_id=current_user.id)
@@ -979,7 +979,7 @@ async def get_collection(limit: int = 100, offset: int = 0,
 
 
 @app.get("/api/collection/export")
-async def export_collection(format: str = "json",
+def export_collection(format: str = "json",
                             current_user: UserResponse = Depends(get_current_user)):
     """Export collection in JSON or CSV format."""
     # No cap: the previous limit=1000 silently truncated larger collections.
@@ -1019,7 +1019,7 @@ async def export_collection(format: str = "json",
 
 
 @app.get("/api/collection/search")
-async def search_collection(query: str,
+def search_collection(query: str,
                             current_user: UserResponse = Depends(get_current_user)):
     """Search collection by card name, set, or number (SQL-based)."""
     user_id = current_user.id
@@ -1074,7 +1074,7 @@ async def search_collection(query: str,
 
 
 @app.get("/api/collection/crop/{card_id}")
-async def get_card_crop(card_id: str,
+def get_card_crop(card_id: str,
                         current_user: UserResponse = Depends(get_current_user)):
     """Most recent user scan of this card, preferring the detector crop.
 
@@ -1121,7 +1121,7 @@ async def get_card_crop(card_id: str,
 
 
 @app.get("/api/collection/{item_id}")
-async def get_collection_item(item_id: int,
+def get_collection_item(item_id: int,
                               current_user: UserResponse = Depends(get_current_user)):
     """Get a single collection item."""
     item = collection_service.get_item(item_id, user_id=current_user.id)
@@ -1158,14 +1158,14 @@ def create_binder(binder_data: BinderCreate,
 
 
 @app.get("/api/binders")
-async def get_binders(current_user: UserResponse = Depends(get_current_user)):
+def get_binders(current_user: UserResponse = Depends(get_current_user)):
     """Get all binders for the current user."""
     binders = collection_service.get_binders(user_id=current_user.id)
     return {"binders": binders}
 
 
 @app.get("/api/binders/{binder_id}")
-async def get_binder(binder_id: int,
+def get_binder(binder_id: int,
                      current_user: UserResponse = Depends(get_current_user)):
     """Get a specific binder with its items."""
     binder = collection_service.get_binder(binder_id, user_id=current_user.id)
@@ -1202,7 +1202,7 @@ async def delete_binder(binder_id: int,
 
 
 @app.get("/api/stats")
-async def get_stats(current_user: UserResponse = Depends(get_current_user)):
+def get_stats(current_user: UserResponse = Depends(get_current_user)):
     """Get collection statistics."""
     return collection_service.get_stats(user_id=current_user.id)
 
@@ -1330,7 +1330,7 @@ def _annotate_set_totals(sets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 @app.get("/api/sets")
-async def get_sets():
+def get_sets():
     """Get all available sets."""
     from pathlib import Path
     import json
@@ -2119,7 +2119,7 @@ async def log_misread(payload: Dict[str, Any], request: Request):
 
 
 @app.get("/api/misreads")
-async def list_misreads(limit: int = 100,
+def list_misreads(limit: int = 100,
                         current_user: UserResponse = Depends(get_current_user)):
     """Admin view of corrected false detections (training candidates)."""
     conn = _misreads_conn()
@@ -2153,7 +2153,7 @@ async def enqueue_identify(payload: Dict[str, Any],
 
 
 @app.get("/api/identify/jobs")
-async def identify_job_status(ids: str = "", limit: int = 50,
+def identify_job_status(ids: str = "", limit: int = 50,
                               current_user: UserResponse = Depends(get_current_user)):
     wanted = [int(part) for part in ids.split(",") if part.strip().isdigit()] if ids else None
     return {"jobs": identify_jobs.statuses(db_path, wanted, max(1, min(limit, 200)))}
@@ -3047,13 +3047,13 @@ def _schedule_confuser_rebuild() -> None:
 
 
 @app.get("/api/admin/users")
-async def admin_list_users(admin: UserResponse = Depends(get_current_admin)):
+def admin_list_users(admin: UserResponse = Depends(get_current_admin)):
     """All accounts with their collection size, for the admin panel."""
     return {"users": AuthService().list_users()}
 
 
 @app.get("/api/admin/stats")
-async def admin_get_stats(admin: UserResponse = Depends(get_current_admin)):
+def admin_get_stats(admin: UserResponse = Depends(get_current_admin)):
     """Database and usage counters shown above the user list."""
     return AuthService().admin_stats()
 
@@ -3211,7 +3211,7 @@ async def admin_delete_correction(
 
 
 @app.get("/api/admin/cards/search")
-async def admin_search_cards(
+def admin_search_cards(
     q: str = "",
     limit: int = 20,
     admin: UserResponse = Depends(get_current_admin),
