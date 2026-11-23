@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
@@ -35,36 +36,72 @@ REFRESH_COOKIE_MAX_AGE = REFRESH_TOKEN_EXPIRE_DAYS * 24 * 3600
 # Where the persistent JWT secret lives (survives container/server restarts)
 SECRET_FILE = os.path.join(os.path.dirname(str(DATABASE_URL)), "jwt_secret.key")
 
+def _read_secret_file(attempts: int = 50, delay: float = 0.02) -> str:
+    """Read the persisted secret, waiting for the writer to finish."""
+    for _ in range(attempts):
+        try:
+            with open(SECRET_FILE) as f:
+                stored = f.read().strip()
+        except FileNotFoundError:
+            return ""
+        if stored:
+            return stored
+        time.sleep(delay)
+    return ""
+
+
 def _load_secret_key() -> str:
     """Resolve the JWT signing secret: env var, then a persisted file.
 
     The file is created on first run and reused across restarts so tokens
-    stay valid; a random-per-boot secret would log everyone out.
+    stay valid; a random-per-boot secret would log everyone out. Creation is
+    exclusive: workers booting together each used to see "no file", each write
+    their own random secret and keep it in memory, so a token minted by the one
+    that handled the login was rejected by every sibling. Now only the winner
+    of the exclusive create writes anything; the rest wait for that file and
+    read it, so every worker signs with the same key.
     """
-    env_secret = os.environ.get("JWT_SECRET_KEY") or os.environ.get("SECRET_KEY")
+    env_secret = (os.environ.get("JWT_SECRET_KEY")
+                  or os.environ.get("JWT_SECRET")
+                  or os.environ.get("SECRET_KEY"))
     if env_secret:
         return env_secret
+    directory = os.path.dirname(SECRET_FILE)
     try:
-        if os.path.exists(SECRET_FILE):
-            with open(SECRET_FILE) as f:
-                stored = f.read().strip()
+        os.makedirs(directory, exist_ok=True)
+        try:
+            fd = os.open(SECRET_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            # Someone else owns it. Wait for content rather than reading a
+            # momentarily empty file as the secret and minting our own.
+            stored = _read_secret_file()
             if stored:
                 return stored
-        new_secret = secrets.token_hex(32)
-        os.makedirs(os.path.dirname(SECRET_FILE), exist_ok=True)
-        with open(SECRET_FILE, "w") as f:
-            f.write(new_secret)
+            # Deleting it here would race the writer and could throw away a
+            # secret another worker just published, so stop and say so.
+            raise RuntimeError(
+                f"{SECRET_FILE} exists but is empty (a writer died mid-create?); "
+                "remove it or set JWT_SECRET_KEY."
+            )
+        try:
+            secret = secrets.token_hex(32)
+            payload = secret.encode("ascii")
+            while payload:
+                payload = payload[os.write(fd, payload):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         try:
             os.chmod(SECRET_FILE, 0o600)
         except OSError:
             pass
-        return new_secret
+        return secret
     except OSError as exc:
         # Fail closed. Falling back to a secret published in this repo would
         # let anyone mint a valid JWT for any user id.
         raise RuntimeError(
             "Cannot persist the JWT secret: set JWT_SECRET_KEY or make "
-            f"{os.path.dirname(SECRET_FILE)} writable."
+            f"{directory} writable."
         ) from exc
 
 
