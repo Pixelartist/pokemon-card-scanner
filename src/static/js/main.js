@@ -111,7 +111,7 @@ if (dropZone) {
 
 function handleFile(file) {
     if (!file.type.startsWith('image/')) {
-        alert('Please upload an image file');
+        alert(t('Please upload an image file'));
         return;
     }
     
@@ -150,6 +150,20 @@ function getAuthToken() {
 // --- durable login lives in the httpOnly refresh cookie the server sets) ---
 let authToken = null;
 
+// Who is signed in, and whether the Admin entry belongs in their menu. The
+// server gates every /api/admin route on the flag; this only shapes the UI.
+let currentUserId = null;
+let currentUserIsAdmin = false;
+
+function setAdminAvailability(isAdmin, userId) {
+    currentUserIsAdmin = !!isAdmin;
+    if (userId !== undefined) currentUserId = userId ?? null;
+    for (const id of ['user-admin-section', 'user-admin-divider']) {
+        const el = document.getElementById(id);
+        if (el) el.style.display = currentUserIsAdmin ? '' : 'none';
+    }
+}
+
 function setAuthToken(token) {
     authToken = token || null;
     if (authToken) {
@@ -169,9 +183,32 @@ let ownedQtyMap = null;
 // newest stored capture/cut per ptcg_id, filled from the same collection fetch
 let ownedShotsMap = null;
 
-// Cut-out (or raw scan photo) from the most recent successful scan; travels
-// to the add-collection form so the stored item remembers the user's cut.
-let lastScanImages = null;
+// The frame the scan result on screen was produced from: the raw capture path
+// (when the server stored one) and the card cut (a path, or the browser's inline
+// crop). It travels to the add-collection form so the stored item remembers the
+// user's own capture. Deliberately per-result: an add must never inherit the
+// photo of whatever was scanned before it.
+let lastScanFrame = null;
+
+// What a scan result says about its own photos: the paths the server wrote when
+// it stored the capture, otherwise the inline images this frame produced. Shots
+// never fall back to another scan's files — that is how a row ended up showing
+// the previous card.
+function scanShots(data) {
+    return {
+        scan: data.scan_image_path || data.scan_data_url || null,
+        crop: data.crop_image_path || data.crop_data_url || null,
+    };
+}
+
+// The same pair for a review row, which keeps the small copies: it is stored in
+// localStorage, where the add-sized images do not fit.
+function queueRowShots(data) {
+    return {
+        scan: data.scan_image_path || data.scan_thumb_data_url || null,
+        crop: data.crop_image_path || data.crop_thumb_data_url || null,
+    };
+}
 // What the match gate proposed for the scan on screen, sent with the add so the
 // server can write a label beside the stored frame (see _write_scan_label):
 // accepted, corrected and picked-by-hand are three labels on one image, and the
@@ -236,6 +273,7 @@ async function refreshAccessToken() {
                     localStorage.setItem('username', data.user.username);
                     updateUserInfo(data.user.username);
                 }
+                if (data.user) setAdminAvailability(data.user.is_admin, data.user.id);
                 return true;
             } catch {
                 return false;
@@ -366,6 +404,7 @@ async function handleLoginSubmit(e) {
             const uname = data.user?.username || data.username;
             if (uname) localStorage.setItem('username', uname);
             if (data.user?.preferred_language) setPreferredLanguage(data.user.preferred_language);
+            setAdminAvailability(data.user?.is_admin, data.user?.id);
             updateUserInfo(uname);
             document.getElementById('login-modal')?.classList.add('hidden');
             document.getElementById('login-password').value = '';
@@ -414,6 +453,7 @@ async function handleRegisterSubmit(e) {
             const uname = data.user?.username || data.username;
             if (uname) localStorage.setItem('username', uname);
             if (data.user?.preferred_language) setPreferredLanguage(data.user.preferred_language);
+            setAdminAvailability(data.user?.is_admin, data.user?.id);
             updateUserInfo(uname);
             document.getElementById('login-modal')?.classList.add('hidden');
             if (errorEl) errorEl.textContent = '';
@@ -472,12 +512,12 @@ function bindLanguagePicker() {
             if (response.ok) {
                 const user = await response.json();
                 setPreferredLanguage(user.preferred_language);
-                showToast(`Card language set to ${user.preferred_language}`);
+                showToast(t('Card language set to {language}', { language: user.preferred_language }));
             } else {
-                showToast('Could not save language setting');
+                showToast(t('Could not save language setting'));
             }
         } catch {
-            showToast('Could not save language setting');
+            showToast(t('Could not save language setting'));
         }
     });
 }
@@ -500,6 +540,7 @@ async function loadLanguagePreference() {
         if (response.ok) {
             const user = await response.json();
             setPreferredLanguage(user.preferred_language || 'EN');
+            setAdminAvailability(user.is_admin, user.id);
         }
     } catch { /* keep localStorage value on network failure */ }
     picker.value = getPreferredLanguage();
@@ -965,12 +1006,16 @@ if (scanBtn) {
                             candidates: res.candidates,
                             scan_image_path: null,
                             crop_image_path: null,
-                            // The crop this frame produced, so the review row keeps
-                            // its own photo: with no image of its own it fell back
-                            // to the last upload's crop and every "Not this"
-                            // comparison showed that one card. The thumbnail, not
-                            // the full crop — see QUEUE_THUMB_WIDTH.
-                            crop_data_url: res.cropThumb || null,
+                            // A browser match never uploads, so these are the
+                            // only copy of the capture the stored card gets;
+                            // /api/collection/add writes both to disk and keeps
+                            // the paths. Sized here so neither field can outgrow
+                            // the form (see canvasJpeg).
+                            scan_data_url: canvasJpeg(snap, FRAME_WIDTH, FRAME_QUALITY),
+                            crop_data_url: canvasJpeg(res.cropCanvas, CUT_WIDTH, CUT_QUALITY),
+                            // The same two at review-row size.
+                            scan_thumb_data_url: queueThumbnail(snap),
+                            crop_thumb_data_url: res.cropThumb || null,
                             capture_seq: res.captureSeq,
                             meta: { source: 'browser_hash' },
                         }, document.getElementById('scan-result'));
@@ -1049,12 +1094,8 @@ if (scanBtn) {
             const data = await response.json();
             // Unwrap the API response envelope
             const result = data.data || data;
-            if (result.scan_image_path || result.crop_image_path) {
-                lastScanImages = {
-                    scan_image_path: result.scan_image_path || null,
-                    crop_image_path: result.crop_image_path || null,
-                };
-            }
+            // displayScanResult() records the frame of this result (scan_image_path
+            // / crop_image_path) for the add form; nothing is kept globally here.
             result.capture_seq = myCapture;
             displayScanResult(result, resultDiv);
         } catch (error) {
@@ -1111,7 +1152,7 @@ function noCardMessage(r) {
   const why = rejectReason(r);
   if (!why) return 'No card detected — hold a card in front of the camera, or use Upload.';
   const saved = r.crop ? ` (saved ${r.crop})` : '';
-  return 'No card confirmed — ' + why + saved;
+  return t('No card confirmed') + ' — ' + why + saved;
 }
 function noCardOverlay(r) {
   r = r || (window.__cardScanner && window.__cardScanner._lastReject);
@@ -1156,23 +1197,37 @@ const APPEARANCE_MAX = 0.25;
 // cost 150-260 KB per row, so a few dozen scans filled the 5 MB localStorage
 // budget and RQ.save started dropping the oldest rows to make room. 360 px wide
 // at quality 0.6 measures ~25 KB — still sharp at the size the dialog uses.
-const QUEUE_THUMB_WIDTH = 360;
+// Widths for the same shot at the sizes its two homes can afford: the add form
+// sends its images as multipart fields (1 MB each), and a review row lives in
+// localStorage, where the full crop cost 150-260 KB and a few dozen scans filled
+// the 5 MB budget, so RQ.save began dropping the oldest rows to make room.
+const QUEUE_THUMB_WIDTH = 360;      // review-row photo, ~25 KB
 const QUEUE_THUMB_QUALITY = 0.6;
+const FRAME_WIDTH = 1100;           // "original capture", ~250 KB
+const FRAME_QUALITY = 0.7;
+const CUT_WIDTH = 900;              // stored cut, ~150 KB
+const CUT_QUALITY = 0.85;
 
-function queueThumbnail(canvas) {
+// The only place a capture becomes a JPEG, so how large one can get is decided
+// once instead of being re-checked by every field that carries it.
+function canvasJpeg(canvas, maxWidth, quality) {
   try {
     if (!canvas || !canvas.width || !canvas.height) return null;
-    const scale = Math.min(1, QUEUE_THUMB_WIDTH / canvas.width);
-    const thumb = document.createElement('canvas');
-    thumb.width = Math.max(1, Math.round(canvas.width * scale));
-    thumb.height = Math.max(1, Math.round(canvas.height * scale));
-    const ctx = thumb.getContext('2d');
+    const scale = Math.min(1, maxWidth / canvas.width);
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(canvas.width * scale));
+    out.height = Math.max(1, Math.round(canvas.height * scale));
+    const ctx = out.getContext('2d');
     if (!ctx) return null;
-    ctx.drawImage(canvas, 0, 0, thumb.width, thumb.height);
-    return thumb.toDataURL('image/jpeg', QUEUE_THUMB_QUALITY);
+    ctx.drawImage(canvas, 0, 0, out.width, out.height);
+    return out.toDataURL('image/jpeg', quality);
   } catch (e) {
-    return null;   // a queue thumbnail is a convenience; never break a scan for it
+    return null;   // a capture is a convenience; never break a scan for it
   }
+}
+
+function queueThumbnail(canvas) {
+  return canvasJpeg(canvas, QUEUE_THUMB_WIDTH, QUEUE_THUMB_QUALITY);
 }
 
 // A candidate can arrive with no `card.images` and no `image_url` at all — the
@@ -1209,23 +1264,22 @@ function noteNearMiss(data) {
   if (!guess && auto) return;              // nothing to key on; don't spam
   const id = guess ? `unknown:${guess.id}:${Math.round(best * 40)}`
                    : `unknown:frame:${Date.now()}`;
-  // The frame this verdict judged comes first: the server's stored crop, then
-  // the browser crop still in memory. `lastScanImages` is whatever the last
-  // upload stored, so it is only a stand-in for a frame that left no image —
-  // preferring it queued every row with that one card's photo.
-  const crop = (data && (data.crop_image_path || data.crop_data_url))
+  // The frame this verdict judged comes first; the browser crop still in memory
+  // only covers a payload that carried no image at all.
+  const shots = queueRowShots(data || {});
+  const crop = shots.crop
     || (window.__cardScanner && (window.__cardScanner._lastCropThumb
                                || window.__cardScanner._lastCropDataUrl))
-    || lastScanImages?.crop_image_path || null;
+    || null;
   if (!RQ.add({
     id,
-    name: guess ? `Unidentified — looks like ${guess.name}` : 'Unidentified card',
+    name: guess ? t('Unidentified — looks like {name}', { name: guess.name }) : t('Unidentified card'),
     meta: [guess && (guess.number || (guess.set && guess.set.name)),
            `best ${Math.round(best * 100)}%`].filter(Boolean).join(' · '),
     img: guess ? cardImageSrc(guess) : '',
     score: best,
     source: 'near_miss',
-    scan: (data && data.scan_image_path) || lastScanImages?.scan_image_path || null,
+    ...shots,
     crop,
     candidates: queueCandidates(pool),
   })) return;
@@ -1259,11 +1313,16 @@ function displayScanResult(data, container) {
         // instead of dying silently or retry-looping on a broken config.
         if (window.__autoScan && window.__autoScan.active) {
             window.__autoScan.toggle();
-            showToast('Auto-scan stopped: ' + errorMsg.split('\n')[0]);
+            showToast(t('Auto-scan stopped') + ': ' + errorMsg.split('\n')[0]);
         }
         return;
     }
     
+    // Remember the frame this verdict judged. Every add from the result panel
+    // (accepted/picked) files this capture; without it, cards matched in the
+    // browser were added with no source at all.
+    lastScanFrame = scanShots(data);
+
     if (data.decision === 'no_match') {
         container.innerHTML = '<div class="card-result"><h3>No Match Found</h3><p>No matching card found. Try a clearer image, or use the manual search below to find and add your card.</p></div>';
         // quickdraw contract: an unnamed detection is still a detection.
@@ -1339,9 +1398,7 @@ function displayScanResult(data, container) {
         img: cardImageSrc(c),
         score: c.similarity || 0,
         source: 'cloud',
-        scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
-        crop: (data.crop_image_path || data.crop_data_url
-               || lastScanImages?.crop_image_path) || null,
+        ...queueRowShots(data),
         candidates: queueCandidates(data.candidates),
       })) {
         if (window.refreshReviewQueues) window.refreshReviewQueues();
@@ -1518,7 +1575,10 @@ window.__autoScan = {
     window.__countdownUntil = end;
     const tick = () => {
       const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
-      overlay.innerHTML = `<span class="so-empty">${left > 0 ? 'Scanning next in ' + left + '…' : 'Scanning next…'}</span>`;
+      const message = left > 0
+        ? t('Scanning next in {seconds}…', { seconds: left })
+        : t('Scanning next…');
+      overlay.innerHTML = `<span class="so-empty">${message}</span>`;
       if (left <= 0) return;
       setTimeout(tick, 250);
     };
@@ -1650,14 +1710,26 @@ async function addToCollectionById(ptcgId, name, queueRowId, matchSource, frame)
 }
 window.addToCollectionById = addToCollectionById;
 
+// A capture reaches the add form in one of two shapes: a relative path the
+// server already wrote (an uploaded scan), or the browser's inline data URL (a
+// camera-side match, which never uploads). They travel in different fields: the
+// data URL is stored as a file by /api/collection/add, so the path column only
+// ever holds a path.
+function frameInput(kind, value) {
+    if (!value) return '';
+    const isDataUrl = typeof value === 'string' && value.startsWith('data:image/');
+    const name = isDataUrl ? `${kind}_data_url` : `${kind}_image_path`;
+    return `<input type="hidden" name="${name}" value="${String(value).replace(/"/g, '&quot;')}">`;
+}
+
 async function addToCollection(cardId, queueRowId, matchSource, frame) {
     // The frame an add belongs to travels with the add, never with a global: a
     // binder or manual add must not attach - or label - a capture it has nothing
     // to do with. Scan results own the scan on screen; queue rows own the frame
     // they were cut from (`frame` arrives from there). Anything else gets none.
     if (frame === undefined) {
-        frame = (matchSource === 'accepted' || matchSource === 'picked') && !queueRowId && lastScanImages
-            ? { scan: lastScanImages.scan_image_path, crop: lastScanImages.crop_image_path }
+        frame = (matchSource === 'accepted' || matchSource === 'picked') && !queueRowId
+            ? lastScanFrame
             : null;
     }
     // The gate's proposal only belongs to the label when the frame does.
@@ -1726,8 +1798,8 @@ async function addToCollection(cardId, queueRowId, matchSource, frame) {
             ${proposal?.secondId ? `<input type="hidden" name="match_proposed_second_id" value="${proposal.secondId}">` : ''}
             ${proposal?.second != null ? `<input type="hidden" name="match_proposed_second_similarity" value="${proposal.second}">` : ''}
             ${queueRowId ? `<input type="hidden" name="rq_row" value="${String(queueRowId).replace(/"/g, '&quot;')}">` : ''}
-            ${frame?.scan ? `<input type="hidden" name="scan_image_path" value="${frame.scan}">` : ''}
-            ${frame?.crop ? `<input type="hidden" name="crop_image_path" value="${frame.crop}">` : ''}
+            ${frameInput('scan', frame?.scan)}
+            ${frameInput('crop', frame?.crop)}
             <button type="submit" class="btn btn-primary">Add to Collection</button>
         </form>
     `;
@@ -1760,9 +1832,9 @@ async function submitAddCollection(e) {
         });
         
         if (response.ok) {
-            showToast('✓ Added to collection');
+            showToast('✓ ' + t('Added to collection'));
             ownedQtyMap = null; ownedShotsMap = null;  // refresh owned-count cache
-            lastScanImages = null;  // crop belongs to this add only
+            lastScanFrame = null;  // this frame belongs to this add only
             document.getElementById('add-modal').classList.add('hidden');
             initBinder();
             // Remove the just-added card from the review queue if present
@@ -1779,10 +1851,10 @@ async function submitAddCollection(e) {
                 }
             } catch (e) { /* non-fatal */ }
         } else {
-            alert('Error adding card');
+            alert(t('Error adding card'));
         }
     } catch (error) {
-        alert('Error: ' + error.message);
+        alert(t('Error') + ': ' + error.message);
     }
 }
 
@@ -1877,7 +1949,7 @@ async function loadCollection() {
 }
 
 async function deleteItem(itemId) {
-    if (!confirm('Remove this card from your collection?')) return;
+    if (!confirm(t('Remove this card from your collection?'))) return;
     
     try {
         const token = getAuthToken();
@@ -1889,7 +1961,7 @@ async function deleteItem(itemId) {
         });
         loadCollection();
     } catch (error) {
-        alert('Error deleting item: ' + error.message);
+        alert(t('Error deleting item') + ': ' + error.message);
     }
 }
 
@@ -2050,6 +2122,15 @@ async function initializeApp() {
             if (userDropdown.contains(e.target)) return;
             userDropdown?.classList.remove('open');
         });
+        // Admin panel (only shown for admin accounts)
+        const adminBtn = document.getElementById('user-admin');
+        if (adminBtn) {
+            adminBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                userDropdown?.classList.remove('open');
+                openAdminModal();
+            });
+        }
         // Change Password button in the dropdown
         const changePasswordBtn = document.getElementById('user-change-password');
         if (changePasswordBtn) {
@@ -2063,12 +2144,13 @@ async function initializeApp() {
         const signoutBtn = document.getElementById('user-signout');
         if (signoutBtn) {
             signoutBtn.addEventListener('click', async () => {
-                if (!confirm('Sign out of your account?')) return;
+                if (!confirm(t('Sign out of your account?'))) return;
                 try {
                     await fetch('/api/auth/logout', { method: 'POST' });
                 } catch { /* offline logout still clears local state */ }
                 setAuthToken(null);
                 ownedQtyMap = null; ownedShotsMap = null;
+                setAdminAvailability(false, null);
                 localStorage.removeItem('username');
                 updateUserInfo('Guest');
                 document.getElementById('login-modal')?.classList.remove('hidden');
@@ -2515,7 +2597,7 @@ async function exportCollection() {
         window.URL.revokeObjectURL(url);
         document.body.removeChild(a);
     } catch (error) {
-        alert('Export failed: ' + error.message);
+        alert(t('Export failed') + ': ' + error.message);
     }
 }
 
@@ -2541,14 +2623,19 @@ async function getOwnedQuantity(cardId) {
                     const key = ((raw.card && raw.card.ptcg_id) || raw.ptcg_id || '');
                     if (!key) continue;
                     ownedQtyMap.set(key, (ownedQtyMap.get(key) || 0) + (raw.quantity || 1));
-                    // remember the most recent scan photo + detector cut
-                    if (raw.scan_image_path || raw.crop_image_path) {
+                    // remember the most recent scan photo + detector cut. Only
+                    // real paths: older rows can still hold an inline data URL,
+                    // which builds a /data/... URL nothing can serve.
+                    const asPath = (v) => (typeof v === 'string' && /^scans\//.test(v) ? v : null);
+                    const scanPath = asPath(raw.scan_image_path);
+                    const cropPath = asPath(raw.crop_image_path);
+                    if (scanPath || cropPath) {
                         const prev = ownedShotsMap.get(key);
                         const stamp = raw.added_at || '';
                         if (!prev || stamp > prev.added) {
                             ownedShotsMap.set(key, {
-                                scan: raw.scan_image_path || null,
-                                crop: raw.crop_image_path || null,
+                                scan: scanPath,
+                                crop: cropPath,
                                 added: stamp
                             });
                         }
@@ -2784,6 +2871,10 @@ displayScanResult = async function(data, container) {
             secondId: second?.id ?? null,
             second: second?.similarity ?? null }
         : null;
+    // The frame this verdict judged, for the add form. Recorded here because
+    // this override is the live renderer: a browser-side match carries no server
+    // paths, only the inline cut, and that used to mean the add had no source.
+    lastScanFrame = scanShots(data);
     if (data.decision === 'match' && data.candidates.length > 0) {
         const card = data.candidates[0];
         const cardId = card.card?.id || card.id;
@@ -2889,9 +2980,7 @@ displayScanResult = async function(data, container) {
                 img: detailImg,
                 score: c.similarity || 0,
                 source: 'cloud',
-                scan: (data.scan_image_path || lastScanImages?.scan_image_path) || null,
-                crop: (data.crop_image_path || data.crop_data_url
-                       || lastScanImages?.crop_image_path) || null,
+                ...queueRowShots(data),
                 candidates: queueCandidates(data.candidates),
             })) {
                 if (window.refreshReviewQueues) window.refreshReviewQueues();
@@ -3171,7 +3260,7 @@ function updateOverlayDetection(det, accepted = false) {
         : accepted ? 'Card confirmed' : 'Card in view';
     if (!fbHeld) {
         soEl.innerHTML =
-            `<span class="${cls}">${confidence}% confidence</span>` +
+            `<span class="${cls}">${t('{confidence}% confidence', { confidence })}</span>` +
             `<span class="so-hint">${hint}</span>`;
     }
     // Update SVG polygon with glide
@@ -3422,7 +3511,7 @@ function updatePageInfo() {
     if (pageFlip && pageInfo) {
         const current = pageFlip.getCurrentPageIndex() + 1;
         const total = pageFlip.getPageCount();
-        pageInfo.textContent = `Page ${current} of ${total}`;
+        pageInfo.textContent = t('Page {current} of {total}', { current, total });
         // Disable nav buttons at the edges
         const prev = document.getElementById('prev-page');
         const next = document.getElementById('next-page');
@@ -4293,4 +4382,454 @@ async function handleResetPasswordSubmit(e) {
 }
 
 document.getElementById("reset-password-form")?.addEventListener("submit", handleResetPasswordSubmit);
+
+
+// ── Admin panel ───────────────────────────────────────────────────
+// Opened from User menu → Admin, only for accounts the server marks as admin.
+// Everything here mirrors /api/admin, which re-checks the flag on every call.
+let adminPasswordUserId = null;
+
+function adminEscape(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[ch]));
+}
+
+async function openAdminModal() {
+    if (!currentUserIsAdmin) {
+        showToast(t('Admin access required'));
+        return;
+    }
+    const modal = document.getElementById('admin-modal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    adminPollTries = 0;
+    await refreshAdminPanel();
+}
+
+// The image scan runs in the background on the server; poll a few times while
+// it is in flight so the counts appear without the admin reloading anything.
+let adminPollTimer = null;
+let adminPollTries = 0;
+
+function scheduleAdminPoll(stats) {
+    clearTimeout(adminPollTimer);
+    const pending = !stats.images_scan_ready || stats.images_scanning;
+    if (!pending || adminPollTries >= 40) return;
+    const modal = document.getElementById('admin-modal');
+    if (!modal || modal.classList.contains('hidden')) return;
+    adminPollTries += 1;
+    adminPollTimer = setTimeout(refreshAdminPanel, 4000);
+}
+
+async function refreshAdminPanel() {
+    const usersEl = document.getElementById('admin-users');
+    const errorEl = document.getElementById('admin-error');
+    if (errorEl) errorEl.textContent = '';
+    if (usersEl) usersEl.textContent = t('Loading…');
+    try {
+        const [usersResponse, statsResponse, dbResponse] = await Promise.all([
+            fetch('/api/admin/users'),
+            fetch('/api/admin/stats'),
+            fetch('/api/admin/database'),
+        ]);
+        const failed = [usersResponse, statsResponse, dbResponse].find(r => !r.ok);
+        if (failed) {
+            const data = await failed.json().catch(() => ({}));
+            throw new Error(data.detail || 'Could not load admin data');
+        }
+        const { users } = await usersResponse.json();
+        renderAdminStats(await statsResponse.json());
+        renderAdminDbStats(await dbResponse.json());
+        renderAdminUsers(users || []);
+    } catch (err) {
+        if (usersEl) usersEl.textContent = '';
+        if (errorEl) errorEl.textContent = err.message || 'Could not load admin data';
+    }
+}
+
+function renderAdminFactGrid(el, facts) {
+    if (!el) return;
+    el.innerHTML = facts.map(([label, value, hint]) =>
+        `<div class="admin-stat"${hint ? ` title="${adminEscape(hint)}"` : ''}>` +
+        `<span class="admin-stat-value">${adminEscape(value)}</span>` +
+        `<span class="admin-stat-label">${adminEscape(label)}</span></div>`
+    ).join('');
+}
+
+function renderAdminStats(stats) {
+    renderAdminFactGrid(document.getElementById('admin-stats'), [
+        ['Users', stats.users],
+        ['Admins', stats.admins],
+        ['Active sessions', stats.active_sessions],
+        ['Collection rows', stats.collection_items],
+        ['Cards owned', stats.cards_owned],
+        ['Sets', stats.sets],
+    ]);
+}
+
+function renderAdminDbStats(stats) {
+    const value = v => (v === null || v === undefined) ? '…' : v;
+    const percent = (part, total) => {
+        if (part === null || part === undefined || !total) return '';
+        return `${Math.round((part / total) * 100)}%`;
+    };
+    const total = stats.cards_total || 0;
+    renderAdminFactGrid(document.getElementById('admin-db-stats'), [
+        ['Cards in database', value(stats.cards_total)],
+        ['Cards with image', value(stats.cards_with_image), percent(stats.cards_with_image, total)],
+        ['Cards without image', value(stats.cards_without_image), percent(stats.cards_without_image, total)],
+        ['Cards with price', value(stats.cards_with_price), percent(stats.cards_with_price, total)],
+        ['Cards without price', value(stats.cards_without_price), percent(stats.cards_without_price, total)],
+        ['Price cache rows', value(stats.price_rows)],
+        ['Corrections', value(stats.corrections_total)],
+        ['Pending review', value(stats.corrections_pending)],
+        ['Confirmed', value(stats.corrections_confirmed)],
+        ['Rejected', value(stats.corrections_rejected)],
+        ['Corrections with image', value(stats.corrections_with_image)],
+        ['Database size', stats.database_mb == null ? '…' : `${stats.database_mb} MB`],
+    ]);
+
+    const missingEl = document.getElementById('admin-missing-images');
+    if (missingEl) {
+        const examples = stats.missing_image_examples || [];
+        if (!stats.images_scan_ready && stats.images_scanning) {
+            missingEl.innerHTML = '<p class="admin-missing-title">Scanning card images…</p>';
+        } else if (!examples.length) {
+            missingEl.innerHTML = '';
+        } else {
+            missingEl.innerHTML = `<p class="admin-missing-title">Cards without a usable image (first ${examples.length})</p>` +
+                `<ul class="admin-missing-list">` + examples.map(card =>
+                    `<li><code>${adminEscape(card.ptcg_id)}</code> ${adminEscape(card.name)}</li>`
+                ).join('') + '</ul>';
+        }
+    }
+    scheduleAdminPoll(stats);
+}
+
+function renderAdminUsers(users) {
+    const el = document.getElementById('admin-users');
+    if (!el) return;
+    const countEl = document.getElementById('admin-user-count');
+    if (countEl) countEl.textContent = `${users.length} ${users.length === 1 ? 'account' : 'accounts'}`;
+    if (!users.length) {
+        el.innerHTML = '<p class="admin-empty">No accounts yet.</p>';
+        return;
+    }
+    const rows = users.map(user => {
+        const isSelf = user.id === currentUserId;
+        return `<tr data-user-id="${user.id}">
+            <td>
+                <span class="admin-username">${adminEscape(user.username)}</span>
+                ${user.is_admin ? '<span class="admin-badge">admin</span>' : ''}
+                ${isSelf ? '<span class="admin-badge self">you</span>' : ''}
+            </td>
+            <td class="admin-email">${adminEscape(user.email)}</td>
+            <td class="admin-joined">${adminEscape((user.created_at || '').slice(0, 10))}</td>
+            <td class="admin-collection">${Number(user.card_count) || 0} <span class="admin-dim">(${Number(user.item_count) || 0} rows)</span></td>
+            <td class="admin-actions">
+                <button type="button" class="admin-btn" data-action="password">Password</button>
+                ${isSelf ? '' : `<button type="button" class="admin-btn" data-action="role">${user.is_admin ? 'Revoke admin' : 'Make admin'}</button>
+                <button type="button" class="admin-btn danger" data-action="delete">Delete</button>`}
+            </td>
+        </tr>`;
+    }).join('');
+    el.innerHTML = `<table class="admin-table">
+        <thead><tr><th>User</th><th>Email</th><th>Joined</th><th>Collection</th><th>Actions</th></tr></thead>
+        <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function adminRequest(url, options = {}) {
+    const errorEl = document.getElementById('admin-error');
+    if (errorEl) errorEl.textContent = '';
+    try {
+        const response = await fetch(url, {
+            ...options,
+            headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            if (errorEl) errorEl.textContent = data.detail || 'Request failed';
+            return null;
+        }
+        await refreshAdminPanel();
+        return data;
+    } catch {
+        if (errorEl) errorEl.textContent = 'Network error';
+        return null;
+    }
+}
+
+function openAdminPasswordForm(userId, row) {
+    const form = document.getElementById('admin-password-form');
+    if (!form) return;
+    adminPasswordUserId = userId;
+    const nameEl = document.getElementById('admin-password-user');
+    if (nameEl) nameEl.textContent = row.querySelector('.admin-username')?.textContent?.trim() || `#${userId}`;
+    form.classList.remove('hidden');
+    document.getElementById('admin-password-input')?.focus();
+}
+
+function closeAdminPasswordForm() {
+    adminPasswordUserId = null;
+    document.getElementById('admin-password-form')?.classList.add('hidden');
+    const input = document.getElementById('admin-password-input');
+    if (input) input.value = '';
+}
+
+async function handleAdminUserAction(e) {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const row = btn.closest('tr[data-user-id]');
+    if (!row) return;
+    const userId = Number(row.dataset.userId);
+    const action = btn.dataset.action;
+
+    if (action === 'password') {
+        openAdminPasswordForm(userId, row);
+        return;
+    }
+
+    if (action === 'role') {
+        const makeAdmin = btn.textContent.trim() === 'Make admin';
+        if (!confirm(t(makeAdmin ? 'Give this account admin rights?' : 'Remove admin rights from this account?'))) return;
+        await adminRequest(`/api/admin/users/${userId}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ is_admin: makeAdmin }),
+        });
+        return;
+    }
+
+    if (action === 'delete') {
+        const name = row.querySelector('.admin-username')?.textContent?.trim() || 'this user';
+        if (!confirm(`${t('Delete')} ${name}? ${t('Their collection, binders and sessions are removed too.')}`)) return;
+        await adminRequest(`/api/admin/users/${userId}`, { method: 'DELETE' });
+    }
+}
+
+async function handleAdminPasswordSubmit(e) {
+    e.preventDefault();
+    const input = document.getElementById('admin-password-input');
+    const errorEl = document.getElementById('admin-error');
+    const password = input?.value || '';
+    if (password.length < 8) {
+        if (errorEl) errorEl.textContent = 'Password must be at least 8 characters';
+        return;
+    }
+    if (!adminPasswordUserId) return;
+    const data = await adminRequest(`/api/admin/users/${adminPasswordUserId}/password`, {
+        method: 'POST',
+        body: JSON.stringify({ new_password: password }),
+    });
+    if (data) {
+        closeAdminPasswordForm();
+        showToast(t('Password updated'));
+    }
+}
+
+document.getElementById('admin-users')?.addEventListener('click', handleAdminUserAction);
+document.getElementById('admin-password-form')?.addEventListener('submit', handleAdminPasswordSubmit);
+document.getElementById('admin-password-cancel')?.addEventListener('click', closeAdminPasswordForm);
+
+
+// ── Admin: card corrections ───────────────────────────────────────
+// Users report a wrong identification from the review queue; here the admin
+// checks each one against the crop, confirms or rejects it, and can point it at
+// the right card when the user picked the wrong one.
+let adminCorrStatus = 'all';
+
+function adminShowTab(name) {
+    document.querySelectorAll('.admin-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.adminTab === name);
+    });
+    document.querySelectorAll('.admin-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.dataset.adminPanel === name);
+    });
+    if (name === 'corrections') loadCorrections();
+}
+
+async function loadCorrections() {
+    const el = document.getElementById('admin-corrections');
+    if (!el) return;
+    el.textContent = t('Loading…');
+    try {
+        const response = await fetch(`/api/admin/corrections?status=${encodeURIComponent(adminCorrStatus)}&limit=50`);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || 'Could not load corrections');
+        renderCorrections(data.corrections || [], data.counts || {});
+    } catch (err) {
+        el.innerHTML = `<p class="admin-empty">${adminEscape(err.message)}</p>`;
+    }
+}
+
+function renderCorrections(corrections, counts) {
+    const el = document.getElementById('admin-corrections');
+    if (!el) return;
+    document.querySelectorAll('#admin-corr-filters .admin-filter').forEach(btn => {
+        const status = btn.dataset.corrStatus;
+        const count = status === 'all' ? counts.total : counts[status];
+        const base = btn.dataset.label || btn.textContent.trim().split(' (')[0];
+        btn.dataset.label = base;
+        btn.textContent = count === undefined ? base : `${base} (${count})`;
+        btn.classList.toggle('active', status === adminCorrStatus);
+    });
+    if (!corrections.length) {
+        el.innerHTML = '<p class="admin-empty">No corrections in this filter.</p>';
+        return;
+    }
+    el.innerHTML = corrections.map(c => {
+        const status = c.review_status || 'pending';
+        const thumb = c.crop_image_path || c.scan_image_path;
+        const score = c.score ? `${(Number(c.score) * 100).toFixed(1)}%` : '—';
+        const who = c.username || 'guest';
+        return `<div class="corr-row" data-correction-id="${c.id}">
+            ${thumb ? `<img class="corr-thumb" src="/data/${adminEscape(thumb)}" alt="" loading="lazy">` : '<div class="corr-thumb empty"></div>'}
+            <div class="corr-body">
+                <div class="corr-line"><span class="corr-label">said</span>
+                    <span class="corr-card">${adminEscape(c.wrong_name || '—')}</span>
+                    <code>${adminEscape(c.wrong_id || '')}</code></div>
+                <div class="corr-line"><span class="corr-label">user says</span>
+                    <span class="corr-card correct">${adminEscape(c.correct_name || '—')}</span>
+                    <code>${adminEscape(c.correct_id || '')}</code></div>
+                <div class="corr-meta">
+                    <span class="corr-status ${adminEscape(status)}">${adminEscape(status)}</span>
+                    <span>${adminEscape(c.source || 'scan')}</span>
+                    <span>score ${adminEscape(score)}</span>
+                    <span>${adminEscape(who)}</span>
+                    <span>${adminEscape((c.created_at || '').slice(0, 16))}</span>
+                </div>
+            </div>
+            <div class="corr-actions">
+                <button type="button" class="admin-btn" data-corr-action="confirm">Confirm</button>
+                <button type="button" class="admin-btn" data-corr-action="reject">Reject</button>
+                <button type="button" class="admin-btn" data-corr-action="pending">Reopen</button>
+                <button type="button" class="admin-btn" data-corr-action="change">Change card</button>
+                <button type="button" class="admin-btn danger" data-corr-action="delete">Delete</button>
+            </div>
+            <div class="corr-search hidden">
+                <input type="text" class="corr-search-input" placeholder="Search card by name or id…" autocomplete="off">
+                <div class="corr-results"></div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function adminCorrectionRequest(url, options = {}) {
+    const errorEl = document.getElementById('admin-error');
+    if (errorEl) errorEl.textContent = '';
+    try {
+        const response = await fetch(url, {
+            ...options,
+            headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            if (errorEl) errorEl.textContent = data.detail || 'Request failed';
+            return null;
+        }
+        await Promise.all([loadCorrections(), refreshAdminPanel()]);
+        return data;
+    } catch {
+        if (errorEl) errorEl.textContent = 'Network error';
+        return null;
+    }
+}
+
+function setCorrectionStatus(row, correctionId, status) {
+    const label = { confirmed: 'Confirm this correction?', rejected: 'Reject this correction?', pending: 'Reopen this correction?' }[status];
+    if (label && !confirm(t(label))) return;
+    adminCorrectionRequest(`/api/admin/corrections/${correctionId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ review_status: status }),
+    });
+}
+
+async function handleCorrectionAction(e) {
+    const cardButton = e.target.closest('button[data-card-id]');
+    const row = e.target.closest('.corr-row');
+    if (!row) return;
+    const correctionId = Number(row.dataset.correctionId);
+
+    if (cardButton) {
+        const ok = await adminCorrectionRequest(`/api/admin/corrections/${correctionId}`, {
+            method: 'PATCH',
+            body: JSON.stringify({
+                correct_id: cardButton.dataset.cardId,
+                correct_name: cardButton.dataset.cardName || '',
+            }),
+        });
+        if (ok) showToast(t('Correction re-pointed'));
+        return;
+    }
+
+    const btn = e.target.closest('button[data-corr-action]');
+    if (!btn) return;
+    const action = btn.dataset.corrAction;
+
+    if (action === 'confirm' || action === 'reject' || action === 'pending') {
+        setCorrectionStatus(row, correctionId, { confirm: 'confirmed', reject: 'rejected', pending: 'pending' }[action]);
+        return;
+    }
+    if (action === 'change') {
+        const panel = row.querySelector('.corr-search');
+        if (!panel) return;
+        panel.classList.toggle('hidden');
+        if (!panel.classList.contains('hidden')) panel.querySelector('.corr-search-input')?.focus();
+        return;
+    }
+    if (action === 'delete') {
+        if (!confirm(t('Delete this correction permanently?'))) return;
+        await adminCorrectionRequest(`/api/admin/corrections/${correctionId}`, { method: 'DELETE' });
+    }
+}
+
+let correctionSearchTimer = null;
+
+function handleCorrectionSearch(e) {
+    const input = e.target.closest('.corr-search-input');
+    if (!input) return;
+    const row = input.closest('.corr-row');
+    const results = row?.querySelector('.corr-results');
+    if (!results) return;
+    const query = input.value.trim();
+    clearTimeout(correctionSearchTimer);
+    if (query.length < 2) {
+        results.innerHTML = '';
+        return;
+    }
+    correctionSearchTimer = setTimeout(async () => {
+        try {
+            const response = await fetch(`/api/admin/cards/search?q=${encodeURIComponent(query)}&limit=8`);
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                results.innerHTML = `<p class="admin-empty">${adminEscape(data.detail || 'Search failed')}</p>`;
+                return;
+            }
+            const cards = data.results || [];
+            results.innerHTML = cards.length ? cards.map(card => {
+                const meta = [card.ptcg_id, card.set_name].filter(Boolean).join(' · ');
+                return `<button type="button" class="corr-result" data-card-id="${adminEscape(card.ptcg_id)}" data-card-name="${adminEscape(card.name)}">
+                    <span class="corr-result-name">${adminEscape(card.name)}</span>
+                    <span class="corr-result-meta">${adminEscape(meta)}</span>
+                </button>`;
+            }).join('') : '<p class="admin-empty">No card matches.</p>';
+        } catch {
+            results.innerHTML = '<p class="admin-empty">Search failed</p>';
+        }
+    }, 250);
+}
+
+document.getElementById('admin-tabs')?.addEventListener('click', (e) => {
+    const tab = e.target.closest('.admin-tab');
+    if (tab) adminShowTab(tab.dataset.adminTab);
+});
+document.getElementById('admin-corr-filters')?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.admin-filter');
+    if (!btn) return;
+    adminCorrStatus = btn.dataset.corrStatus || 'all';
+    loadCorrections();
+});
+document.getElementById('admin-corrections')?.addEventListener('click', handleCorrectionAction);
+document.getElementById('admin-corrections')?.addEventListener('input', handleCorrectionSearch);
 

@@ -115,11 +115,27 @@ class UserResponse(BaseModel):
     email: str
     full_name: Optional[str] = None
     preferred_language: str = "EN"
+    is_admin: bool = False
     created_at: datetime
 
 
 class UserProfileUpdate(BaseModel):
     preferred_language: Optional[str] = None
+
+
+class AdminPasswordSet(BaseModel):
+    new_password: str
+
+
+class AdminUserUpdate(BaseModel):
+    is_admin: Optional[bool] = None
+
+
+class AdminCorrectionUpdate(BaseModel):
+    review_status: Optional[str] = None   # pending | confirmed | rejected
+    correct_id: Optional[str] = None
+    correct_name: Optional[str] = None
+    admin_note: Optional[str] = None
 
 
 class AuthToken(BaseModel):

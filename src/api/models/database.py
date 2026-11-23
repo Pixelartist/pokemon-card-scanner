@@ -64,6 +64,7 @@ def init_db():
             hashed_password TEXT NOT NULL,
             full_name TEXT,
             preferred_language TEXT DEFAULT 'EN',
+            is_admin INTEGER DEFAULT 0,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -181,6 +182,20 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_created ON misreads(created_at)")
 
+    # Admin vetting state for user-submitted corrections. Databases created
+    # before the review workflow have the table but none of these columns.
+    cursor.execute("PRAGMA table_info(misreads)")
+    mr_columns = {r[1] for r in cursor.fetchall()}
+    for column, ddl in (
+        ("review_status", "TEXT DEFAULT 'pending'"),
+        ("reviewed_by", "INTEGER"),
+        ("reviewed_at", "TIMESTAMP"),
+        ("admin_note", "TEXT"),
+    ):
+        if column not in mr_columns:
+            cursor.execute(f"ALTER TABLE misreads ADD COLUMN {column} {ddl}")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_status ON misreads(review_status)")
+
     # Column migrations for pre-existing databases (CREATE TABLE IF NOT
     # skips them, so SQLite needs an explicit ALTER TABLE, one column at a
     # time). Keep in sync with the collection_items schema above.
@@ -195,7 +210,33 @@ def init_db():
     user_columns = {r[1] for r in cursor.fetchall()}
     if 'preferred_language' not in user_columns:
         cursor.execute("ALTER TABLE users ADD COLUMN preferred_language TEXT DEFAULT 'EN'")
-    
+    if 'is_admin' not in user_columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+
+    # Same story for refresh_tokens: create_refresh_token() deletes revoked rows
+    # on every login/registration, so a database created before that flag existed
+    # raised "no such column: revoked" *after* the user row had been committed.
+    # Registration answered 500 while the account existed.
+    cursor.execute("PRAGMA table_info(refresh_tokens)")
+    rt_columns = {r[1] for r in cursor.fetchall()}
+    if 'revoked' not in rt_columns:
+        cursor.execute("ALTER TABLE refresh_tokens ADD COLUMN revoked INTEGER DEFAULT 0")
+
+    # Bootstrap admins: nobody can reach the admin endpoints without the flag, so
+    # promote the oldest account (the owner's) when no admin exists yet. An
+    # ADMIN_USERNAMES override covers a database whose first account is a test
+    # user, and lets a fresh deployment pick its owner explicitly.
+    override = [name.strip() for name in os.environ.get("ADMIN_USERNAMES", "").split(",") if name.strip()]
+    for name in override:
+        cursor.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (name,))
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("SELECT MIN(id) FROM users")
+        first_id = cursor.fetchone()[0]
+        if first_id is not None:
+            cursor.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (first_id,))
+            logging.info("No admin user existed: promoted the oldest account (id %s) to admin", first_id)
+
     conn.commit()
     conn.close()
     logging.info("Database initialized at %s", DATABASE_URL)

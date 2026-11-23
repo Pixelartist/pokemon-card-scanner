@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ ui_lang | default('en') }}" data-ui-lang="{{ ui_lang | default('en') }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -7,6 +7,11 @@
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Pokémon Card Scanner</title>
+    <!-- Interface translation: the server picked the starting language from
+         ?lang= -> ui_lang cookie -> Accept-Language and inlines that catalog,
+         so the page needs no extra request and switches without a reload. -->
+    <script type="application/json" id="i18n-catalog">{{ i18n_catalog | default('{}') | safe }}</script>
+    <script src="/static/js/i18n.js?t={{ timestamp }}"></script>
     <link rel="icon" type="image/svg+xml" href="/static/images/favicon.svg">
     <link rel="icon" type="image/png" href="/static/images/favicon-32.png" sizes="32x32">
     <link rel="icon" type="image/png" href="/static/images/icon.png" sizes="64x64">
@@ -85,7 +90,7 @@
                     </div>
                     <div class="user-dropdown-divider"></div>
                     <div class="user-dropdown-section">
-                        <label class="dropdown-label">Preferred Language</label>
+                        <label class="dropdown-label" for="lang-pref">Card Language</label>
                         <select id="lang-pref" class="lang-pref-dropdown" title="Preferred card language">
                             <option value="EN">EN</option>
                             <option value="DE">DE</option>
@@ -95,6 +100,20 @@
                             <option value="JA">JA</option>
                             <option value="ZH">ZH</option>
                         </select>
+                    </div>
+                    <div class="user-dropdown-divider"></div>
+                    <div class="user-dropdown-section">
+                        <label class="dropdown-label" for="ui-lang-pref">Interface Language</label>
+                        <select id="ui-lang-pref" class="lang-pref-dropdown" title="Interface language">
+                            <option value="en">English</option>
+                            <option value="de">Deutsch</option>
+                        </select>
+                    </div>
+                    <div class="user-dropdown-divider" id="user-admin-divider" style="display:none"></div>
+                    <div class="user-dropdown-section" id="user-admin-section" style="display:none">
+                        <button class="user-dropdown-item" id="user-admin">
+                            <span class="item-text">Admin</span>
+                        </button>
                     </div>
                     <div class="user-dropdown-divider"></div>
                     <div class="user-dropdown-section">
@@ -427,6 +446,56 @@
                 <button id="register-btn" type="submit" class="btn btn-primary btn-full">Register</button>
                 <p class="auth-error" id="register-error"></p>
             </form>
+        </div>
+    </div>
+
+    <!-- Admin Modal -->
+    <div id="admin-modal" class="modal hidden">
+        <div class="modal-content modal-admin">
+            <button class="modal-close" data-close="true">&times;</button>
+            <h2 class="admin-title">Administration</h2>
+            <p class="admin-subtitle">Accounts, database state and card corrections</p>
+
+            <div class="admin-tabs" id="admin-tabs">
+                <button class="admin-tab active" data-admin-tab="overview">Overview</button>
+                <button class="admin-tab" data-admin-tab="users">Users</button>
+                <button class="admin-tab" data-admin-tab="corrections">Corrections</button>
+            </div>
+
+            <section class="admin-panel active" data-admin-panel="overview">
+                <div id="admin-db-stats" class="admin-stats"></div>
+                <div id="admin-missing-images" class="admin-missing"></div>
+                <div id="admin-stats" class="admin-stats"></div>
+            </section>
+
+            <section class="admin-panel" data-admin-panel="users">
+                <div class="admin-users-header">
+                    <h3>Users</h3>
+                    <span id="admin-user-count" class="admin-count"></span>
+                </div>
+                <div id="admin-users" class="admin-users"></div>
+
+                <form id="admin-password-form" class="admin-password-form hidden">
+                    <label for="admin-password-input">New password for <strong id="admin-password-user"></strong></label>
+                    <div class="admin-password-row">
+                        <input type="password" id="admin-password-input" autocomplete="new-password" minlength="8" required placeholder="At least 8 characters">
+                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="button" class="btn btn-ghost" id="admin-password-cancel">Cancel</button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="admin-panel" data-admin-panel="corrections">
+                <div class="admin-corr-filters" id="admin-corr-filters">
+                    <button class="admin-filter active" data-corr-status="all">All</button>
+                    <button class="admin-filter" data-corr-status="pending">Pending</button>
+                    <button class="admin-filter" data-corr-status="confirmed">Confirmed</button>
+                    <button class="admin-filter" data-corr-status="rejected">Rejected</button>
+                </div>
+                <div id="admin-corrections" class="admin-corrections"></div>
+            </section>
+
+            <p class="auth-error" id="admin-error"></p>
         </div>
     </div>
 

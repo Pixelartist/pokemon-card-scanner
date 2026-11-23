@@ -32,14 +32,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+# Honours DATA_DIR like api.main and api.models.database do, so the rebuild
+# reads the same database the app serves and writes its pair file beside it.
+DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent.parent.parent / "data"))
 DEFAULT_DB = DATA_DIR / "pokemon_cards.db"
 CONFUSER_PATH = DATA_DIR / "confuser_pairs.json"
 
@@ -161,8 +166,14 @@ def load_corrections(db_path: Optional[Path] = None) -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
+    # A correction the admin rejected is not ground truth: it must not pin a
+    # confuser pair. Older databases have no review_status column at all.
+    has_status = bool(rows) and "review_status" in rows[0].keys()
+
     groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for r in rows:
+        if has_status and (r["review_status"] or "pending") == "rejected":
+            continue
         wrong = (r["wrong_id"] or "").strip()
         correct = (r["correct_id"] or "").strip()
         if not wrong or not correct or wrong == correct:
@@ -296,6 +307,60 @@ def build_confuser_index(db_path: Optional[Path] = None,
     logger.info("confuser pairs: %d from %d rows -> %s",
                 len(pairs), doc["counts"]["correction_rows"], out)
     return doc
+
+
+# ------------------------------------------------------------ rebuild scheduling
+
+# An admin vetting a queue works through corrections in bursts: confirm, reject,
+# re-point, next row. Each edit used to start its own thread, so a session of
+# twenty edits ran twenty rebuilds at once, all reading the table and writing
+# the same file. Now one worker owns the rebuild: the first request starts it
+# after a short quiet period that folds a burst into a single run, and anything
+# that arrives while it works queues exactly one follow-up run.
+REBUILD_DEBOUNCE_SECONDS = 2.0
+
+_REBUILD_LOCK = threading.Lock()
+_REBUILD_RUNNING = False
+_REBUILD_PENDING = False
+
+
+def schedule_confuser_rebuild() -> None:
+    """Queue a rebuild; every request until the run starts folds into it."""
+    global _REBUILD_RUNNING, _REBUILD_PENDING
+    with _REBUILD_LOCK:
+        _REBUILD_PENDING = True
+        if _REBUILD_RUNNING:
+            return
+        _REBUILD_RUNNING = True
+    threading.Thread(target=_rebuild_loop, daemon=True, name="confuser-rebuild").start()
+
+
+def _rebuild_loop() -> None:
+    """One quiet period per run; an edit during a run queues one follow-up."""
+    global _REBUILD_RUNNING, _REBUILD_PENDING
+    while True:
+        time.sleep(REBUILD_DEBOUNCE_SECONDS)
+        with _REBUILD_LOCK:
+            _REBUILD_PENDING = False          # this run covers everything so far
+        try:
+            build_confuser_index()
+        except Exception as exc:  # a bad rebuild must not stop later ones
+            logger.warning("confuser rebuild failed: %s", exc)
+        with _REBUILD_LOCK:
+            if not _REBUILD_PENDING:
+                _REBUILD_RUNNING = False
+                return
+
+
+def wait_for_confuser_rebuild(timeout: float = 60.0) -> bool:
+    """Block until no rebuild is queued or running (tests and scripts)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _REBUILD_LOCK:
+            if not _REBUILD_RUNNING:
+                return True
+        time.sleep(0.05)
+    return False
 
 
 # ---------------------------------------------------------------- runtime view

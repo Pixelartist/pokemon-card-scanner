@@ -30,8 +30,9 @@ from datetime import datetime, timezone
 
 from api.models.database import init_db, get_db_connection, DATABASE_URL
 db_path = DATABASE_URL  # backward-compatible alias
-from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, UserProfileUpdate, BinderCreate, BinderUpdate
+from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, UserProfileUpdate, BinderCreate, BinderUpdate, AdminPasswordSet, AdminUserUpdate, AdminCorrectionUpdate
 from services import identify_jobs
+from services import i18n as ui_i18n
 from services.ptcg_client import get_client
 from services.collection import CollectionService
 from services.auth import (
@@ -194,28 +195,75 @@ def crop_card_image(image_bytes: bytes, timestamp: str) -> Optional[str]:
         logger.warning(f"Card crop failed: {e}")
         return None
 
-def save_crop_data_url(data_url: str) -> Optional[str]:
-    """Persist a browser-side crop so the background worker can read it later.
+def _decode_image_data_url(data_url: str, max_bytes: int = 8 * 1024 * 1024):
+    """(bytes, extension) for an inline image, or (None, None).
 
-    The scanner keeps its crop inline as a data URL; a queued job runs in
-    another process and needs a file on disk. Returns the relative path.
+    Only real images pass: the browser sends `data:image/jpeg;base64,...`, and
+    the caller writes the result to disk, so the magic bytes are checked too.
     """
-    try:
-        import base64
+    import base64
 
-        header, _, payload = (data_url or "").partition(",")
-        if "base64" not in header or not payload:
-            return None
+    header, _, payload = (data_url or "").partition(",")
+    if "base64" not in header or not payload or not header.lower().startswith("data:image/"):
+        return None, None
+    try:
         raw = base64.b64decode(payload)
-        if not raw or len(raw) > 8 * 1024 * 1024:
-            return None
-        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
-        CROP_DIR.mkdir(parents=True, exist_ok=True)
-        (CROP_DIR / f"crop_{stamp}_q.jpg").write_bytes(raw)
-        return f"scans/crops/crop_{stamp}_q.jpg"
-    except Exception as e:
-        logger.warning(f"Queue crop save failed: {e}")
+    except Exception:
+        return None, None
+    if not raw or len(raw) > max_bytes:
+        return None, None
+    if raw.startswith(b"\xff\xd8\xff"):
+        return raw, "jpg"
+    if raw.startswith(b"\x89PNG"):
+        return raw, "png"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return raw, "webp"
+    return None, None
+
+
+def _save_browser_image(data_url: str, kind: str) -> Optional[str]:
+    """Write an inline browser image under data/scans and return its path.
+
+    The camera path of the scanner matches in the browser and never uploads its
+    frame, so the frame and its cut exist only as data URLs until here: the row
+    needs a file for both, and the identify worker needs the cut on disk.
+    """
+    raw, ext = _decode_image_data_url(data_url)
+    if not raw:
         return None
+    folder = CROP_DIR if kind == "crop" else SCAN_DIR
+    stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.time() * 1000) % 1000:03d}"
+    name = f"crop_{stamp}_q.{ext}" if kind == "crop" else f"scan_{stamp}_browser.{ext}"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(raw)
+    except OSError as e:
+        logger.warning(f"Browser {kind} save failed: {e}")
+        return None
+    return f"scans/crops/{name}" if kind == "crop" else f"scans/{name}"
+
+
+def _persist_capture_path(path_value: Optional[str],
+                          data_url: Optional[str],
+                          kind: str) -> Optional[str]:
+    """Store-or-drop a capture field, always returning a relative path or None.
+
+    A collection row may only point at a file under data/scans/. The browser
+    sends either a path the server already wrote or an inline data URL it wants
+    stored; anything else (absolute paths, remote URLs, a base64 blob in the
+    path column) is dropped instead of being written to the row — that is how
+    `/data/data:image/jpeg;base64,...` used to end up as a broken image.
+    """
+    candidate = (path_value or "").strip()
+    if candidate.startswith("data:image/"):
+        candidate, data_url = "", candidate
+    if candidate:
+        if candidate.startswith("/") or ".." in candidate or not candidate.startswith("scans/"):
+            return None
+        return candidate if (SCAN_DIR.parent / candidate).is_file() else None
+    if data_url:
+        return _save_browser_image(data_url, kind)
+    return None
 
 
 # Create FastAPI app
@@ -400,8 +448,30 @@ async def home(request: Request):
     try:
         stats = collection_service.get_stats()
         template = jinja_env.get_template("index.html")
-        html = template.render(request=request, stats=stats, cache_bust=int(time.time()), timestamp=int(time.time()))
-        return HTMLResponse(content=html)
+        # Interface language: ?lang= -> ui_lang cookie -> Accept-Language -> en.
+        # The catalog is inlined so the page renders translated without a
+        # second request, and the page's own picker can switch without reloading.
+        ui_lang = ui_i18n.resolve_request(request)
+        html = template.render(
+            request=request,
+            stats=stats,
+            cache_bust=int(time.time()),
+            timestamp=int(time.time()),
+            ui_lang=ui_lang,
+            i18n_catalog=ui_i18n.catalog_json(ui_lang),
+        )
+        response = HTMLResponse(content=html)
+        requested = ui_i18n.normalize(request.query_params.get("lang"))
+        if requested in ui_i18n.SUPPORTED:
+            # ?lang= is an explicit choice, same as the in-app picker.
+            response.set_cookie(
+                ui_i18n.COOKIE,
+                requested,
+                max_age=ui_i18n.COOKIE_MAX_AGE,
+                samesite="lax",
+                path="/",
+            )
+        return response
     except Exception:
         return HTMLResponse(content="""<!DOCTYPE html>
 <html><head><title>Pokemon Card Scanner</title>
@@ -506,7 +576,7 @@ async def scan_card(
 
             if source not in ("clip_matcher", "offline_matcher", "quickdraw_matcher"):
                 candidate_ids = [c["id"] for c in result["candidates"]]
-                cards = client.get_cards_batch(candidate_ids)
+                cards = await asyncio.to_thread(client.get_cards_batch, candidate_ids)
                 card_map = {c["id"]: c for c in cards}
 
                 for candidate in result["candidates"]:
@@ -683,6 +753,8 @@ async def add_to_collection(card_id: str = Form(...),
                             is_first_edition: bool = Form(False),
                             scan_image_path: Optional[str] = Form(None),
                             crop_image_path: Optional[str] = Form(None),
+                            scan_data_url: Optional[str] = Form(None),
+                            crop_data_url: Optional[str] = Form(None),
                             match_source: Optional[str] = Form(None),
                             match_proposed_id: Optional[str] = Form(None),
                             match_proposed_second_id: Optional[str] = Form(None),
@@ -747,13 +819,9 @@ async def add_to_collection(card_id: str = Form(...),
                 conn.commit()
                 card_db_id = cursor.execute("SELECT last_insert_rowid()").fetchone()[0]
             else:
-                # Fall back to CLIP index for cards not in the API
-                from services.clip_matcher import get_clip_matcher
-                matcher = get_clip_matcher()
-                matcher.load_index()
-                clip_card = matcher.cards.get(card_id)
-                if not clip_card and card_id.startswith("de_"):
-                    clip_card = matcher.cards.get(card_id[3:])
+                # Fall back to CLIP index for cards not in the API. The load is
+                # blocking (~100s worst case), so it runs off the event loop.
+                clip_card = await asyncio.to_thread(_clip_index_card, card_id)
                 if clip_card:
                     cursor.execute(
                         """INSERT OR IGNORE INTO cards (ptcg_id, name, number, rarity, hp, types, artist, set_name, images)
@@ -777,6 +845,14 @@ async def add_to_collection(card_id: str = Form(...),
                     conn.close()
                     raise HTTPException(status_code=404, detail=f"Card {card_id} not found")
         conn.close()
+
+        # The capture the user filed lives either on disk already (an uploaded
+        # scan) or inline in the browser (a camera-side match). Both shapes are
+        # accepted, but the row only ever stores a path: an inline crop used to
+        # be written to crop_image_path verbatim and the details view then asked
+        # for /data/data:image/jpeg;base64,... which cannot resolve.
+        scan_image_path = _persist_capture_path(scan_image_path, scan_data_url, "scan")
+        crop_image_path = _persist_capture_path(crop_image_path, crop_data_url, "crop")
 
         item_data = CollectionItemCreate(
             card_id=card_db_id,
@@ -955,8 +1031,18 @@ async def get_card_crop(card_id: str,
         row = cursor.fetchone()
         if not row:
             return {"found": False}
-        path = row["crop_image_path"] or row["scan_image_path"]
-        kind = "crop" if row["crop_image_path"] else "scan"
+        def _stored_path(value):
+            # Rows written before the add endpoint validated this can hold an
+            # inline data URL; it is not a path and must not become a URL.
+            value = (value or "").strip()
+            if not value or value.startswith("/") or ".." in value or not value.startswith("scans/"):
+                return None
+            return value if (SCAN_DIR.parent / value).is_file() else None
+
+        path = _stored_path(row["crop_image_path"]) or _stored_path(row["scan_image_path"])
+        if not path:
+            return {"found": False}
+        kind = "crop" if _stored_path(row["crop_image_path"]) else "scan"
         # Paths are stored relative to data/ which is mounted at /data
         return {"found": True, "url": f"/data/{path}", "kind": kind, "date": row["added_at"]}
     finally:
@@ -1729,13 +1815,14 @@ def _shape_card_row(row, german_names) -> dict:
     d = dict(row)
     if d.get("images"):
         try:
-            d["images"] = json.loads(d["images"])
+            images = json.loads(d["images"]) if isinstance(d["images"], str) else d["images"]
         except Exception:
-            d["images"] = {}
-        for img_key in ("small", "large"):
-            img_url = d["images"].get(img_key, "")
-            if img_url and img_url.startswith("https://"):
-                d["images"][img_key] = _resolve_local_card_image(d.get("ptcg_id") or "", img_url)
+            images = {}
+        # One resolver for every surface: it keeps stored local art, fills
+        # small/large from language-keyed maps, and repairs remote URLs.
+        from services.collection import _normalize_images
+
+        d["images"] = _normalize_images(images, d.get("ptcg_id") or "")
     if german_names:
         german = german_names.get((d.get("ptcg_id") or "").lower())
         if german:
@@ -1743,8 +1830,32 @@ def _shape_card_row(row, german_names) -> dict:
     return d
 
 
+# A search scans ~21k CLIP index entries, so the handler is a plain def and
+# FastAPI runs it in the worker pool: it cannot stall the event loop. The lock
+# serialises the cold load and the snapshot that follows it.
+_search_index_lock = threading.Lock()
+
+
+def _clip_index_card(card_id: str):
+    """One CLIP index entry by id; German rows also answer to their bare id.
+
+    Runs through load_index_fast(), the same loader the rest of the server uses,
+    so a request never triggers the JSON+NPZ load. Callers run it in a thread.
+    """
+    from services.clip_matcher import get_clip_matcher
+
+    matcher = get_clip_matcher()
+    with _search_index_lock:
+        if not matcher.load_index_fast():
+            return None
+        card = matcher.cards.get(card_id)
+        if card is None and card_id.startswith("de_"):
+            card = matcher.cards.get(card_id[3:])
+        return card
+
+
 @app.get("/api/cards/search")
-async def search_cards(query: str, limit: int = 20):
+def search_cards(query: str, limit: int = 20):
     """Search cards by name, set code, or number (public endpoint, no auth).
     Searches both the local DB and the full CLIP card index (~21k cards)."""
     q = query.strip().lower()
@@ -1799,13 +1910,19 @@ async def search_cards(query: str, limit: int = 20):
                 results.append(d)
     conn.close()
 
-    # 2) CLIP index results (covers cards not yet in the DB)
-    if len(results) < limit:
+    # 2) CLIP index results (covers cards not yet in the DB). An empty query
+    # matches every index entry, so it would only cost the full scan without
+    # adding anything the DB rows above do not already cover.
+    if q and len(results) < limit:
         try:
             from services.clip_matcher import get_clip_matcher
+
             matcher = get_clip_matcher()
-            matcher.load_index()
-            for card in matcher.cards.values():
+            with _search_index_lock:
+                # Snapshot: a concurrent load refills matcher.cards, which would
+                # make iterating the live dict raise.
+                index_cards = list(matcher.cards.values()) if matcher.has_usable_index() else []
+            for card in index_cards:
                 if len(results) >= limit:
                     break
                 if card.card_id.lower() in seen:
@@ -1854,7 +1971,11 @@ CREATE TABLE IF NOT EXISTS misreads (
     score REAL,
     source TEXT,
     user_id INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    review_status TEXT DEFAULT 'pending',
+    reviewed_by INTEGER,
+    reviewed_at TIMESTAMP,
+    admin_note TEXT
 )
 """
 
@@ -1920,13 +2041,9 @@ async def log_misread(payload: Dict[str, Any], request: Request):
         conn.close()
 
     # The matcher reads data/confuser_pairs.json on every scan. Rebuild it off
-    # the request path so this correction pins the pair without a manual run.
-    try:
-        from services.misread_training import build_confuser_index
-        threading.Thread(target=build_confuser_index, daemon=True,
-                         name="confuser-rebuild").start()
-    except Exception as exc:
-        logger.warning("confuser rebuild not started: %s", exc)
+    # the request path so this correction pins the pair without a manual run;
+    # the scheduler folds rapid corrections into one rebuild.
+    _schedule_confuser_rebuild()
     return {"status": "ok", "id": row_id}
 
 
@@ -1953,8 +2070,8 @@ async def list_misreads(limit: int = 100,
 @app.post("/api/identify/enqueue")
 async def enqueue_identify(payload: Dict[str, Any],
                            current_user: UserResponse = Depends(get_current_user)):
-    crop = (payload or {}).get("crop_image_path") or save_crop_data_url(
-        (payload or {}).get("crop_data_url"))
+    crop = ((payload or {}).get("crop_image_path")
+            or _save_browser_image((payload or {}).get("crop_data_url"), "crop"))
     if not crop:
         raise HTTPException(status_code=400,
                             detail="crop_image_path or crop_data_url is required")
@@ -2014,12 +2131,7 @@ async def get_card(card_id: str):
         return card
     
     # Fall back to CLIP index (covers German cards and unknown sets)
-    from services.clip_matcher import get_clip_matcher
-    matcher = get_clip_matcher()
-    matcher.load_index()
-    local = matcher.cards.get(card_id)
-    if not local and card_id.startswith("de_"):
-        local = matcher.cards.get(card_id[3:])
+    local = await asyncio.to_thread(_clip_index_card, card_id)
     if local:
         return {
             "ptcg_id": local.card_id,
@@ -2105,7 +2217,10 @@ async def scan_card_advanced(
         _check_upload(image_bytes)
 
         client = get_client()
-        result = client.identify_card(
+        # Identification is seconds of CPU (CLIP/quickdraw); off the loop it
+        # cannot stall health checks or other requests while it runs.
+        result = await asyncio.to_thread(
+            client.identify_card,
             image_bytes=image_bytes,
             top_k=5,
             set_hint=set_hint,
@@ -2114,7 +2229,7 @@ async def scan_card_advanced(
 
         if result.get("candidates"):
             candidate_ids = [c["id"] for c in result["candidates"]]
-            cards = client.get_cards_batch(candidate_ids)
+            cards = await asyncio.to_thread(client.get_cards_batch, candidate_ids)
             card_map = {c["id"]: c for c in cards}
 
             for candidate in result["candidates"]:
@@ -2394,14 +2509,9 @@ async def get_card_details(card_id: str):
     if not card:
         # Fall back to the local CLIP index (covers German 'de_*' cards and
         # any card the TCGdex API lookup misses)
-        from services.clip_matcher import get_clip_matcher
-        matcher = get_clip_matcher()
-        matcher.load_index()
-        local = matcher.cards.get(card_id)
-        if not local and card_id.startswith("de_"):
-            # Index stores German cards under their bare ID (e.g. 'bw5-1')
-            # while image URLs use the 'de_' prefix
-            local = matcher.cards.get(card_id[3:])
+        # Index stores German cards under their bare ID (e.g. 'bw5-1') while
+        # image URLs use the 'de_' prefix; _clip_index_card handles that.
+        local = await asyncio.to_thread(_clip_index_card, card_id)
         if local:
             details = {
                 "basic_info": {
@@ -2539,7 +2649,7 @@ async def get_status():
     from services.clip_matcher import get_clip_matcher
 
     matcher = get_clip_matcher()
-    status_info = matcher.status()
+    status_info = await asyncio.to_thread(matcher.status)
 
     return {
         "status": "ok",
@@ -2571,7 +2681,7 @@ async def quickdraw_status():
     from services.quickdraw_matcher import get_quickdraw_matcher
 
     matcher = get_quickdraw_matcher()
-    matcher.load_index()
+    await asyncio.to_thread(matcher.load_index)
     return {
         "matcher": "quickdraw",
         "index_available": matcher.index_path.exists(),
@@ -2609,7 +2719,7 @@ async def quickdraw_match(image: UploadFile = File(...), top_k: int = Query(5),
     _check_upload(image_bytes)
 
     matcher = get_quickdraw_matcher()
-    if not matcher.load_index():
+    if not await asyncio.to_thread(matcher.load_index):
         raise HTTPException(status_code=503, detail="Quickdraw index not built — POST /api/quickdraw/build")
 
     result = await asyncio.to_thread(matcher.recognize, image_bytes, top_k)
@@ -2640,7 +2750,7 @@ async def index_status():
     from services.clip_matcher import get_clip_matcher
 
     matcher = get_clip_matcher()
-    return matcher.status()
+    return await asyncio.to_thread(matcher.status)
 
 
 @app.post("/api/index/enrich")
@@ -2725,12 +2835,24 @@ async def register_user(user_data: UserRegister):
             "expiration_minutes": 30,
             "user": user.model_dump(mode="json"),
         })
-        set_refresh_cookie(response, create_refresh_token(user.id))
+        # The account and its access token already exist at this point: a failed
+        # refresh cookie (older database, locked file) must not turn a completed
+        # registration into "Internal server error" — the session simply lasts
+        # only as long as this page.
+        try:
+            set_refresh_cookie(response, create_refresh_token(user.id))
+        except Exception as e:
+            logger.error("Registration: refresh token could not be issued: %s", e, exc_info=True)
         return response
     except HTTPException:
         raise
+    except sqlite3.IntegrityError as e:
+        # Two sign-ups racing for the same username/email: the UNIQUE index is
+        # the real answer, so report the conflict instead of a server error.
+        logger.warning("Registration conflict for %s: %s", user_data.username, e)
+        raise HTTPException(status_code=409, detail="Username or email already exists")
     except Exception as e:
-        logger.error(f"Registration error: {e}")
+        logger.error("Registration error: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2748,7 +2870,10 @@ async def login_user(login_data: UserLogin):
             "expiration_minutes": 30,
             "user": result["user"].model_dump(mode="json"),
         })
-        set_refresh_cookie(response, create_refresh_token(result["user"].id))
+        try:
+            set_refresh_cookie(response, create_refresh_token(result["user"].id))
+        except Exception as e:
+            logger.error("Login: refresh token could not be issued: %s", e, exc_info=True)
         return response
     except HTTPException:
         raise
@@ -2801,6 +2926,7 @@ async def get_me(current_user: UserResponse = Depends(get_current_user)):
         email=current_user.email,
         full_name=current_user.full_name,
         preferred_language=current_user.preferred_language,
+        is_admin=current_user.is_admin,
         created_at=current_user.created_at
     )
 
@@ -2824,6 +2950,209 @@ async def set_my_language(
     if updated is None:
         raise HTTPException(status_code=404, detail="User not found")
     return updated
+
+
+# ============================================================
+# Admin Endpoints (accounts with the is_admin flag only)
+# ============================================================
+
+def get_current_admin(current_user: UserResponse = Depends(get_current_user)) -> UserResponse:
+    """Gate every /api/admin route on the account's admin flag."""
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+
+def _schedule_confuser_rebuild() -> None:
+    """Rebuild the confuser index after the training data changed.
+
+    Coalesced: a burst of admin edits produces one rebuild, not one per edit.
+    """
+    try:
+        from services.misread_training import schedule_confuser_rebuild
+        schedule_confuser_rebuild()
+    except Exception as exc:
+        logger.warning("confuser rebuild not started: %s", exc)
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(admin: UserResponse = Depends(get_current_admin)):
+    """All accounts with their collection size, for the admin panel."""
+    return {"users": AuthService().list_users()}
+
+
+@app.get("/api/admin/stats")
+async def admin_get_stats(admin: UserResponse = Depends(get_current_admin)):
+    """Database and usage counters shown above the user list."""
+    return AuthService().admin_stats()
+
+
+@app.post("/api/admin/users/{user_id}/password")
+async def admin_set_password(
+    user_id: int,
+    payload: AdminPasswordSet,
+    admin: UserResponse = Depends(get_current_admin),
+):
+    """Set another account's password (and sign its sessions out)."""
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if not AuthService().set_user_password(user_id, payload.new_password):
+        raise HTTPException(status_code=404, detail="User not found")
+    logger.info("Admin %s (id %s) reset the password of user id %s", admin.username, admin.id, user_id)
+    return {"success": True, "detail": "Password updated. Their saved login was revoked; an open tab keeps access until its token expires."}
+
+
+@app.patch("/api/admin/users/{user_id}")
+async def admin_update_user(
+    user_id: int,
+    payload: AdminUserUpdate,
+    admin: UserResponse = Depends(get_current_admin),
+):
+    """Grant or revoke an account's admin rights."""
+    auth = AuthService()
+    target = auth.get_user(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if payload.is_admin is None:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    if user_id == admin.id and not payload.is_admin:
+        raise HTTPException(status_code=400, detail="You cannot remove your own admin rights")
+    if target.is_admin and not payload.is_admin and auth.count_admins() <= 1:
+        raise HTTPException(status_code=400, detail="At least one admin account is required")
+    if not auth.set_user_admin(user_id, payload.is_admin):
+        raise HTTPException(status_code=404, detail="User not found")
+    logger.info("Admin %s (id %s) set admin=%s for user id %s",
+                admin.username, admin.id, payload.is_admin, user_id)
+    return {"success": True, "user": auth.get_user(user_id).model_dump(mode="json")}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: int,
+    admin: UserResponse = Depends(get_current_admin),
+):
+    """Delete an account together with its collection, binders and sessions."""
+    auth = AuthService()
+    target = auth.get_user(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    if target.is_admin and auth.count_admins() <= 1:
+        raise HTTPException(status_code=400, detail="At least one admin account is required")
+    if not auth.delete_user(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+    logger.warning("Admin %s (id %s) deleted user %s (id %s)",
+                   admin.username, admin.id, target.username, user_id)
+    return {"success": True}
+
+
+@app.get("/api/admin/database")
+async def admin_database_stats(
+    force: bool = False,
+    admin: UserResponse = Depends(get_current_admin),
+):
+    """Card/price/image/correction counters for the database section.
+
+    ``force=true`` re-scans card images instead of reusing the 60s cache.
+    """
+    from services import db_stats
+    return await asyncio.to_thread(db_stats.database_stats, force)
+
+
+@app.get("/api/admin/corrections")
+async def admin_list_corrections(
+    status: str = "all",
+    limit: int = 50,
+    offset: int = 0,
+    admin: UserResponse = Depends(get_current_admin),
+):
+    """User-submitted corrections, newest first, with vetting state per row."""
+    from services import corrections as corrections_service
+    return await asyncio.to_thread(
+        corrections_service.list_corrections, status, limit, offset
+    )
+
+
+@app.patch("/api/admin/corrections/{correction_id}")
+async def admin_update_correction(
+    correction_id: int,
+    payload: AdminCorrectionUpdate,
+    admin: UserResponse = Depends(get_current_admin),
+):
+    """Confirm/reject a correction, or re-point it at the right card."""
+    from services import corrections as corrections_service
+
+    correct_id = payload.correct_id
+    if correct_id is not None:
+        correct_id = correct_id.strip()
+        if not correct_id or not corrections_service.card_exists(correct_id):
+            raise HTTPException(status_code=400, detail=f"Unknown card id '{payload.correct_id}'")
+
+    try:
+        updated = corrections_service.update_correction(
+            correction_id,
+            review_status=payload.review_status,
+            correct_id=correct_id,
+            correct_name=payload.correct_name,
+            admin_note=payload.admin_note,
+            reviewed_by=admin.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Correction not found or nothing to update")
+
+    logger.info(
+        "Admin %s (id %s) vetted correction %s: status=%s correct_id=%s",
+        admin.username, admin.id, correction_id,
+        payload.review_status, updated.get("correct_id"),
+    )
+    # The matcher reads confuser_pairs.json; vetting changes what is ground
+    # truth, so rebuild it off the request path.
+    _schedule_confuser_rebuild()
+    return {
+        "success": True,
+        "correction": updated,
+        "counts": corrections_service.correction_counts(),
+    }
+
+
+@app.delete("/api/admin/corrections/{correction_id}")
+async def admin_delete_correction(
+    correction_id: int,
+    admin: UserResponse = Depends(get_current_admin),
+):
+    """Drop a correction that is not training-worthy (wrong card, junk crop)."""
+    from services import corrections as corrections_service
+
+    if not corrections_service.delete_correction(correction_id):
+        raise HTTPException(status_code=404, detail="Correction not found")
+    logger.warning("Admin %s (id %s) deleted correction %s",
+                   admin.username, admin.id, correction_id)
+    _schedule_confuser_rebuild()
+    return {"success": True, "counts": corrections_service.correction_counts()}
+
+
+@app.get("/api/admin/cards/search")
+async def admin_search_cards(
+    q: str = "",
+    limit: int = 20,
+    admin: UserResponse = Depends(get_current_admin),
+):
+    """Find a card by name or id, for correcting a misread."""
+    from services import corrections as corrections_service
+
+    results = corrections_service.search_cards(q, limit=limit)
+    for card in results:
+        try:
+            payload = json.loads(card.get("images") or "{}") or {}
+        except (TypeError, ValueError):
+            payload = {}
+        card["image"] = payload.get("small") or payload.get("large") or ""
+        card.pop("images", None)
+    return {"results": results, "count": len(results)}
 
 
 # Global exception handlers to prevent HTML error pages

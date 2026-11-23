@@ -5,7 +5,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import bcrypt
 import jwt
@@ -280,11 +280,17 @@ class AuthService:
                     detail="Email already registered"
                 )
             
+            # The very first account owns the deployment; giving it the admin
+            # flag is what keeps a fresh install from having no way in.
+            cursor.execute("SELECT 1 FROM users LIMIT 1")
+            is_first_user = cursor.fetchone() is None
+
             # Create new user
             hashed_pw = hash_password(user_data.password)
             cursor.execute(
-                "INSERT INTO users (username, email, hashed_password, full_name) VALUES (?, ?, ?, ?)",
-                (user_data.username, user_data.email, hashed_pw, user_data.full_name)
+                "INSERT INTO users (username, email, hashed_password, full_name, is_admin) VALUES (?, ?, ?, ?, ?)",
+                (user_data.username, user_data.email.strip(), hashed_pw,
+                 user_data.full_name, 1 if is_first_user else 0)
             )
             conn.commit()
             user_id = cursor.lastrowid
@@ -292,8 +298,9 @@ class AuthService:
             return UserResponse(
                 id=user_id,
                 username=user_data.username,
-                email=user_data.email,
+                email=user_data.email.strip(),
                 full_name=user_data.full_name,
+                is_admin=is_first_user,
                 created_at=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             )
         finally:
@@ -307,7 +314,7 @@ class AuthService:
             
             # Find user by username
             cursor.execute(
-                "SELECT id, username, email, hashed_password, full_name, created_at, preferred_language FROM users WHERE username = ?",
+                "SELECT id, username, email, hashed_password, full_name, created_at, preferred_language, is_admin FROM users WHERE username = ?",
                 (login_data.username,)
             )
             row = cursor.fetchone()
@@ -337,6 +344,7 @@ class AuthService:
                     email=row[2],
                     full_name=row[4],
                     preferred_language=row[6] or "EN",
+                    is_admin=bool(row[7]),
                     created_at=row[5]
                 )
             }
@@ -349,7 +357,7 @@ class AuthService:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, username, email, full_name, created_at, preferred_language FROM users WHERE id = ?",
+                "SELECT id, username, email, full_name, created_at, preferred_language, is_admin FROM users WHERE id = ?",
                 (user_id,)
             )
             row = cursor.fetchone()
@@ -361,6 +369,7 @@ class AuthService:
                 email=row[2],
                 full_name=row[3],
                 preferred_language=row[5] or "EN",
+                is_admin=bool(row[6]),
                 created_at=row[4]
             )
         finally:
@@ -441,3 +450,140 @@ class AuthService:
             return True
         finally:
             conn.close()
+
+    # ------------------------------------------------------------------
+    # Admin operations (called only from the /api/admin endpoints, which are
+    # gated by get_current_admin)
+    # ------------------------------------------------------------------
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        """Every account with the size of its collection (newest account last)."""
+        conn = self._get_conn()
+        try:
+            rows = conn.cursor().execute(
+                """
+                SELECT u.id, u.username, u.email, u.full_name, u.is_admin,
+                       u.created_at, u.preferred_language,
+                       COUNT(ci.id) AS item_count,
+                       COALESCE(SUM(ci.quantity), 0) AS card_count
+                FROM users u
+                LEFT JOIN collection_items ci ON ci.user_id = u.id
+                GROUP BY u.id
+                ORDER BY u.id
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {
+                "id": row[0],
+                "username": row[1],
+                "email": row[2],
+                "full_name": row[3],
+                "is_admin": bool(row[4]),
+                "created_at": row[5],
+                "preferred_language": row[6] or "EN",
+                "item_count": int(row[7] or 0),
+                "card_count": int(row[8] or 0),
+            }
+            for row in rows
+        ]
+
+    def count_admins(self) -> int:
+        conn = self._get_conn()
+        try:
+            row = conn.cursor().execute(
+                "SELECT COUNT(*) FROM users WHERE is_admin = 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row[0] if row else 0)
+
+    def set_user_password(self, user_id: int, new_password: str) -> bool:
+        """Set any account's password and end that account's sessions."""
+        if len(new_password) < 8:
+            return False
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET hashed_password = ? WHERE id = ?",
+                (hash_password(new_password), user_id),
+            )
+            if cursor.rowcount == 0:
+                return False
+            cursor.execute(
+                "UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ? AND revoked = 0",
+                (user_id,),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def set_user_admin(self, user_id: int, is_admin: bool) -> bool:
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET is_admin = ? WHERE id = ?",
+                (1 if is_admin else 0, user_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def delete_user(self, user_id: int) -> bool:
+        """Delete an account and everything that belongs to it.
+
+        collection_items references users without ON DELETE CASCADE, so the rows
+        are removed explicitly rather than leaving the delete to fail on the
+        foreign key (which is enforced by get_db_connection).
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM binder_items WHERE binder_id IN (SELECT id FROM binders WHERE user_id = ?)",
+                (user_id,),
+            )
+            cursor.execute("DELETE FROM binders WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM collection_items WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM refresh_tokens WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            deleted = cursor.rowcount > 0
+            conn.commit()
+            return deleted
+        finally:
+            conn.close()
+
+    def admin_stats(self) -> Dict[str, Any]:
+        """Server-side facts the admin panel shows at a glance."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            def one(sql: str) -> int:
+                row = cursor.execute(sql).fetchone()
+                return int(row[0] or 0) if row else 0
+
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            stats = {
+                "users": one("SELECT COUNT(*) FROM users"),
+                "admins": one("SELECT COUNT(*) FROM users WHERE is_admin = 1"),
+                "collection_items": one("SELECT COUNT(*) FROM collection_items"),
+                "cards_owned": one("SELECT COALESCE(SUM(quantity), 0) FROM collection_items"),
+                "cards": one("SELECT COUNT(*) FROM cards"),
+                "sets": one("SELECT COUNT(*) FROM sets"),
+                "active_sessions": one(
+                    f"SELECT COUNT(*) FROM refresh_tokens WHERE revoked = 0 AND expires_at > '{now}'"
+                ),
+                "review_items": one("SELECT COUNT(*) FROM misreads"),
+            }
+        finally:
+            conn.close()
+        try:
+            stats["database_mb"] = round(os.path.getsize(str(DATABASE_URL)) / (1024 * 1024), 1)
+        except OSError:
+            stats["database_mb"] = None
+        return stats
