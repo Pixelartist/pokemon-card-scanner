@@ -44,6 +44,15 @@ def _ensure_wal(attempts=5):
         conn.close()
 
 
+def _add_column(cursor, table, column, ddl):
+    """Add a column, treating "already there" as success."""
+    try:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
 def init_db():
     """Initialize SQLite database with required tables and indexes."""
     # WAL belongs to the file, so it is set here, once, before any schema work:
@@ -215,45 +224,30 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_created ON misreads(created_at)")
 
-    # Admin vetting state for user-submitted corrections. Databases created
-    # before the review workflow have the table but none of these columns.
-    cursor.execute("PRAGMA table_info(misreads)")
-    mr_columns = {r[1] for r in cursor.fetchall()}
+    # Column migrations for pre-existing databases: CREATE TABLE IF NOT EXISTS
+    # skips them, so each needs an explicit ALTER. Asking the table first
+    # whether the column is there is not needed, and was a race: in WAL another
+    # worker copies the schema while one alters it, so four workers starting
+    # together all saw the old columns, all ran the same ALTER, and the losers
+    # died on "duplicate column name" -- one worker dead per cold start.
     for column, ddl in (
         ("review_status", "TEXT DEFAULT 'pending'"),
         ("reviewed_by", "INTEGER"),
         ("reviewed_at", "TIMESTAMP"),
         ("admin_note", "TEXT"),
     ):
-        if column not in mr_columns:
-            cursor.execute(f"ALTER TABLE misreads ADD COLUMN {column} {ddl}")
+        _add_column(cursor, "misreads", column, ddl)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_status ON misreads(review_status)")
 
-    # Column migrations for pre-existing databases (CREATE TABLE IF NOT
-    # skips them, so SQLite needs an explicit ALTER TABLE, one column at a
-    # time). Keep in sync with the collection_items schema above.
-    cursor.execute("PRAGMA table_info(collection_items)")
-    ci_columns = {r[1] for r in cursor.fetchall()}
-    if 'scan_image_path' not in ci_columns:
-        cursor.execute("ALTER TABLE collection_items ADD COLUMN scan_image_path TEXT")
-    if 'crop_image_path' not in ci_columns:
-        cursor.execute("ALTER TABLE collection_items ADD COLUMN crop_image_path TEXT")
-
-    cursor.execute("PRAGMA table_info(users)")
-    user_columns = {r[1] for r in cursor.fetchall()}
-    if 'preferred_language' not in user_columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN preferred_language TEXT DEFAULT 'EN'")
-    if 'is_admin' not in user_columns:
-        cursor.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
-
-    # Same story for refresh_tokens: create_refresh_token() deletes revoked rows
-    # on every login/registration, so a database created before that flag existed
-    # raised "no such column: revoked" *after* the user row had been committed.
-    # Registration answered 500 while the account existed.
-    cursor.execute("PRAGMA table_info(refresh_tokens)")
-    rt_columns = {r[1] for r in cursor.fetchall()}
-    if 'revoked' not in rt_columns:
-        cursor.execute("ALTER TABLE refresh_tokens ADD COLUMN revoked INTEGER DEFAULT 0")
+    # Keep in sync with the CREATE TABLE statements above.
+    for table, column, ddl in (
+        ("collection_items", "scan_image_path", "TEXT"),
+        ("collection_items", "crop_image_path", "TEXT"),
+        ("users", "preferred_language", "TEXT DEFAULT 'EN'"),
+        ("users", "is_admin", "INTEGER DEFAULT 0"),
+        ("refresh_tokens", "revoked", "INTEGER DEFAULT 0"),
+    ):
+        _add_column(cursor, table, column, ddl)
 
     # Bootstrap admins: nobody can reach the admin endpoints without the flag, so
     # promote the oldest account (the owner's) when no admin exists yet. An
