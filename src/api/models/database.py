@@ -249,14 +249,16 @@ def get_db_connection():
     # WAL belongs to the database file, not to this connection, and asking to
     # switch needs an exclusive lock: a connection opened while another was
     # mid-write raised "database is locked", which failed 7 of 8 simultaneous
-    # sign-ups. Best effort — a busy answer means somebody else is already in
-    # WAL or is about to put the file there, and the current mode still serves.
-    try:
-        conn.execute("PRAGMA journal_mode = WAL")
-    except sqlite3.OperationalError:
-        pass
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA cache_size = -200000")  # 200 MB page cache
+    # sign-ups. A new connection also cannot prepare synchronous or cache_size
+    # while an outside process holds that exclusive lock, since it cannot read
+    # the schema, so all three are best effort — a busy answer means somebody
+    # else is already there or is about to be, and the defaults still serve.
+    for pragma in ("journal_mode = WAL", "synchronous = NORMAL",
+                   "cache_size = -200000"):  # 200 MB page cache
+        try:
+            conn.execute("PRAGMA " + pragma)
+        except sqlite3.OperationalError:
+            pass
     conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA mmap_size = 268435456")  # 256 MB mmap
