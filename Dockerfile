@@ -23,6 +23,12 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-u
         torch==2.14.0+cpu torchvision==0.29.0+cpu \
     && pip install -r requirements.txt
 
+# The crop reader needs both halves of OCR: the tesseract binary (above) and
+# pytesseract (requirements.txt). Without them identify_jobs silently drops the
+# cheapest provider, so prove the pair works and fail the build instead.
+RUN tesseract --version | head -1 \
+    && python -c "import pytesseract; print('tesseract', pytesseract.get_tesseract_version())"
+
 COPY . .
 
 # Run as the host's uid so bind-mounted data volumes (owned by whoever created

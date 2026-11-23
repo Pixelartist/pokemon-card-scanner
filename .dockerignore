@@ -14,6 +14,10 @@ data/
 *.pid
 .env
 .env.*
+# Card art lives on the data volume (mounted at runtime), never in the image.
+# This directory used to be a second copy of data/german_cards/images and added
+# 7.7 GB to every build context and image layer.
+src/static/german_cards/images
 test_*.py
 debug_*.py
 kanban/

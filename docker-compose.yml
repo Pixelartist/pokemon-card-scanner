@@ -7,6 +7,53 @@ services:
     image: ghcr.io/pixelartist/pokemon-card-scanner:latest
     container_name: pokemon-card-scanner
     restart: unless-stopped
+    # OCR (tesseract binary + pytesseract) is what lets the identify queue read
+    # a card's printed set code and number; without it the app silently runs on
+    # the vision LLM alone. Rather than publish a private image, install it into
+    # the running container at start — root is required for apt/pip, and the app
+    # is handed back to appuser so files in the data volume keep their owner.
+    user: "0:0"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        # A failed download must not keep the container from starting: OCR is
+        # worth having, but the app runs without it (identify_jobs drops the
+        # provider and uses the vision LLM), and exiting here would crash-loop
+        # the whole scanner until the mirror comes back.
+        #
+        # The apt index, the .deb archives and the pip wheels are named volumes,
+        # so only the first start touches the network; the rest install from
+        # cache. Nothing deletes the lists — that cache is the point.
+        if ! command -v tesseract >/dev/null 2>&1; then
+          # The base image ships "docker-clean", which deletes every .deb after
+          # each apt run — that would empty the cache volume and force the very
+          # re-download this is meant to avoid.
+          rm -f /etc/apt/apt.conf.d/docker-clean
+          if [ -z "$(ls -A /var/lib/apt/lists 2>/dev/null)" ]; then
+            apt-get update \
+              || echo "WARNING: apt index refresh failed; trying the cache" >&2
+          fi
+          apt-get install -y --no-install-recommends \
+              tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu \
+            || echo "WARNING: tesseract install failed; starting without OCR" >&2
+        fi
+        if ! python -c "import pytesseract" 2>/dev/null; then
+          WHEELS=/var/cache/pip/wheels
+          mkdir -p "$WHEELS"
+          if python -m pip install --no-index --find-links "$WHEELS" pytesseract; then
+            :
+          elif python -m pip download --cache-dir /var/cache/pip -d "$WHEELS" pytesseract \
+               && python -m pip install --no-index --find-links "$WHEELS" pytesseract; then
+            :
+          elif python -m pip install --cache-dir /var/cache/pip pytesseract; then
+            :
+          else
+            echo "WARNING: pytesseract install failed; starting without OCR" >&2
+          fi
+        fi
+        exec su appuser -s /bin/sh -c /entrypoint.sh
     ports:
       - "5005:5005"
     environment:
@@ -27,9 +74,25 @@ services:
     volumes:
       # Persistent data: SQLite DB, card images, CLIP index, scan uploads
       - /opt/data/pokemon-card-scanner/data:/opt/data/pokemon-card-scanner/data
+      # OCR install cache, so a recreate does not re-download anything
+      - ocr-apt-lists:/var/lib/apt/lists
+      - ocr-apt-archives:/var/cache/apt
+      - ocr-pip-cache:/var/cache/pip
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 90s
+      # The first start installs tesseract (up to ~a minute on a slow mirror)
+      # and only then boots the app, which warms its matchers before it answers
+      # /health. 90s put that install straight into the failure budget; this
+      # leaves room for both without ever reporting a slow install as unhealthy.
+      start_period: 240s
+
+volumes:
+  # Cache for the OCR install done by the startup entrypoint: package index,
+  # downloaded .debs, and pip wheels. Kept across recreates so only the first
+  # start needs the network.
+  ocr-apt-lists:
+  ocr-apt-archives:
+  ocr-pip-cache:
