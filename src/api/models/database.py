@@ -246,7 +246,15 @@ def get_db_connection():
     """Get a database connection with WAL mode and optimized pragmas."""
     conn = sqlite3.connect(DATABASE_URL, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
+    # WAL belongs to the database file, not to this connection, and asking to
+    # switch needs an exclusive lock: a connection opened while another was
+    # mid-write raised "database is locked", which failed 7 of 8 simultaneous
+    # sign-ups. Best effort — a busy answer means somebody else is already in
+    # WAL or is about to put the file there, and the current mode still serves.
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA cache_size = -200000")  # 200 MB page cache
     conn.execute("PRAGMA temp_store = MEMORY")
