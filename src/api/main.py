@@ -2732,6 +2732,8 @@ async def get_status():
             "available": status_info["usable"],
             "cards_indexed": status_info["indexed"],
             "loading": status_info["loading"],
+            "index_error": status_info.get("index_error"),
+            "index_drift": status_info.get("index_drift"),
             "device": status_info["device"],
         },
         "api_key_configured": bool(os.environ.get("PTCG_API_KEY", "")),

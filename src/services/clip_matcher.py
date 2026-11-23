@@ -177,7 +177,7 @@ def resolve_card_image_url(card_id: str, raw_url: str = "") -> str:
         return ""
     images_dir = DB_DIR / "images"
     # Already-resolved local static URLs (e.g. German art mounted at
-    # /static/german_cards/images) live outside data/images/ â€” verify in place.
+    # /static/german_cards/images) live outside data/images/ — verify in place.
     if raw_url.startswith("/static/"):
         direct = DB_DIR / raw_url[len("/static/"):]
         if direct.is_file():
@@ -218,6 +218,13 @@ def resolve_card_image_url(card_id: str, raw_url: str = "") -> str:
         except OSError:
             pass
     return ""
+
+
+def _meta_row_key(m: Dict[str, Any]) -> str:
+    """Key a meta row as an index id: set+number, ``de_``-prefixed for German
+    art (English and German prints of one card share set+number)."""
+    k = f"{m.get('set', '')}-{m.get('number', '')}".lower()
+    return "de_" + k if "/german_cards/" in (m.get("image") or "") else k
 
 
 @dataclass
@@ -280,6 +287,8 @@ class CLIPCardMatcher:
         self.card_list: List[CardEmbedding] = []
         self._id_rows: Optional[Dict[str, int]] = None
         self._index_loaded = False
+        self._index_error: Optional[str] = None   # why the index is unusable
+        self._index_drift: Optional[str] = None   # loaded, but the files disagree
         # Set name cache: code -> name
         self._set_names: Dict[str, str] = {}
 
@@ -374,47 +383,95 @@ class CLIPCardMatcher:
         logger.info("Loaded CLIP index: %d cards", len(self.cards))
         return len(self.cards) > 0
 
+    def _read_clip_index(self) -> List[Dict[str, Any]]:
+        """clip_card_index.json cards, in card-index.bin row order ([] if absent)."""
+        if not self.index_path.exists():
+            return []
+        import json
+        try:
+            with open(self.index_path) as f:
+                return json.load(f).get("cards") or []
+        except (OSError, ValueError, AttributeError) as e:
+            logger.warning("clip_card_index.json unreadable (%s); using card-ids.json order", e)
+            return []
+
     def load_index_fast(self) -> bool:
         """Load CLIP index from the fast int16 binary format (card-index.bin + card-ids.json + cards_meta.json).
         Loads in ~1s vs 100s for the JSON+NPZ format. Used by the server for fast startup.
-        Also loads pre-normalized similarity matrix (card-norm-matrix.bin) if available."""
+        Also loads pre-normalized similarity matrix (card-norm-matrix.bin) if available.
+
+        Metadata is joined by card id, never by array position: the bin is built in
+        clip_card_index.json order while cards_meta.json is a separate file other
+        scripts rewrite. A regeneration that reordered or trimmed it used to make
+        this return False and silently take the index out of search; now the rows
+        still line up and any disagreement lands in self.index_error/self.index_drift
+        and in /api/status."""
         if self._index_loaded:
             return True
         bin_path = self.db_dir / "card-index.bin"
         ids_path = self.db_dir / "card-ids.json"
         meta_path = self.db_dir / "cards_meta.json"
         norm_path = self.db_dir / "card-norm-matrix.bin"
-        if not (bin_path.exists() and ids_path.exists() and meta_path.exists()):
+        missing = [p.name for p in (bin_path, ids_path, meta_path) if not p.exists()]
+        if missing:
+            self._index_error = f"missing index file(s): {', '.join(missing)}"
+            logger.error("CLIP index unavailable — %s", self._index_error)
             return False
         import json, numpy as np
         with open(ids_path) as f:
             card_ids = json.load(f)
         with open(meta_path) as f:
             meta = json.load(f)
-        if len(card_ids) != len(meta):
+        # A cards_meta.json that no longer matches card-ids.json (different length
+        # or order) is not fatal: index rows are looked up by id below.
+        meta_by_id = {}
+        for m in meta:
+            meta_by_id.setdefault(_meta_row_key(m), m)
+        # Row order in the bin is the order clip_card_index.json was built with;
+        # card-ids.json is the fallback (its ids are append-only, so its head still
+        # matches the first N rows). A partial rebuild can leave fewer rows in the
+        # bin than ids — rebuild the bin to restore full coverage.
+        bin_rows = bin_path.stat().st_size // 1024
+        ref_cards = self._read_clip_index()
+        if len(ref_cards) >= bin_rows:
+            order = [(c.get("card_id") or "") for c in ref_cards[:bin_rows]]
+        else:
+            order = card_ids[:bin_rows]
+        order = [cid for cid in order if cid]
+        if not order:
+            self._index_error = (f"no rows to load: bin_rows={bin_rows} "
+                                 f"card-ids={len(card_ids)} clip_index={len(ref_cards)} "
+                                 f"cards_meta={len(meta)}")
+            logger.error("CLIP index unavailable — %s", self._index_error)
             return False
-        # shortcut: a partial rebuild can leave fewer rows in the bin than
-        # ids (ids are appended between builds); ids are append-only so the
-        # first N rows still match the first N ids. Rebuild bin to restore full coverage.
-        total = min(len(card_ids), bin_path.stat().st_size // 1024)
-        if total == 0:
-            return False
+        # The build that produced the bin wins over a cards_meta.json row for the
+        # same id.
+        for c in ref_cards:
+            cid = (c.get("card_id") or "").lower()
+            if cid:
+                meta_by_id[cid] = c
         # card-index.bin is (N, 512) int16, scale = 32767
-        # no header â€” memmap reads raw data directly
-        embeddings = np.memmap(bin_path, dtype=np.int16, mode='r', shape=(total, 512))
+        # no header — memmap reads raw data directly
+        embeddings = np.memmap(bin_path, dtype=np.int16, mode='r', shape=(len(order), 512))
         scale = 32767.0
         self.cards.clear()
         self.card_list.clear()
         # Skip resolve_card_image_url during fast load - URLs are only needed for display
         # Match requests use card_id which is already available
-        for i in range(total):
-            cid = card_ids[i]
-            m = meta[i]
+        no_meta = 0
+        for i, cid in enumerate(order):
+            k = cid.lower()
+            # German art is keyed with de_; an id may own a row under either form.
+            m = (meta_by_id.get(k)
+                 or meta_by_id.get(k[3:] if k.startswith("de_") else "de_" + k)
+                 or {})
+            if not m:
+                no_meta += 1
             ce = CardEmbedding(
                 card_id=cid,
-                name=m.get("name", ""),
-                set_code=m.get("set", ""),
-                number=m.get("number", ""),
+                name=m.get("name", "") or "",
+                set_code=m.get("set_code") or m.get("set", ""),
+                number=str(m.get("number", "")),
                 embedding=(embeddings[i].astype(np.float32) / scale).tolist(),
                 image_url="",  # resolved on-demand via get_card()
                 content_hash="",
@@ -426,16 +483,23 @@ class CLIPCardMatcher:
         self._norm_matrix_n = 0
         if norm_path.exists():
             try:
-                expected_size = total * 512 * 4  # float32 = 4 bytes
+                expected_size = len(order) * 512 * 4  # float32 = 4 bytes
                 actual_size = norm_path.stat().st_size
                 if actual_size == expected_size:
-                    self._norm_matrix = np.memmap(norm_path, dtype=np.float32, mode='r', shape=(total, 512))
-                    self._norm_matrix_n = total
-                    logger.info("Loaded pre-normalized matrix: %d cards", total)
+                    self._norm_matrix = np.memmap(norm_path, dtype=np.float32, mode='r', shape=(len(order), 512))
+                    self._norm_matrix_n = len(order)
+                    logger.info("Loaded pre-normalized matrix: %d cards", len(order))
                 else:
                     logger.warning("Norm matrix size mismatch (%d vs %d bytes), will rebuild", actual_size, expected_size)
             except Exception as e:
                 logger.warning("Failed to load norm matrix: %s", e)
+        self._index_error = None
+        self._index_drift = None
+        if len(card_ids) != len(meta) or no_meta:
+            self._index_drift = (f"cards_meta.json={len(meta)} rows vs card-ids.json="
+                                 f"{len(card_ids)} ids; {no_meta} of {len(order)} index "
+                                 f"row(s) had no metadata")
+            logger.warning("CLIP index metadata drift — %s", self._index_drift)
         self._index_loaded = True
         logger.info("Loaded CLIP index (fast): %d cards", len(self.cards))
         return len(self.cards) > 0
@@ -466,6 +530,8 @@ class CLIPCardMatcher:
             "last_error": p["last_error"],
             "api_rate_limited": p.get("api_rate_limited", False),
             "next_reset": p.get("next_reset"),
+            "index_error": self._index_error,
+            "index_drift": self._index_drift,
             "device": self.device,
         }
 
@@ -1165,7 +1231,7 @@ class CLIPCardMatcher:
         rows_path = self.db_dir / "template-rows.json"
         if not (bin_path.exists() and rows_path.exists()):
             return None
-        # Cache the 774MB matrix â€” reloading it per scan costs ~4s.
+        # Cache the 774MB matrix — reloading it per scan costs ~4s.
         cache = getattr(self.__class__, "_template_cache", None)
         if cache is None or cache[0] != bin_path:
             T = np.fromfile(bin_path, dtype=np.float16,
@@ -1312,7 +1378,7 @@ class CLIPCardMatcher:
         idx = np.argpartition(-sims, top_k)[:top_k]
         idx = idx[np.argsort(-sims[idx])]
 
-        # Template matching is decisive on real photos â€” when it fires, trust it,
+        # Template matching is decisive on real photos — when it fires, trust it,
         # except for pinned twins: two prints sharing artwork are one template, so
         # the row it lands on is whichever of the pair came first in the index.
         template = self._match_template(image_bytes)
