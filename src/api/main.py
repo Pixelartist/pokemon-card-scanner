@@ -682,8 +682,7 @@ async def scan_card(
     except HTTPException:
         raise  # 400/413/429 from the guards above are answers, not failures
     except Exception as e:
-        _log_failure("Scan error", e)
-        raise _busy_or_internal(e)
+        raise _fail("Scan error", e)
 
 
 def _resolve_card_id(card_id):
@@ -951,8 +950,7 @@ async def add_to_collection(card_id: str = Form(...),
         })
         return {"success": True, "id": item["id"]}
     except Exception as e:
-        _log_failure("Add to collection error", e)
-        raise _busy_or_internal(e)
+        raise _fail("Add to collection error", e)
 
 
 @app.post("/api/collection/add-batch")
@@ -969,8 +967,7 @@ async def add_to_collection_batch(
             "ids": [item.id for item in saved]
         }
     except Exception as e:
-        _log_failure("Batch add error", e)
-        raise _busy_or_internal(e)
+        raise _fail("Batch add error", e)
 
 
 @app.get("/api/collection")
@@ -1157,8 +1154,7 @@ async def create_binder(binder_data: BinderCreate,
         )
         return binder
     except Exception as e:
-        _log_failure("Binder create error", e)
-        raise _busy_or_internal(e)
+        raise _fail("Binder create error", e)
 
 
 @app.get("/api/binders")
@@ -2271,8 +2267,7 @@ async def create_or_get_card(card_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        _log_failure("Error creating card", e)
-        raise _busy_or_internal(e)
+        raise _fail("Error creating card", e)
 
 
 
@@ -2334,8 +2329,7 @@ async def scan_card_advanced(
         return JSONResponse(result)
 
     except Exception as e:
-        _log_failure("Advanced scan error", e)
-        raise _busy_or_internal(e)
+        raise _fail("Advanced scan error", e)
 
 
 
@@ -2890,8 +2884,7 @@ async def detect_card(
     except HTTPException:
         raise  # 413/429 from the guards above are answers, not failures
     except Exception as e:
-        _log_failure("Detection error", e)
-        raise _busy_or_internal(e)
+        raise _fail("Detection error", e)
 
 
 # ============================================================
@@ -2929,8 +2922,7 @@ async def register_user(user_data: UserRegister):
         logger.warning("Registration conflict for %s: %s", user_data.username, e)
         raise HTTPException(status_code=409, detail="Username or email already exists")
     except Exception as e:
-        _log_failure("Registration error", e)
-        raise _busy_or_internal(e)
+        raise _fail("Registration error", e)
 
 
 @app.post("/api/auth/login")
@@ -2955,8 +2947,7 @@ async def login_user(login_data: UserLogin):
     except HTTPException:
         raise
     except Exception as e:
-        _log_failure("Login error", e)
-        raise _busy_or_internal(e)
+        raise _fail("Login error", e)
 
 
 @app.post("/api/auth/refresh")
@@ -3284,8 +3275,6 @@ async def validation_exception_handler(request, exc):
 # The words SQLite uses when the lock it wanted was held by another connection.
 _BUSY_SIGNS = ("database is locked", "database table is locked",
                "database schema is locked", "database is busy")
-_BUSY_DETAIL = "Database is busy, retry shortly"
-_BUSY_HEADERS = {"Retry-After": "2"}
 
 
 def _is_busy_db(exc: BaseException) -> bool:
@@ -3294,48 +3283,29 @@ def _is_busy_db(exc: BaseException) -> bool:
         sign in str(exc).lower() for sign in _BUSY_SIGNS)
 
 
-def _busy_or_internal(exc: Exception) -> HTTPException:
-    """Map a locked database to 503 + Retry-After, anything else to 500.
+def _fail(context: str, exc: Exception) -> HTTPException:
+    """Log a failure and turn it into the answer the client should get.
 
-    A write that waited out the busy timeout is contention, not a bug: the same
-    request usually succeeds a second later, so telling the client to come back
-    beats reporting the database as broken. Routes that would otherwise flatten
-    every exception into a 500 raise this instead.
-    """
-    if _is_busy_db(exc):
-        return HTTPException(status_code=503, detail=_BUSY_DETAIL,
-                             headers=dict(_BUSY_HEADERS))
-    return HTTPException(status_code=500, detail="Internal server error")
-
-
-def _log_failure(context: str, exc: Exception) -> None:
-    """Log contention as a warning and a real failure with its traceback.
-
-    The route is about to answer 503 for a lock, so an ERROR with a stack trace
-    would read like a fault in the log while nothing is broken; anything else
-    keeps the full traceback.
+    A lock is contention, not a bug: the same request usually succeeds a second
+    later, so it answers 503 with Retry-After and reads as a warning in the log.
+    Anything else is a real failure: it keeps its traceback and answers 500.
     """
     if _is_busy_db(exc):
         logger.warning("%s: database busy, answering 503: %s", context, exc)
-        return
+        return HTTPException(
+            status_code=503, detail="Database is busy, retry shortly",
+            headers={"Retry-After": "2"})
     logger.error("%s: %s", context, exc, exc_info=True)
+    return HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.exception_handler(sqlite3.OperationalError)
 async def sqlite_busy_handler(request, exc):
-    """Same mapping for the routes that let the error escape unwrapped."""
-    if _is_busy_db(exc):
-        logger.warning(f"Database busy on {request.method} {request.url.path}: {exc}")
-        return JSONResponse(
-            status_code=503,
-            content={"detail": _BUSY_DETAIL, "error": "Service Unavailable"},
-            headers=dict(_BUSY_HEADERS)
-        )
-    logger.error(f"Unhandled exception: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error", "error": "Internal Server Error"}
-    )
+    """Same answer for the routes that let the lock escape unwrapped."""
+    if not _is_busy_db(exc):
+        return await general_exception_handler(request, exc)
+    return await http_exception_handler(
+        request, _fail(f"{request.method} {request.url.path}", exc))
 
 
 @app.exception_handler(Exception)
