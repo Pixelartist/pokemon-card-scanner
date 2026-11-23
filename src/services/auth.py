@@ -281,26 +281,33 @@ class AuthService:
                 )
             
             # The very first account owns the deployment; giving it the admin
-            # flag is what keeps a fresh install from having no way in.
-            cursor.execute("SELECT 1 FROM users LIMIT 1")
-            is_first_user = cursor.fetchone() is None
-
-            # Create new user
+            # flag is what keeps a fresh install from having no way in. The flag
+            # is decided by the INSERT that writes the row, in one statement:
+            # reading the table first and inserting afterwards is a check-then-act
+            # race, so two simultaneous first sign-ups both came out as admin.
+            # SQLite serialises writers, so the second INSERT evaluates EXISTS
+            # against the row the first one already committed.
             hashed_pw = hash_password(user_data.password)
             cursor.execute(
-                "INSERT INTO users (username, email, hashed_password, full_name, is_admin) VALUES (?, ?, ?, ?, ?)",
-                (user_data.username, user_data.email.strip(), hashed_pw,
-                 user_data.full_name, 1 if is_first_user else 0)
+                """
+                INSERT INTO users (username, email, hashed_password, full_name, is_admin)
+                VALUES (?, ?, ?, ?, (SELECT CASE WHEN EXISTS (SELECT 1 FROM users) THEN 0 ELSE 1 END))
+                """,
+                (user_data.username, user_data.email.strip(), hashed_pw, user_data.full_name)
             )
             conn.commit()
             user_id = cursor.lastrowid
+            # Report what the row actually got, not what we assumed it would get.
+            is_admin = bool(cursor.execute(
+                "SELECT is_admin FROM users WHERE id = ?", (user_id,)
+            ).fetchone()[0])
             
             return UserResponse(
                 id=user_id,
                 username=user_data.username,
                 email=user_data.email.strip(),
                 full_name=user_data.full_name,
-                is_admin=is_first_user,
+                is_admin=is_admin,
                 created_at=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             )
         finally:
