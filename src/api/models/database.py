@@ -15,6 +15,19 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = DATA_DIR / "pokemon_cards.db"
 
+# How long a cold start waits for another process to let go of the database
+# before giving up on the schema. A sibling worker holds it for milliseconds; a
+# restore or a backup can hold it far longer, and a server without its schema
+# serves nothing, so waiting is worth more than dying to uvicorn's respawn.
+INIT_LOCK_WAIT = 30
+INIT_RETRY_DELAY = 0.5
+
+
+def _is_locked(exc):
+    """Whether SQLite refused because somebody else holds the file or a table."""
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
 
 def _ensure_wal(budget=1.0):
     """Switch the file to WAL, waiting out anyone starting beside us.
@@ -62,223 +75,267 @@ def _add_column(cursor, table, column, ddl):
             raise
 
 
+def _create_schema():
+    """Create the tables, indexes and columns the app needs.
+
+    Split from init_db so a locked database can be retried: everything here is
+    CREATE ... IF NOT EXISTS, or a migration that treats "already there" as
+    success, so running the whole sequence again after a failure is safe.
+    """
+    # Two seconds, not the five-second default: init_db does the waiting, so a
+    # single attempt should not also sit on the lock.
+    conn = sqlite3.connect(DATABASE_URL, timeout=2.0)
+    try:
+        cursor = conn.cursor()
+    
+        # Create sets table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ptcg_id TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                series TEXT,
+                release_date TEXT,
+                total_cards INTEGER,
+                images TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    
+        # Create cards table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ptcg_id TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                number TEXT,
+                rarity TEXT,
+                set_id INTEGER,
+                hp TEXT,
+                types TEXT,
+                artist TEXT,
+                rarity_code TEXT,
+                images TEXT,
+                legal TEXT,
+                set_name TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (set_id) REFERENCES sets (id)
+            )
+        """)
+    
+        # Create users table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                hashed_password TEXT NOT NULL,
+                full_name TEXT,
+                preferred_language TEXT DEFAULT 'EN',
+                is_admin INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    
+        # Create collection_items table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS collection_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                card_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                condition TEXT DEFAULT 'Near Mint',
+                language TEXT DEFAULT 'EN',
+                quantity INTEGER DEFAULT 1,
+                notes TEXT,
+                is_reverse_holo BOOLEAN DEFAULT FALSE,
+                is_first_edition BOOLEAN DEFAULT FALSE,
+                date_acquired TEXT,
+                added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                scan_image_path TEXT,
+                crop_image_path TEXT,
+                FOREIGN KEY (card_id) REFERENCES cards (id),
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
+    
+        # Create binders table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS binders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                description TEXT,
+                user_id INTEGER NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
+    
+        # Create binder_items table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS binder_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                binder_id INTEGER NOT NULL,
+                collection_item_id INTEGER NOT NULL,
+                position INTEGER DEFAULT 0,
+                FOREIGN KEY (binder_id) REFERENCES binders (id) ON DELETE CASCADE,
+                FOREIGN KEY (collection_item_id) REFERENCES collection_items (id) ON DELETE CASCADE
+            )
+        """)
+    
+        # Create refresh_tokens table (httpOnly cookie sessions)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                token_hash TEXT UNIQUE NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT NOT NULL,
+                revoked INTEGER DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+            )
+        """)
+
+        # Create card_prices table (persistent price cache for stable valuations)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS card_prices (
+                card_id TEXT PRIMARY KEY,
+                prices TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            )
+        """)
+
+        # Create indexes for performance
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_cards_ptcg_id ON cards(ptcg_id)",
+            "CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name)",
+            "CREATE INDEX IF NOT EXISTS idx_cards_set_id ON cards(set_id)",
+            "CREATE INDEX IF NOT EXISTS idx_cards_set_name ON cards(set_name)",
+            "CREATE INDEX IF NOT EXISTS idx_collection_items_card_id ON collection_items(card_id)",
+            "CREATE INDEX IF NOT EXISTS idx_collection_items_user_id ON collection_items(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_collection_items_user_card ON collection_items(user_id, card_id)",
+            # /api/collection orders by added_at DESC per user; without this the
+            # query sorts the whole table on every page load.
+            "CREATE INDEX IF NOT EXISTS idx_collection_items_user_added ON collection_items(user_id, added_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_binders_user_id ON binders(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_binder_items_binder_id ON binder_items(binder_id)",
+            "CREATE INDEX IF NOT EXISTS idx_binder_items_collection_id ON binder_items(collection_item_id)",
+            "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
+            "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+            "CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON refresh_tokens(token_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)",
+        ]
+    
+        for idx_sql in indexes:
+            cursor.execute(idx_sql)
+    
+        # False detections corrected by the user in the review queue. One row per
+        # correction: the scan/crop image plus wrong and correct card ids. This is
+        # the training set for index hardening (re-embed crops, add confuser pairs).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS misreads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_image_path TEXT,
+                crop_image_path TEXT,
+                wrong_id TEXT NOT NULL,
+                wrong_name TEXT,
+                correct_id TEXT NOT NULL,
+                correct_name TEXT,
+                score REAL,
+                source TEXT,
+                user_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_created ON misreads(created_at)")
+
+        # Column migrations for pre-existing databases: CREATE TABLE IF NOT EXISTS
+        # skips them, so each needs an explicit ALTER. Asking the table first
+        # whether the column is there is not needed, and was a race: in WAL another
+        # worker copies the schema while one alters it, so four workers starting
+        # together all saw the old columns, all ran the same ALTER, and the losers
+        # died on "duplicate column name" -- one worker dead per cold start.
+        for column, ddl in (
+            ("review_status", "TEXT DEFAULT 'pending'"),
+            ("reviewed_by", "INTEGER"),
+            ("reviewed_at", "TIMESTAMP"),
+            ("admin_note", "TEXT"),
+        ):
+            _add_column(cursor, "misreads", column, ddl)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_status ON misreads(review_status)")
+
+        # Keep in sync with the CREATE TABLE statements above.
+        for table, column, ddl in (
+            ("collection_items", "scan_image_path", "TEXT"),
+            ("collection_items", "crop_image_path", "TEXT"),
+            ("users", "preferred_language", "TEXT DEFAULT 'EN'"),
+            ("users", "is_admin", "INTEGER DEFAULT 0"),
+            ("refresh_tokens", "revoked", "INTEGER DEFAULT 0"),
+        ):
+            _add_column(cursor, table, column, ddl)
+
+        # Bootstrap admins: nobody can reach the admin endpoints without the flag, so
+        # promote the oldest account (the owner's) when no admin exists yet. An
+        # ADMIN_USERNAMES override covers a database whose first account is a test
+        # user, and lets a fresh deployment pick its owner explicitly.
+        override = [name.strip() for name in os.environ.get("ADMIN_USERNAMES", "").split(",") if name.strip()]
+        for name in override:
+            cursor.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (name,))
+        cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("SELECT MIN(id) FROM users")
+            first_id = cursor.fetchone()[0]
+            if first_id is not None:
+                cursor.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (first_id,))
+                logging.info("No admin user existed: promoted the oldest account (id %s) to admin", first_id)
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_db():
-    """Initialize SQLite database with required tables and indexes."""
+    """Initialize SQLite database with required tables and indexes.
+
+    A cold start can arrive while another process holds the file: a restore or
+    backup, or a sibling worker running this same setup. Failing there left
+    uvicorn to respawn the worker straight into the same lock, so the server
+    crash-looped through the schema for as long as the lock lived and answered
+    nothing meanwhile. Waiting is strictly better, because the schema is what
+    every request needs, so wait -- bounded, and said once rather than once per
+    attempt.
+    """
     # WAL belongs to the file, so it is set here, once, before any schema work:
     # the per-request connections only ask for it best effort, which is not
     # enough when four workers start at the same moment.
     _ensure_wal()
-    # Two seconds, not the five-second default: the only thing that holds the
-    # file for longer than that is another process, and the statements below
-    # cannot run until it lets go, so the wait buys nothing and the resulting
-    # "database is locked" is the answer either way.
-    conn = sqlite3.connect(DATABASE_URL, timeout=2.0)
-    cursor = conn.cursor()
-    
-    # Create sets table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ptcg_id TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            series TEXT,
-            release_date TEXT,
-            total_cards INTEGER,
-            images TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Create cards table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ptcg_id TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            number TEXT,
-            rarity TEXT,
-            set_id INTEGER,
-            hp TEXT,
-            types TEXT,
-            artist TEXT,
-            rarity_code TEXT,
-            images TEXT,
-            legal TEXT,
-            set_name TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (set_id) REFERENCES sets (id)
-        )
-    """)
-    
-    # Create users table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            hashed_password TEXT NOT NULL,
-            full_name TEXT,
-            preferred_language TEXT DEFAULT 'EN',
-            is_admin INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Create collection_items table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS collection_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            card_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            condition TEXT DEFAULT 'Near Mint',
-            language TEXT DEFAULT 'EN',
-            quantity INTEGER DEFAULT 1,
-            notes TEXT,
-            is_reverse_holo BOOLEAN DEFAULT FALSE,
-            is_first_edition BOOLEAN DEFAULT FALSE,
-            date_acquired TEXT,
-            added_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            scan_image_path TEXT,
-            crop_image_path TEXT,
-            FOREIGN KEY (card_id) REFERENCES cards (id),
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    """)
-    
-    # Create binders table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS binders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            description TEXT,
-            user_id INTEGER NOT NULL,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
-        )
-    """)
-    
-    # Create binder_items table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS binder_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            binder_id INTEGER NOT NULL,
-            collection_item_id INTEGER NOT NULL,
-            position INTEGER DEFAULT 0,
-            FOREIGN KEY (binder_id) REFERENCES binders (id) ON DELETE CASCADE,
-            FOREIGN KEY (collection_item_id) REFERENCES collection_items (id) ON DELETE CASCADE
-        )
-    """)
-    
-    # Create refresh_tokens table (httpOnly cookie sessions)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS refresh_tokens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            token_hash TEXT UNIQUE NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            expires_at TEXT NOT NULL,
-            revoked INTEGER DEFAULT 0,
-            FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-        )
-    """)
-
-    # Create card_prices table (persistent price cache for stable valuations)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS card_prices (
-            card_id TEXT PRIMARY KEY,
-            prices TEXT NOT NULL,
-            fetched_at TEXT NOT NULL
-        )
-    """)
-
-    # Create indexes for performance
-    indexes = [
-        "CREATE INDEX IF NOT EXISTS idx_cards_ptcg_id ON cards(ptcg_id)",
-        "CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name)",
-        "CREATE INDEX IF NOT EXISTS idx_cards_set_id ON cards(set_id)",
-        "CREATE INDEX IF NOT EXISTS idx_cards_set_name ON cards(set_name)",
-        "CREATE INDEX IF NOT EXISTS idx_collection_items_card_id ON collection_items(card_id)",
-        "CREATE INDEX IF NOT EXISTS idx_collection_items_user_id ON collection_items(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_collection_items_user_card ON collection_items(user_id, card_id)",
-        # /api/collection orders by added_at DESC per user; without this the
-        # query sorts the whole table on every page load.
-        "CREATE INDEX IF NOT EXISTS idx_collection_items_user_added ON collection_items(user_id, added_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_binders_user_id ON binders(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_binder_items_binder_id ON binder_items(binder_id)",
-        "CREATE INDEX IF NOT EXISTS idx_binder_items_collection_id ON binder_items(collection_item_id)",
-        "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
-        "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
-        "CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON refresh_tokens(token_hash)",
-        "CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)",
-    ]
-    
-    for idx_sql in indexes:
-        cursor.execute(idx_sql)
-    
-    # False detections corrected by the user in the review queue. One row per
-    # correction: the scan/crop image plus wrong and correct card ids. This is
-    # the training set for index hardening (re-embed crops, add confuser pairs).
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS misreads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            scan_image_path TEXT,
-            crop_image_path TEXT,
-            wrong_id TEXT NOT NULL,
-            wrong_name TEXT,
-            correct_id TEXT NOT NULL,
-            correct_name TEXT,
-            score REAL,
-            source TEXT,
-            user_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_created ON misreads(created_at)")
-
-    # Column migrations for pre-existing databases: CREATE TABLE IF NOT EXISTS
-    # skips them, so each needs an explicit ALTER. Asking the table first
-    # whether the column is there is not needed, and was a race: in WAL another
-    # worker copies the schema while one alters it, so four workers starting
-    # together all saw the old columns, all ran the same ALTER, and the losers
-    # died on "duplicate column name" -- one worker dead per cold start.
-    for column, ddl in (
-        ("review_status", "TEXT DEFAULT 'pending'"),
-        ("reviewed_by", "INTEGER"),
-        ("reviewed_at", "TIMESTAMP"),
-        ("admin_note", "TEXT"),
-    ):
-        _add_column(cursor, "misreads", column, ddl)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_misreads_status ON misreads(review_status)")
-
-    # Keep in sync with the CREATE TABLE statements above.
-    for table, column, ddl in (
-        ("collection_items", "scan_image_path", "TEXT"),
-        ("collection_items", "crop_image_path", "TEXT"),
-        ("users", "preferred_language", "TEXT DEFAULT 'EN'"),
-        ("users", "is_admin", "INTEGER DEFAULT 0"),
-        ("refresh_tokens", "revoked", "INTEGER DEFAULT 0"),
-    ):
-        _add_column(cursor, table, column, ddl)
-
-    # Bootstrap admins: nobody can reach the admin endpoints without the flag, so
-    # promote the oldest account (the owner's) when no admin exists yet. An
-    # ADMIN_USERNAMES override covers a database whose first account is a test
-    # user, and lets a fresh deployment pick its owner explicitly.
-    override = [name.strip() for name in os.environ.get("ADMIN_USERNAMES", "").split(",") if name.strip()]
-    for name in override:
-        cursor.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (name,))
-    cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("SELECT MIN(id) FROM users")
-        first_id = cursor.fetchone()[0]
-        if first_id is not None:
-            cursor.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (first_id,))
-            logging.info("No admin user existed: promoted the oldest account (id %s) to admin", first_id)
-
-    conn.commit()
-    conn.close()
+    deadline = time.monotonic() + INIT_LOCK_WAIT
+    waiting_since = None
+    while True:
+        try:
+            _create_schema()
+            break
+        except sqlite3.OperationalError as exc:
+            if not _is_locked(exc):
+                raise
+            if waiting_since is None:
+                waiting_since = time.monotonic()
+                logging.warning(
+                    "Database is locked by another process (%s): waiting up to "
+                    "%ds for it before setting up the schema", exc, INIT_LOCK_WAIT)
+            if time.monotonic() >= deadline:
+                logging.error(
+                    "Gave up on the schema after waiting %ds for the database "
+                    "lock: %s", INIT_LOCK_WAIT, exc)
+                raise
+            time.sleep(INIT_RETRY_DELAY)
+    if waiting_since is not None:
+        # The schema got the lock, so WAL can have it now as well: the first
+        # attempt gave up while the file was held.
+        _ensure_wal()
+        logging.info("Schema ready after waiting %.1fs for the database lock",
+                     time.monotonic() - waiting_since)
     logging.info("Database initialized at %s", DATABASE_URL)
 
 
