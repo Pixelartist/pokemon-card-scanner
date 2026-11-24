@@ -5,8 +5,8 @@ The bin is raw int16 with no header, so how its rows map to cards exists only in
 the order clip_card_index.json happened to be in when it was built. The loader
 names rows from that list by position, which means rebuilding either file alone
 makes every scan report the wrong card with no error anywhere. This manifest
-pins the ordered ids and both hashes; load_index_fast refuses to load when they
-disagree.
+pins the ordered ids and the bin's hash, and load_index_fast refuses to load
+when either disagrees.
 
 Run it after building or replacing card-index.bin. Rerunnable and idempotent.
 """
@@ -19,9 +19,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
-BIN = DATA / "card-index.bin"
-IDX = DATA / "clip_card_index.json"
-OUT = DATA / "card-index.manifest.json"
 
 # The checkpoint comes from the loader, not a copy here: the whole point of the
 # manifest is that the loader can compare what it loads with what built the bin.
@@ -64,11 +61,16 @@ def write_atomic(path, text, owner_of):
         raise
 
 
-def main():
+def main(data_dir=None):
+    """Record the manifest for data_dir (default: this checkout's data/)."""
+    data = Path(data_dir).resolve() if data_dir else DATA
+    BIN = data / "card-index.bin"
+    IDX = data / "clip_card_index.json"
+    OUT = data / "card-index.manifest.json"
     size = BIN.stat().st_size
     rows, rem = divmod(size, DIM * ITEMSIZE)
     if rem:
-        sys.exit(f"{BIN.name} is {size} bytes, not a whole number of {DIM}x{DTYPE} rows")
+        sys.exit(f"{BIN.name} is {size} bytes, not a whole number of {DIM}xint16 rows")
     cards = json.loads(IDX.read_text(encoding="utf-8"))["cards"]
     ids = [c["card_id"] for c in cards if c.get("card_id")]
     if len(ids) != rows:
@@ -76,10 +78,9 @@ def main():
                  f"rebuild one of them before recording a manifest")
     if len(set(ids)) != len(ids):
         sys.exit(f"{IDX.name} repeats an id, so rows cannot be named unambiguously")
-
     # Only what a reader uses: the checkpoint and id list the rows belong to,
-    # both hashes, and when it was written. size is implied by rows and checked
-    # against the file, dtype is implied by the int16 memmap.
+    # the hash it checks, and when it was written. size is implied by rows and
+    # checked against the file, dtype is implied by the int16 memmap.
     manifest = {
         "model": CLIP_MODEL_NAME,
         "pretrained": CLIP_PRETRAINED,
@@ -91,10 +92,15 @@ def main():
         "ids": ids,
     }
     write_atomic(OUT, json.dumps(manifest, ensure_ascii=False, indent=1), BIN)
-    print(f"wrote {OUT.relative_to(ROOT)}: {rows} ids, bin {size} bytes "
-          f"sha1 {manifest['bin_sha1'][:12]}, ids sha1 {manifest['ids_sha1'][:12]}, "
+    try:
+        shown = OUT.relative_to(ROOT)
+    except ValueError:
+        shown = OUT
+    print(f"wrote {shown}: {rows} ids, bin {size} bytes "
+          f"sha1 {manifest['bin_sha1'][:12]}, "
+          f"ids sha1 {manifest['ids_sha1'][:12]}, "
           f"model {CLIP_MODEL_NAME} ({CLIP_PRETRAINED}) at {DIM}d")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else None)

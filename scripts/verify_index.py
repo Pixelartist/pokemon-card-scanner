@@ -3,9 +3,9 @@
 
 card-index.bin is raw int16 with no header, so which card each row describes
 exists only in the files beside it. Every way they can drift is checked here:
-the row count against the file size, the norm matrix shape, the two id lists,
-the metadata rows and the manifest. One PASS/FAIL per invariant, and exit code 1
-if any fails, so a rebuild or a restore can be gated on it.
+the row count against the file size, the two id lists, the metadata rows and the
+manifest. One PASS/FAIL per invariant, and exit code 1 if any fails, so a
+rebuild or a restore can be gated on it.
 
 It also compares the manifest's checkpoint with the constants the loader loads,
 because a manifest naming another model passes every file-shape check and is
@@ -103,14 +103,6 @@ def main(argv):
                if not problems else ", ".join(problems))
     except Exception as e:  # a broken file is a failed check, not a crash
         record("id list", False, f"{type(e).__name__}: {e}")
-
-    norm_path = data / "card-norm-matrix.bin"
-    expected = rows * DIM * 4  # float32
-    norm_size = norm_path.stat().st_size if norm_path.exists() else 0
-    record("norm matrix", norm_size == expected and expected > 0,
-           f"{rows} rows of {DIM} float32" if norm_size == expected and expected else
-           f"{norm_path.name} missing" if not norm_size else
-           f"{norm_size} bytes, expected {expected}")
 
     try:
         meta = load(data / "cards_meta.json")

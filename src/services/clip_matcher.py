@@ -250,13 +250,30 @@ def _sha1_ids(ids: List[str]) -> str:
     return hashlib.sha1("\n".join(ids).encode("utf-8")).hexdigest()
 
 
+def _norm_matrix_from_bin(bin_path: Path, rows: int):
+    """The unit-normalized float32 matrix of a bin's rows.
+
+    A pure function of the bin, so the loader derives it instead of keeping a
+    card-norm-matrix.bin beside it. That file had the right size even when it
+    came from another build, and only a hash in the manifest could tell, which
+    meant a rebuild had to rewrite the matrix and re-record its hash or the
+    loader would refuse the index. Deriving it costs a fraction of a second and
+    cannot disagree with the bin the manifest just certified.
+    """
+    import numpy as np
+    src = np.memmap(bin_path, dtype=np.int16, mode="r", shape=(rows, CLIP_EMBED_DIM))
+    mat = src.astype(np.float32) / 32767.0
+    del src
+    return mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9)
+
+
 def _manifest_problem(manifest: Dict[str, Any], bin_path: Path, bin_rows: int,
                       order: List[str]) -> Optional[str]:
     """Why the manifest does not certify this bin and id list, or None if it does.
 
     card-index.bin has no header: row i is whatever clip_card_index.json called i
     when the bin was built, and no file on disk can re-derive that. The manifest
-    pins the checkpoint, the id list and both hashes, and anything it cannot
+    pins the checkpoint, the id list and the bin's hash, and anything it cannot
     certify is a load error rather than a guess by position.
 
     The checkpoint cannot be recovered from the bytes at all: a second
@@ -475,7 +492,7 @@ class CLIPCardMatcher:
     def load_index_fast(self) -> bool:
         """Load CLIP index from the fast int16 binary format (card-index.bin + card-ids.json + cards_meta.json).
         Loads in ~1s vs 100s for the JSON+NPZ format. Used by the server for fast startup.
-        Also loads pre-normalized similarity matrix (card-norm-matrix.bin) if available.
+        Also derives the pre-normalized similarity matrix from the bin.
 
         Metadata is joined by card id, never by array position: the bin is built in
         clip_card_index.json order while cards_meta.json is a separate file other
@@ -494,7 +511,6 @@ class CLIPCardMatcher:
         bin_path = self.db_dir / "card-index.bin"
         ids_path = self.db_dir / "card-ids.json"
         meta_path = self.db_dir / "cards_meta.json"
-        norm_path = self.db_dir / "card-norm-matrix.bin"
         missing = [p.name for p in (bin_path, ids_path, meta_path) if not p.exists()]
         if missing:
             self._index_error = f"missing index file(s): {', '.join(missing)}"
@@ -585,22 +601,10 @@ class CLIPCardMatcher:
             )
             self.cards[cid] = ce
             self.card_list.append(ce)
-        # Try to load pre-normalized matrix (float32, N x CLIP_EMBED_DIM)
-        self._norm_matrix = None
-        self._norm_matrix_n = 0
-        if norm_path.exists():
-            try:
-                expected_size = len(order) * CLIP_EMBED_DIM * 4  # float32 = 4 bytes
-                actual_size = norm_path.stat().st_size
-                if actual_size == expected_size:
-                    self._norm_matrix = np.memmap(norm_path, dtype=np.float32, mode='r',
-                                                  shape=(len(order), CLIP_EMBED_DIM))
-                    self._norm_matrix_n = len(order)
-                    logger.info("Loaded pre-normalized matrix: %d cards", len(order))
-                else:
-                    logger.warning("Norm matrix size mismatch (%d vs %d bytes), will rebuild", actual_size, expected_size)
-            except Exception as e:
-                logger.warning("Failed to load norm matrix: %s", e)
+        # Derived from the bin the manifest just certified, so it cannot belong
+        # to another build the way a stored matrix could.
+        self._norm_matrix = _norm_matrix_from_bin(bin_path, len(order))
+        self._norm_matrix_n = len(order)
         self._index_error = None
         self._index_drift = None
         # Drift is for the one disagreement the id join makes harmless: metadata
@@ -1304,27 +1308,16 @@ class CLIPCardMatcher:
     def _get_norm_matrix(self):
         """Cached pre-normalized (N, CLIP_EMBED_DIM) float32 embedding matrix.
 
-        Building it per scan (38k Python float lists -> array) took ~100s of
-        the ~103s match time. Cache is invalidated when the index size changes.
-        Persisted to card-norm-matrix.bin for fast startup.
+        load_index_fast derives this from the bin; this rebuilds it only when
+        the index grew after loading, where the card list is all there is.
         """
         import numpy as np
         n = len(self.card_list)
-        # Try persisted matrix first
         if self._norm_matrix is not None and self._norm_matrix_n == n:
             return self._norm_matrix
-        # Build from embeddings
         matrix = np.array([c.embedding for c in self.card_list], dtype=np.float32)
         self._norm_matrix = matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9)
         self._norm_matrix_n = n
-        # Persist for next startup
-        try:
-            norm_path = self.db_dir / "card-norm-matrix.bin"
-            np.memmap(norm_path, dtype=np.float32, mode='w+',
-                      shape=(n, CLIP_EMBED_DIM))[:] = self._norm_matrix[:]
-            logger.info("Persisted norm matrix: %d cards", n)
-        except Exception as e:
-            logger.warning("Failed to persist norm matrix: %s", e)
         return self._norm_matrix
 
     def _match_template(self, image_bytes: bytes) -> Optional[Dict[str, Any]]:
