@@ -176,9 +176,8 @@ def search_cards(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     like = f"%{q.lower()}%"
     conn = get_db_connection()
     try:
-        # A query that is exactly a card name lists every printing of it: the
-        # picker asks for 8 and a name like "Nebulak" has 20 printings, so a
-        # plain LIMIT hid the printing being corrected.
+        # A name can have many printings (Nebulak has 20) and the picker only
+        # asks for 8, so an exact name lists them all instead of a cut.
         exact_name = conn.execute(
             "SELECT 1 FROM cards WHERE LOWER(name) = ? LIMIT 1", (q.lower(),)
         ).fetchone() is not None
@@ -188,7 +187,7 @@ def search_cards(query: str, limit: int = 20) -> List[Dict[str, Any]]:
             FROM cards
             WHERE LOWER(name) LIKE ? OR LOWER(ptcg_id) LIKE ?
             ORDER BY CASE WHEN LOWER(ptcg_id) = ? THEN 0 ELSE 1 END,
-                     name, set_name, CAST(number AS INTEGER), number
+                     name, set_name, number
             LIMIT ?
             """,
             (like, like, q.lower(), 50 if exact_name else limit),

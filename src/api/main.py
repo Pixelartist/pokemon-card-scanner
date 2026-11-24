@@ -1840,7 +1840,6 @@ def _resolve_local_card_image(ptcg_id: str, img_url: str) -> str:
 
 _DE_NAME_CACHE = None
 _GERMAN_HIT_LIMIT = 400
-_NAME_PRINTING_LIMIT = 50
 
 
 def _german_card_names() -> dict:
@@ -1939,21 +1938,19 @@ def search_cards(query: str, limit: int = 20):
     conn = get_db_connection()
     cursor = conn.cursor()
     search_param = f"%{q}%"
-    # A query that is exactly a card name lists every printing of it. The
-    # pickers ask for 6-8 rows, a name like "Nebulak" has 20 printings, and a
-    # plain LIMIT dropped the one the user was holding (102/162).
+    # A name can have many printings (Nebulak has 20) and a picker only asks
+    # for a handful, so an exact name lists them all instead of a cut.
     cursor.execute("SELECT 1 FROM cards WHERE LOWER(name) = ? LIMIT 1", (q,))
-    fetch_limit = _NAME_PRINTING_LIMIT if cursor.fetchone() else limit
+    fetch_limit = 50 if cursor.fetchone() else limit
     cursor.execute(
         """
         SELECT c.id, c.ptcg_id, c.name, c.number, c.rarity, c.set_name, c.hp, c.types, c.images
         FROM cards c
         WHERE c.name LIKE ? OR c.number LIKE ? OR c.set_name LIKE ? OR c.ptcg_id LIKE ?
-        ORDER BY CASE WHEN LOWER(c.name) = ? THEN 0 ELSE 1 END,
-                 c.name, c.set_name, CAST(c.number AS INTEGER), c.number
+        ORDER BY c.name, c.set_name, c.number
         LIMIT ?
         """,
-        (search_param, search_param, search_param, search_param, q, fetch_limit)
+        (search_param, search_param, search_param, search_param, fetch_limit)
     )
     for row in cursor.fetchall():
         d = _shape_card_row(row, de_names)
