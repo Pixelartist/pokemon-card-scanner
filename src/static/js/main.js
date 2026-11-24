@@ -471,6 +471,20 @@ async function handleRegisterSubmit(e) {
 
 document.getElementById('register-form')?.addEventListener('submit', handleRegisterSubmit);
 
+// A guest has no session, so the account actions a signed-in user gets are
+// no-ops there: "Sign Out" and a password prompt for a password that does not
+// exist. Guests get the way back into the login modal instead.
+function setAccountMenuSignedIn(signedIn) {
+    const show = (id, visible) => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = visible ? '' : 'none';
+    };
+    show('user-signin', !signedIn);
+    show('user-change-password', signedIn);
+    show('user-signout-divider', signedIn);
+    show('user-signout-section', signedIn);
+}
+
 function updateUserInfo(username) {
     const statusEl = document.getElementById('user-status');
     const dropdownUsername = document.querySelectorAll('.user-dropdown .username');
@@ -478,6 +492,7 @@ function updateUserInfo(username) {
         statusEl.innerHTML = `<span class="status-dot"></span><span class="username">${username}</span>`;
     }
     dropdownUsername.forEach(el => { el.textContent = username || 'Guest'; });
+    setAccountMenuSignedIn(!!getAuthToken());
 }
 
 // --- Preferred card language (user setting) -------------------------------
@@ -2138,6 +2153,15 @@ async function initializeApp() {
                 e.stopPropagation();
                 userDropdown?.classList.remove('open');
                 openPasswordChangeModal('current');
+            });
+        }
+        // Sign in, from the menu a guest dismissed the modal to reach
+        const signinBtn = document.getElementById('user-signin');
+        if (signinBtn) {
+            signinBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                userDropdown?.classList.remove('open');
+                document.getElementById('login-modal')?.classList.remove('hidden');
             });
         }
         // Sign out button

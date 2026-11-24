@@ -84,7 +84,10 @@
                     </div>
                     <div class="user-dropdown-section">
                         <label class="dropdown-label">Account</label>
-                        <button class="user-dropdown-item" id="user-change-password">
+                        <button class="user-dropdown-item" id="user-signin">
+                            <span class="item-text">Sign In</span>
+                        </button>
+                        <button class="user-dropdown-item" id="user-change-password" style="display:none">
                             <span class="item-text">Change Password</span>
                         </button>
                     </div>
@@ -115,8 +118,8 @@
                             <span class="item-text">Admin</span>
                         </button>
                     </div>
-                    <div class="user-dropdown-divider"></div>
-                    <div class="user-dropdown-section">
+                    <div class="user-dropdown-divider" id="user-signout-divider" style="display:none"></div>
+                    <div class="user-dropdown-section" id="user-signout-section" style="display:none">
                         <button class="user-dropdown-item signout" id="user-signout">
                             <span class="item-text">Sign Out</span>
                         </button>
