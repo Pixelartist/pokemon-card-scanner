@@ -263,10 +263,9 @@ def _create_schema():
         ):
             _add_column(cursor, table, column, ddl)
 
-        # Admin bootstrap is explicit: an account holds the flag only because the
-        # owner named it in ADMIN_USERNAMES or ADMIN_EMAILS. Promoting the oldest
-        # row was a guess, and after an admin was deleted it handed the flag to
-        # whichever test account happened to be oldest.
+        # The flag comes only from an explicit setting, never from row order: a
+        # restart after an admin deletion used to promote whichever test account
+        # was oldest.
         names = [n.strip() for n in os.environ.get("ADMIN_USERNAMES", "").split(",") if n.strip()]
         emails = [e.strip() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()]
         for name in names:
@@ -276,23 +275,13 @@ def _create_schema():
 
         cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
         if cursor.fetchone()[0] == 0:
-            cursor.execute("SELECT COUNT(*) FROM users")
-            if cursor.fetchone()[0] == 0:
-                # The register route hands the flag to the very first account, so a
-                # fresh install still has an owner without any setting.
-                logging.info("No accounts yet: the first one registered becomes admin")
-            elif names or emails:
-                logging.warning(
-                    "ADMIN_USERNAMES=%s and ADMIN_EMAILS=%s match no account, so nobody "
-                    "can use /api/admin: register that account, then restart",
-                    ",".join(names) or "-", ",".join(emails) or "-",
-                )
-            else:
-                logging.warning(
-                    "No admin account and neither ADMIN_USERNAMES nor ADMIN_EMAILS is "
-                    "set, so nobody can use /api/admin: set one to an existing account "
-                    "and restart",
-                )
+            # Silence is how a deployment ends up serving nothing but 403s from
+            # /api/admin, so name what was configured and what fixes it.
+            logging.warning(
+                "No admin account (ADMIN_USERNAMES=%s, ADMIN_EMAILS=%s): point one of "
+                "them at an existing account and restart, or register the first account",
+                ",".join(names) or "-", ",".join(emails) or "-",
+            )
         conn.commit()
     finally:
         conn.close()
