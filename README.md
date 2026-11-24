@@ -9,6 +9,7 @@ A locally hosted website for scanning and identifying Pokemon cards, similar to 
 - **Statistics**: View collection stats including total cards, unique cards, and breakdown by set
 - **Offline Database**: SQLite database stores your collection locally
 - **Responsive UI**: Works on desktop and mobile devices
+- **Interface language**: English and German, following the browser/OS language and switchable from the user menu
 
 ## Requirements
 
@@ -87,6 +88,43 @@ A locally hosted website for scanning and identifying Pokemon cards, similar to 
 | PTCG_API_KEY | Pokemon TCG API key | (required) |
 | HOST | Server host | 0.0.0.0 |
 | PORT | Server port | 5005 |
+
+## Interface language (i18n)
+
+The UI ships in English and German. Which one you get is decided in this order:
+`?lang=de` on the URL → `ui_lang` cookie → the browser's `Accept-Language`
+header → English. The picker under **User menu → Interface Language** writes
+that cookie, so the choice survives reloads; `?lang=` also persists it.
+
+This is separate from **Card Language**, which is a property of your collection
+(which printing of a card to add, stored on the user in SQLite). A German
+collector may well want an English interface and German cards.
+
+How it works:
+
+| Piece | Role |
+| --- | --- |
+| `src/services/i18n.py` | Picks the starting language for a request and loads that catalog; the catalog is inlined into the page, so the first paint needs no extra request. |
+| `src/static/i18n/de.json` | Flat catalog: English source text → translation. English is the source language and has no catalog. |
+| `src/static/js/i18n.js` | `t(text, params)` for code, plus a document walk and MutationObserver so markup and JS-rendered panels are translated as they appear. Switching language re-translates in place, no reload. |
+
+Because the catalog is keyed by the English text that is already in the markup,
+adding a translation means adding a key, not renaming anything. Strings built by
+concatenation (counters, "Page 2 of 7") are translated by calling `t()` with
+`{placeholder}` names at the point where they are built.
+
+### Adding a language
+
+1. Copy `src/static/i18n/de.json` to `<code>.json` and translate the values
+   (leave the keys alone).
+2. Add the code to `SUPPORTED` and `LABELS` in `src/static/js/i18n.js`, and to
+   `SUPPORTED` in `src/services/i18n.py`.
+3. Add an `<option>` for it to `#ui-lang-pref` in `src/templates/index.html`
+   (the picker also fills itself from `LABELS`).
+
+Keys that are missing from a catalog simply stay in English, so a partial
+translation degrades cleanly. Messages produced by the API (`detail` strings in
+error responses) are not translated and surface in English.
 
 ## Live database backups
 

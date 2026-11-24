@@ -94,8 +94,36 @@ def _normalize_images(images, ptcg_id):
                 local = url
                 break
 
+    def _static_file_exists(url):
+        """Does a /static/... URL resolve to a file on disk?
+
+        Stored paths can go stale (a .webp whose download was pruned later);
+        an unknown mount is left alone rather than second-guessed.
+        """
+        rel = url[len("/static/"):]
+        static_images = Path(__file__).resolve().parent.parent / "static" / "images"
+        for prefix, directory in (
+            ("clip_images/", base / "clip_images"),
+            ("german_cards/images/", base / "german_cards" / "images"),
+            ("card_images/", base / "images"),
+            ("tcgdex/", base / "images" / "tcgdex"),
+            ("pocket/", base / "images" / "pocket"),
+            ("sets/", base / "images" / "sets"),
+            ("boosters/", base / "images" / "boosters"),
+            ("images/", static_images),
+        ):
+            if rel.startswith(prefix):
+                return (directory / rel[len(prefix):]).is_file()
+        return True
+
     def fix(u):
         if not isinstance(u, str) or not u:
+            return u
+        # A value already pointing at one of our own files is the art the row
+        # stores (the German print, say); keep it over the generic copy - but
+        # only while the file is still there, or a stale path would win over
+        # the copy we do have.
+        if u.startswith("/static/") and _static_file_exists(u):
             return u
         if local:
             return local
@@ -109,6 +137,14 @@ def _normalize_images(images, ptcg_id):
         for k in ("small", "large", "hd"):
             if k in out:
                 out[k] = fix(out[k])
+        # Catalogue rows key their art by language ("en", "de", ...) instead of
+        # small/large. Without this they reached the UI with neither key and it
+        # showed a placeholder.
+        if not out.get("small") and not out.get("large"):
+            stored = next((v for v in out.values() if isinstance(v, str) and v), "")
+            art = fix(stored) if stored else local
+            if art:
+                out["small"] = out["large"] = art
         return out
     if isinstance(images, str):
         return fix(images)

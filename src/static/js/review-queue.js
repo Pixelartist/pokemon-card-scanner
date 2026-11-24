@@ -597,7 +597,7 @@ function rqOpenCorrection(item) {
     } catch (e) {
       saveBtn.disabled = false;
       saveBtn.textContent = 'Add to gallery';
-      alert('Could not open the add form: ' + e.message);
+      alert(t('Could not open the add form') + ': ' + e.message);
     }
   });
 
