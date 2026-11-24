@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from api.models.database import get_db_connection
+from services.card_query import split_name_number
 
 logger = logging.getLogger(__name__)
 
@@ -173,24 +174,36 @@ def search_cards(query: str, limit: int = 20) -> List[Dict[str, Any]]:
     if not q:
         return []
     limit = max(1, min(int(limit), 50))
-    like = f"%{q.lower()}%"
+    name_q, number = split_name_number(q)
+    if number is None:
+        where = "LOWER(name) LIKE ? OR LOWER(ptcg_id) LIKE ?"
+        params: Tuple[Any, ...] = (f"%{q.lower()}%",) * 2
+    else:
+        # "nebulak 102" names a printing: the number is what separates the
+        # printings of a name that no page of results can show side by side.
+        where = "CAST(number AS INTEGER) = ?"
+        params = (number,)
+        if name_q:
+            where += " AND LOWER(name) LIKE ?"
+            params += (f"%{name_q.lower()}%",)
     conn = get_db_connection()
     try:
-        # A name can have many printings (Nebulak has 20) and the picker only
-        # asks for 8, so an exact name lists them all instead of a cut.
-        exact_name = conn.execute(
+        # A query that is exactly a card name lists every printing of it: the
+        # picker asks for 8 and a name like "Nebulak" has 20 printings, so a
+        # plain LIMIT hid the printing being corrected.
+        exact_name = number is None and conn.execute(
             "SELECT 1 FROM cards WHERE LOWER(name) = ? LIMIT 1", (q.lower(),)
         ).fetchone() is not None
         rows = conn.execute(
-            """
+            f"""
             SELECT ptcg_id, name, set_name, number, rarity, images
             FROM cards
-            WHERE LOWER(name) LIKE ? OR LOWER(ptcg_id) LIKE ?
+            WHERE {where}
             ORDER BY CASE WHEN LOWER(ptcg_id) = ? THEN 0 ELSE 1 END,
                      name, set_name, number
             LIMIT ?
             """,
-            (like, like, q.lower(), 50 if exact_name else limit),
+            (*params, q.lower(), 50 if exact_name else limit),
         ).fetchall()
     finally:
         conn.close()

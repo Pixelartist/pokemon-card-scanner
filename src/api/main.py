@@ -34,6 +34,7 @@ db_path = DATABASE_URL  # backward-compatible alias
 from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, UserProfileUpdate, BinderCreate, BinderUpdate, AdminPasswordSet, AdminUserUpdate, AdminCorrectionUpdate
 from services import identify_jobs
 from services import i18n as ui_i18n
+from services.card_query import split_name_number
 from services.ptcg_client import get_client
 from services.collection import CollectionService
 from services.auth import (
@@ -1930,6 +1931,7 @@ def search_cards(query: str, limit: int = 20):
     """Search cards by name, set code, or number (public endpoint, no auth).
     Searches both the local DB and the full CLIP card index (~21k cards)."""
     q = query.strip().lower()
+    name_q, number = split_name_number(q)
     results = []
     seen = set()
     de_names = _german_card_names()
@@ -1937,20 +1939,33 @@ def search_cards(query: str, limit: int = 20):
     # 1) Database results
     conn = get_db_connection()
     cursor = conn.cursor()
-    search_param = f"%{q}%"
+    if number is None:
+        search_param = f"%{q}%"
+        where = "c.name LIKE ? OR c.number LIKE ? OR c.set_name LIKE ? OR c.ptcg_id LIKE ?"
+        params = [search_param] * 4
+    else:
+        # The query names a printing, not only a name: the number is what
+        # separates twenty Nebulak from the one on the table.
+        where = "CAST(c.number AS INTEGER) = ?"
+        params = [number]
+        if name_q:
+            where += " AND c.name LIKE ?"
+            params.append(f"%{name_q}%")
     # A name can have many printings (Nebulak has 20) and a picker only asks
     # for a handful, so an exact name lists them all instead of a cut.
-    cursor.execute("SELECT 1 FROM cards WHERE LOWER(name) = ? LIMIT 1", (q,))
-    fetch_limit = 50 if cursor.fetchone() else limit
+    fetch_limit = limit
+    if number is None:
+        cursor.execute("SELECT 1 FROM cards WHERE LOWER(name) = ? LIMIT 1", (q,))
+        fetch_limit = 50 if cursor.fetchone() else limit
     cursor.execute(
-        """
+        f"""
         SELECT c.id, c.ptcg_id, c.name, c.number, c.rarity, c.set_name, c.hp, c.types, c.images
         FROM cards c
-        WHERE c.name LIKE ? OR c.number LIKE ? OR c.set_name LIKE ? OR c.ptcg_id LIKE ?
+        WHERE {where}
         ORDER BY c.name, c.set_name, c.number
         LIMIT ?
         """,
-        (search_param, search_param, search_param, search_param, fetch_limit)
+        (*params, fetch_limit)
     )
     for row in cursor.fetchall():
         d = _shape_card_row(row, de_names)
@@ -1960,7 +1975,7 @@ def search_cards(query: str, limit: int = 20):
 
     # German names are not in this table, so match them against the scanner's
     # index and fetch the matching rows in one query instead of one per hit.
-    if q and de_names and len(results) < limit:
+    if number is None and q and de_names and len(results) < limit:
         # A cap on the IN list, not on results: plenty of index keys have no
         # cards row, so asking for exactly `limit` keys under-fills the page.
         german_hits = [
@@ -1988,7 +2003,7 @@ def search_cards(query: str, limit: int = 20):
     # 2) CLIP index results (covers cards not yet in the DB). An empty query
     # matches every index entry, so it would only cost the full scan without
     # adding anything the DB rows above do not already cover.
-    if q and len(results) < limit:
+    if number is None and q and len(results) < limit:
         try:
             from services.clip_matcher import get_clip_matcher
 
