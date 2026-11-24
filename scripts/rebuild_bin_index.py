@@ -1,20 +1,32 @@
-#!/opt/data/pokemon-card-scanner/.venv/bin/python
+#!/usr/bin/env python3
 """Rebuild card-index.bin from clip_embeddings.npz with proper normalization.
 
-The .bin was built from stale embeddings; English rows (non-de_) were
-re-embedded by reembed_english_index.py but the bin wasn't updated.
+The bin is raw int16 with no header, so the rebuild also rewrites
+card-index.manifest.json: nothing else records which ids and which checkpoint
+its rows belong to, and without it load_index_fast refuses the bin this script
+just wrote.
+
+    scripts/rebuild_bin_index.py [data-dir]
+
+The directory defaults to this checkout's data/.
 """
-import json
+import subprocess
 import sys
-import numpy as np
 from pathlib import Path
 
-DATA = Path("/opt/data/pokemon-card-scanner/data")
+import numpy as np
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "data"
 EMB_PATH = DATA / "clip_embeddings.npz"
 BIN_PATH = DATA / "card-index.bin"
-IDS_PATH = DATA / "card-ids.json"
+MANIFEST = ROOT / "scripts" / "write_index_manifest.py"
+
 
 def main() -> None:
+    if not EMB_PATH.exists():
+        sys.exit(f"{EMB_PATH} is missing — build the index once in the app so it "
+                 f"writes the .npz, or pass the directory that holds it")
     old = np.load(EMB_PATH, allow_pickle=True)
     ids = [str(i) for i in old["card_ids"]]
     mat = old["embeddings"].astype(np.float32)
@@ -32,11 +44,12 @@ def main() -> None:
 
     # Write bin
     quantized.tofile(BIN_PATH)
-    print(f"Wrote {BIN_PATH.stat().st_size} bytes")
+    print(f"Wrote {BIN_PATH} ({BIN_PATH.stat().st_size} bytes)")
 
-    # Verify against a known card
-    i = ids.index("ex14-56") if "ex14-56" in ids else 0
-    print(f"Sample row {i} norm: {check_norms[i]:.4f}")
+    # The manifest is what lets the loader trust these rows: same script, same
+    # constants, so a rebuild cannot leave the two disagreeing.
+    subprocess.run([sys.executable, str(MANIFEST), str(DATA)], check=True)
+
 
 if __name__ == "__main__":
     main()
