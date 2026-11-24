@@ -44,6 +44,14 @@ TCGDEX_DE_CARDS_URL = "https://api.tcgdex.net/v2/de/cards"
 TCGDEX_DE_IMAGE_BASE = "https://assets.tcgdex.net/de/{set_id}/{local_id}/high.png"
 
 DB_DIR = Path(__file__).parent.parent.parent / "data"
+
+# The checkpoint every row of card-index.bin came from. The manifest records it
+# and is refused when it disagrees, so a bin from another model cannot pass for
+# 512 numbers that look like embeddings but match nothing.
+CLIP_MODEL_NAME = "ViT-B-32"
+CLIP_PRETRAINED = "openai"
+CLIP_EMBED_DIM = 512
+
 INDEX_PATH = DB_DIR / "clip_card_index.json"
 EMBEDDINGS_PATH = DB_DIR / "clip_embeddings.npz"
 CACHE_DIR = DB_DIR / "clip_images"
@@ -227,6 +235,56 @@ def _meta_row_key(m: Dict[str, Any]) -> str:
     return "de_" + k if "/german_cards/" in (m.get("image") or "") else k
 
 
+INDEX_MANIFEST_NAME = "card-index.manifest.json"
+
+
+def _sha1_file(path: Path) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha1_ids(ids: List[str]) -> str:
+    return hashlib.sha1("\n".join(ids).encode("utf-8")).hexdigest()
+
+
+def _manifest_problem(manifest: Dict[str, Any], bin_path: Path, bin_rows: int,
+                      order: List[str]) -> Optional[str]:
+    """Why the manifest does not certify this bin and id list, or None if it does.
+
+    card-index.bin has no header: row i is whatever clip_card_index.json called i
+    when the bin was built, and no file on disk can re-derive that. The manifest
+    pins the checkpoint, the id list and both hashes, and anything it cannot
+    certify is a load error rather than a guess by position.
+
+    The checkpoint cannot be recovered from the bytes at all: a second
+    512-dimension model produces a bin of exactly this shape whose rows mean
+    something else, so a manifest with no model recorded is refused too, not
+    read as "probably fine".
+    """
+    built = (manifest.get("model"), manifest.get("pretrained"), manifest.get("dim"))
+    if built != (CLIP_MODEL_NAME, CLIP_PRETRAINED, CLIP_EMBED_DIM):
+        if None in built:
+            return ("manifest does not record the CLIP checkpoint (model, pretrained, "
+                    "dim); regenerate it with scripts/write_index_manifest.py")
+        return (f"index records {built[0]} ({built[1]}) at {built[2]}d, this build loads "
+                f"{CLIP_MODEL_NAME} ({CLIP_PRETRAINED}) at {CLIP_EMBED_DIM}d")
+    rows = manifest.get("rows")
+    if rows != bin_rows:
+        return f"card-index.bin has {bin_rows} rows, manifest records {rows}"
+    ids = manifest.get("ids") or []
+    if len(ids) != rows or _sha1_ids(ids) != manifest.get("ids_sha1"):
+        return "manifest id list does not match its own hash"
+    if _sha1_ids(order) != manifest.get("ids_sha1"):
+        return ("card-index.bin was built from a different id list than the one "
+                "clip_card_index.json / card-ids.json hold now")
+    if _sha1_file(bin_path) != manifest.get("bin_sha1"):
+        return "card-index.bin does not match its manifest hash"
+    return None
+
+
 @dataclass
 class CardEmbedding:
     card_id: str
@@ -328,15 +386,19 @@ class CLIPCardMatcher:
     # ------------------------------------------------------------------ model
 
     def _load_model(self):
-        """Lazily load CLIP model (small ViT-T/16 for memory efficiency).
-        Model is loaded on first use, not at startup, to reduce memory pressure."""
+        """Lazily load the checkpoint the index was built with.
+
+        Loaded on first use, not at startup, to reduce memory pressure. The name
+        and tag come from the module constants the manifest is checked against,
+        so changing one without rebuilding the index is a load error, not a
+        scanner that matches every card badly.
+        """
         if self._model is not None:
             return
         import open_clip
         import torch
         logger.info("Loading CLIP model on first use...")
-        # Use smaller model to reduce memory from ~2GB to ~400MB
-        result = open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')
+        result = open_clip.create_model_and_transforms(CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED)
         if len(result) == 3:
             self._model, _, self._preprocess = result
         else:
@@ -383,6 +445,21 @@ class CLIPCardMatcher:
         logger.info("Loaded CLIP index: %d cards", len(self.cards))
         return len(self.cards) > 0
 
+    def _read_manifest(self) -> Optional[Dict[str, Any]]:
+        """card-index.manifest.json, or None when it is absent.
+
+        A present but broken file raises: the caller reports it as index_error,
+        which reads better than letting a half-parsed dict fail as a mismatch.
+        """
+        path = self.db_dir / INDEX_MANIFEST_NAME
+        if not path.exists():
+            return None
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+        return data
+
     def _read_clip_index(self) -> List[Dict[str, Any]]:
         """clip_card_index.json cards, in card-index.bin row order ([] if absent)."""
         if not self.index_path.exists():
@@ -405,7 +482,13 @@ class CLIPCardMatcher:
         scripts rewrite. A regeneration that reordered or trimmed it used to make
         this return False and silently take the index out of search; now the rows
         still line up and any disagreement lands in self.index_error/self.index_drift
-        and in /api/status."""
+        and in /api/status.
+
+        Row order and the checkpoint are the two things a join by id cannot fix, so
+        card-index.manifest.json records which ids and which model the bin was built
+        from. A bin or id list replaced without the other, or a manifest that is
+        missing, unreadable or silent about its checkpoint, is an index_error that
+        serves no index rather than naming every match after the wrong card."""
         if self._index_loaded:
             return True
         bin_path = self.db_dir / "card-index.bin"
@@ -431,13 +514,36 @@ class CLIPCardMatcher:
         # card-ids.json is the fallback (its ids are append-only, so its head still
         # matches the first N rows). A partial rebuild can leave fewer rows in the
         # bin than ids — rebuild the bin to restore full coverage.
-        bin_rows = bin_path.stat().st_size // 1024
+        bin_rows = bin_path.stat().st_size // (CLIP_EMBED_DIM * 2)  # int16, no header
         ref_cards = self._read_clip_index()
         if len(ref_cards) >= bin_rows:
             order = [(c.get("card_id") or "") for c in ref_cards[:bin_rows]]
         else:
             order = card_ids[:bin_rows]
         order = [cid for cid in order if cid]
+        try:
+            manifest = self._read_manifest()
+        except (OSError, ValueError) as e:
+            self._index_error = f"card-index.manifest.json unreadable: {e}"
+            logger.error("CLIP index unavailable — %s", self._index_error)
+            return False
+        if manifest is None:
+            # Without the manifest there is no record of the checkpoint or the id
+            # order, and trusting position is exactly how cards came to be named
+            # after one another. Refuse and say how to fix it.
+            self._index_error = ("card-index.manifest.json missing: nothing records which "
+                                 "checkpoint or id list built card-index.bin — regenerate "
+                                 "it with scripts/write_index_manifest.py")
+            logger.error("CLIP index unavailable — %s", self._index_error)
+            return False
+        problem = _manifest_problem(manifest, bin_path, bin_rows, order)
+        if problem:
+            self._index_error = f"index manifest disagrees with the files: {problem}"
+            logger.error("CLIP index unavailable — %s", self._index_error)
+            return False
+        # The manifest is the record of what the bin actually holds, so it wins
+        # over both positional guesses above.
+        order = list(manifest["ids"])
         if not order:
             self._index_error = (f"no rows to load: bin_rows={bin_rows} "
                                  f"card-ids={len(card_ids)} clip_index={len(ref_cards)} "
@@ -450,9 +556,10 @@ class CLIPCardMatcher:
             cid = (c.get("card_id") or "").lower()
             if cid:
                 meta_by_id[cid] = c
-        # card-index.bin is (N, 512) int16, scale = 32767
+        # card-index.bin is (N, CLIP_EMBED_DIM) int16, scale = 32767
         # no header — memmap reads raw data directly
-        embeddings = np.memmap(bin_path, dtype=np.int16, mode='r', shape=(len(order), 512))
+        embeddings = np.memmap(bin_path, dtype=np.int16, mode='r',
+                               shape=(len(order), CLIP_EMBED_DIM))
         scale = 32767.0
         self.cards.clear()
         self.card_list.clear()
@@ -478,15 +585,16 @@ class CLIPCardMatcher:
             )
             self.cards[cid] = ce
             self.card_list.append(ce)
-        # Try to load pre-normalized matrix (float32, N x 512)
+        # Try to load pre-normalized matrix (float32, N x CLIP_EMBED_DIM)
         self._norm_matrix = None
         self._norm_matrix_n = 0
         if norm_path.exists():
             try:
-                expected_size = len(order) * 512 * 4  # float32 = 4 bytes
+                expected_size = len(order) * CLIP_EMBED_DIM * 4  # float32 = 4 bytes
                 actual_size = norm_path.stat().st_size
                 if actual_size == expected_size:
-                    self._norm_matrix = np.memmap(norm_path, dtype=np.float32, mode='r', shape=(len(order), 512))
+                    self._norm_matrix = np.memmap(norm_path, dtype=np.float32, mode='r',
+                                                  shape=(len(order), CLIP_EMBED_DIM))
                     self._norm_matrix_n = len(order)
                     logger.info("Loaded pre-normalized matrix: %d cards", len(order))
                 else:
@@ -495,11 +603,14 @@ class CLIPCardMatcher:
                 logger.warning("Failed to load norm matrix: %s", e)
         self._index_error = None
         self._index_drift = None
+        # Drift is for the one disagreement the id join makes harmless: metadata
+        # rows that are missing or fewer. Anything about the index's identity is
+        # an error above, because it cannot be worked around.
         if len(card_ids) != len(meta) or no_meta:
             self._index_drift = (f"cards_meta.json={len(meta)} rows vs card-ids.json="
                                  f"{len(card_ids)} ids; {no_meta} of {len(order)} index "
                                  f"row(s) had no metadata")
-            logger.warning("CLIP index metadata drift — %s", self._index_drift)
+            logger.warning("CLIP index drift — %s", self._index_drift)
         self._index_loaded = True
         logger.info("Loaded CLIP index (fast): %d cards", len(self.cards))
         return len(self.cards) > 0
@@ -1191,7 +1302,7 @@ class CLIPCardMatcher:
     # ------------------------------------------------------------------- match
 
     def _get_norm_matrix(self):
-        """Cached pre-normalized (N, 512) float32 embedding matrix.
+        """Cached pre-normalized (N, CLIP_EMBED_DIM) float32 embedding matrix.
 
         Building it per scan (38k Python float lists -> array) took ~100s of
         the ~103s match time. Cache is invalidated when the index size changes.
@@ -1209,7 +1320,8 @@ class CLIPCardMatcher:
         # Persist for next startup
         try:
             norm_path = self.db_dir / "card-norm-matrix.bin"
-            np.memmap(norm_path, dtype=np.float32, mode='w+', shape=(n, 512))[:] = self._norm_matrix[:]
+            np.memmap(norm_path, dtype=np.float32, mode='w+',
+                      shape=(n, CLIP_EMBED_DIM))[:] = self._norm_matrix[:]
             logger.info("Persisted norm matrix: %d cards", n)
         except Exception as e:
             logger.warning("Failed to persist norm matrix: %s", e)
