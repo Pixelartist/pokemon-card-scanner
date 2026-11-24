@@ -263,21 +263,36 @@ def _create_schema():
         ):
             _add_column(cursor, table, column, ddl)
 
-        # Bootstrap admins: nobody can reach the admin endpoints without the flag, so
-        # promote the oldest account (the owner's) when no admin exists yet. An
-        # ADMIN_USERNAMES override covers a database whose first account is a test
-        # user, and lets a fresh deployment pick its owner explicitly.
-        override = [name.strip() for name in os.environ.get("ADMIN_USERNAMES", "").split(",") if name.strip()]
-        for name in override:
+        # Admin bootstrap is explicit: an account holds the flag only because the
+        # owner named it in ADMIN_USERNAMES or ADMIN_EMAILS. Promoting the oldest
+        # row was a guess, and after an admin was deleted it handed the flag to
+        # whichever test account happened to be oldest.
+        names = [n.strip() for n in os.environ.get("ADMIN_USERNAMES", "").split(",") if n.strip()]
+        emails = [e.strip() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()]
+        for name in names:
             cursor.execute("UPDATE users SET is_admin = 1 WHERE username = ?", (name,))
+        for email in emails:
+            cursor.execute("UPDATE users SET is_admin = 1 WHERE lower(email) = lower(?)", (email,))
+
         cursor.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1")
         if cursor.fetchone()[0] == 0:
-            cursor.execute("SELECT MIN(id) FROM users")
-            first_id = cursor.fetchone()[0]
-            if first_id is not None:
-                cursor.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (first_id,))
-                logging.info("No admin user existed: promoted the oldest account (id %s) to admin", first_id)
-
+            cursor.execute("SELECT COUNT(*) FROM users")
+            if cursor.fetchone()[0] == 0:
+                # The register route hands the flag to the very first account, so a
+                # fresh install still has an owner without any setting.
+                logging.info("No accounts yet: the first one registered becomes admin")
+            elif names or emails:
+                logging.warning(
+                    "ADMIN_USERNAMES=%s and ADMIN_EMAILS=%s match no account, so nobody "
+                    "can use /api/admin: register that account, then restart",
+                    ",".join(names) or "-", ",".join(emails) or "-",
+                )
+            else:
+                logging.warning(
+                    "No admin account and neither ADMIN_USERNAMES nor ADMIN_EMAILS is "
+                    "set, so nobody can use /api/admin: set one to an existing account "
+                    "and restart",
+                )
         conn.commit()
     finally:
         conn.close()
