@@ -2246,7 +2246,12 @@ def create_or_get_card(card_id: str):
         collection = CollectionService()
         
         # Try to get card details from TCGdex API
-        r = requests.get(f"https://api.tcgdex.net/v2/en/cards/{card_id}", timeout=10)
+        # TCGdex keeps printings per language and does not accept the
+        # "de_" prefix the app carries on its own ids: de_me04-010 is
+        # /v2/de/cards/me04-010, while the en path answers 404.
+        lang = "de" if card_id.startswith("de_") else "en"
+        api_card_id = card_id[3:] if card_id.startswith("de_") else card_id
+        r = requests.get(f"https://api.tcgdex.net/v2/{lang}/cards/{api_card_id}", timeout=10)
         if r.status_code != 200:
             raise HTTPException(status_code=404, detail=f"Card {card_id} not found in TCGdex")
         
