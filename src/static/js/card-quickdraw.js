@@ -130,17 +130,28 @@ function readRGBA(el) {
  * module scope, and the two flows that use this module overlap: auto-scan's
  * consensus burst straightens frames while the live loop is mid-detect. Sharing
  * that read meant either side could resize and redraw the other's canvas
- * underfoot. A crop is a single image, so it pays for its own read instead.
+ * underfoot, so a crop keeps a canvas of its own.
+ *
+ * That canvas is reused: cropCardStraight() is synchronous from this read to
+ * the last pixel it samples, so two crops can never be mid-read at once, and a
+ * burst no longer allocates a full-frame canvas (~8 MB on a 1080p camera, three
+ * times per capture) just to throw it away — which is GC pressure the tablet
+ * felt.
  */
+let _cropCanvas = null, _cropCtx = null;
+
 function readOwnPixels(el) {
   const w = el.videoWidth || el.naturalWidth || el.width;
   const h = el.videoHeight || el.naturalHeight || el.height;
   if (!w || !h) return null;
-  const canvas = document.createElement('canvas');
-  canvas.width = w; canvas.height = h;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(el, 0, 0);
-  return { rgba: ctx.getImageData(0, 0, w, h).data, w, h };
+  if (!_cropCanvas) {
+    _cropCanvas = document.createElement('canvas');
+    _cropCtx = _cropCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if (_cropCanvas.width !== w) _cropCanvas.width = w;
+  if (_cropCanvas.height !== h) _cropCanvas.height = h;
+  _cropCtx.drawImage(el, 0, 0);
+  return { rgba: _cropCtx.getImageData(0, 0, w, h).data, w, h };
 }
 
 class PokemonCardDetector {

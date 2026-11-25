@@ -8,6 +8,15 @@ export class PerceptualHashMatcher {
     this.hashSize = hashSize;
     this.cardHashes = new Map(); // cardId -> { hash, name, set, number, rarity, image }
     this.indexLoaded = false;
+    // The hashes again, packed as integers (see _buildPackedIndex). Matching a
+    // capture used to walk the index as strings, build one result object per
+    // card and sort all ~40k of them, which is what made a capture crawl on a
+    // tablet.
+    this._packed = null;
+    this._packedIds = null;
+    this._packedLens = null;
+    this._words = 4;
+    this._cos = null;
   }
 
   /**
@@ -29,7 +38,45 @@ export class PerceptualHashMatcher {
       }
     }
     this.indexLoaded = true;
+    this._buildPackedIndex();
     console.log(`[PerceptualHash] Loaded ${this.cardHashes.size} card hashes`);
+  }
+
+  /**
+   * Pack the index into 32-bit words, once per load.
+   *
+   * 105 bits is four words, so a comparison is four XOR+popcounts against
+   * integers instead of 105 one-character string reads. The per-card hash
+   * length is kept as well: calculateHammingDistance() used to add the length
+   * difference to the count, and that must not silently change.
+   */
+  _buildPackedIndex() {
+    const count = this.cardHashes.size;
+    let hashLength = 0;
+    for (const card of this.cardHashes.values()) {
+      hashLength = card.hash.length;
+      break;
+    }
+    const words = Math.max(1, Math.ceil(hashLength / 32));
+    const packed = new Uint32Array(count * words);
+    const ids = new Array(count);
+    const lens = new Uint16Array(count);
+    let i = 0;
+    for (const [id, card] of this.cardHashes) {
+      const hash = card.hash;
+      const row = i * words;
+      const bits = Math.min(hash.length, words * 32);
+      for (let b = 0; b < bits; b++) {
+        if (hash.charCodeAt(b) === 49) packed[row + (b >> 5)] |= 1 << (b & 31);
+      }
+      ids[i] = id;
+      lens[i] = hash.length;
+      i++;
+    }
+    this._packed = packed;
+    this._packedIds = ids;
+    this._packedLens = lens;
+    this._words = words;
   }
 
   /**
@@ -108,25 +155,63 @@ export class PerceptualHashMatcher {
     };
   }
 
+  /**
+   * Cosine table for the DCT-II basis, built once per hash size.
+   * cos[k * n + i] = cos((2i + 1) * k * PI / (2n))
+   */
+  cosTable(n) {
+    if (!this._cos || this._cos.n !== n) {
+      const table = new Float64Array(n * n);
+      for (let k = 0; k < n; k++) {
+        for (let i = 0; i < n; i++) {
+          table[k * n + i] = Math.cos(((2 * i + 1) * k * Math.PI) / (2 * n));
+        }
+      }
+      this._cos = { n, table };
+    }
+    return this._cos.table;
+  }
+
+  /**
+   * DCT-II of one 24x24 plane, computed only where the hash reads it.
+   *
+   * The hash keeps the freqSize x freqSize lowest coefficients, so 540 of the
+   * 576 are discarded. The old version computed all of them with the naive
+   * O(n^4) sum — 331,776 iterations and two Math.cos calls each, per colour
+   * channel, per frame. Separating the transform into rows then columns and
+   * stopping at the frequencies the hash needs is the same maths in ~4.3k
+   * multiplies with no trigonometry inside the loops.
+   *
+   * Returns an n*n array with only the [0, freq)^2 block filled, which is all
+   * calculateChannelAverages() and calculateHash() read.
+   */
   computeDCT(pixels) {
     const n = this.hashSize;
-    const result = new Array(n * n);
+    const freq = Math.floor(n / 4);
+    const cos = this.cosTable(n);
+    const result = new Float64Array(n * n);
+    const rows = new Float64Array(freq * n);
 
-    for (let u = 0; u < n; u++) {
-      for (let v = 0; v < n; v++) {
+    for (let u = 0; u < freq; u++) {
+      const cu = u === 0 ? Math.SQRT1_2 : 1;
+      const off = u * n;
+      for (let y = 0; y < n; y++) {
+        const row = y * n;
         let sum = 0;
-        for (let y = 0; y < n; y++) {
-          for (let x = 0; x < n; x++) {
-            sum += pixels[y * n + x] *
-              Math.cos(((2 * x + 1) * u * Math.PI) / (2 * n)) *
-              Math.cos(((2 * y + 1) * v * Math.PI) / (2 * n));
-          }
-        }
+        for (let x = 0; x < n; x++) sum += pixels[row + x] * cos[off + x];
+        rows[off + y] = sum * cu;
+      }
+    }
 
-        const cu = u === 0 ? 1 / Math.sqrt(2) : 1;
-        const cv = v === 0 ? 1 / Math.sqrt(2) : 1;
-
-        result[u * n + v] = ((2 * cu * cv) / n) * sum;
+    for (let v = 0; v < freq; v++) {
+      const cv = v === 0 ? Math.SQRT1_2 : 1;
+      const coff = v * n;
+      const scale = (2 * cv) / n;
+      for (let u = 0; u < freq; u++) {
+        const off = u * n;
+        let sum = 0;
+        for (let y = 0; y < n; y++) sum += rows[off + y] * cos[coff + y];
+        result[off + v] = scale * sum;
       }
     }
 
@@ -158,34 +243,73 @@ export class PerceptualHashMatcher {
     }
 
     const queryHash = await this.calculateHash(imageElement);
-    const results = [];
+    const packed = this._packed;
+    if (!packed) return [];
 
-    for (const [id, card] of this.cardHashes) {
-      const distance = this.calculateHammingDistance(queryHash, card.hash);
-      const maxDistance = queryHash.length;
-      const similarity = 100 - (distance / maxDistance) * 100;
-
-      if (similarity >= threshold) {
-        results.push({
-          id,
-          name: card.name,
-          set: card.set,
-          number: card.number,
-          rarity: card.rarity,
-          image: card.image,
-          similarity: Math.round(similarity * 100) / 100,
-          hashDistance: distance,
-        });
-      }
+    const queryLen = queryHash.length || 1;
+    const words = this._words;
+    const count = this._packedIds.length;
+    const qw = new Uint32Array(words);
+    const bits = Math.min(queryHash.length, words * 32);
+    for (let b = 0; b < bits; b++) {
+      if (queryHash.charCodeAt(b) === 49) qw[b >> 5] |= 1 << (b & 31);
     }
 
-    results.sort((a, b) => b.similarity - a.similarity);
+    // Bounded top-K: one pass keeps the K best distances, so no 40k-entry
+    // result array is built and no 40k-entry sort runs per frame.
+    const k = Math.max(1, Math.min(topK, count));
+    const bestDist = new Int32Array(k).fill(0x7fffffff);
+    const bestRow = new Int32Array(k).fill(-1);
+    const lens = this._packedLens;
+
+    for (let i = 0, row = 0; i < count; i++, row += words) {
+      let distance = queryLen - lens[i];
+      if (distance < 0) distance = -distance;
+      for (let w = 0; w < words; w++) {
+        let v = packed[row + w] ^ qw[w];
+        v -= (v >>> 1) & 0x55555555;
+        v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+        v = (v + (v >>> 4)) & 0x0f0f0f0f;
+        distance += (v * 0x01010101) >>> 24;
+      }
+      if (distance >= bestDist[k - 1]) continue;
+      let j = k - 1;
+      while (j > 0 && bestDist[j - 1] > distance) {
+        bestDist[j] = bestDist[j - 1];
+        bestRow[j] = bestRow[j - 1];
+        j--;
+      }
+      bestDist[j] = distance;
+      bestRow[j] = i;
+    }
+
+    const results = [];
+    for (let j = 0; j < k; j++) {
+      const i = bestRow[j];
+      if (i < 0) continue;
+      const similarity = 100 - (bestDist[j] / queryLen) * 100;
+      // Distances rise down the list, so the first miss ends the run.
+      if (similarity < threshold) break;
+      const id = this._packedIds[i];
+      const card = this.cardHashes.get(id);
+      if (!card) continue;
+      results.push({
+        id,
+        name: card.name,
+        set: card.set,
+        number: card.number,
+        rarity: card.rarity,
+        image: card.image,
+        similarity: Math.round(similarity * 100) / 100,
+        hashDistance: bestDist[j],
+      });
+    }
+
     // Hashing the crop is the expensive part of a match and the multi-frame
     // burst needs it again to compare frames; hand it back rather than making
-    // the caller re-hash the same canvas (measured ~18ms per frame).
-    const top = results.slice(0, topK);
-    top.queryHash = queryHash;
-    return top;
+    // the caller re-hash the same canvas.
+    results.queryHash = queryHash;
+    return results;
   }
 
   /**
