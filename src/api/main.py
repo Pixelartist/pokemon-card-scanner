@@ -34,6 +34,7 @@ db_path = DATABASE_URL  # backward-compatible alias
 from api.models.schemas import CollectionItemCreate, BatchCollectionCreate, UserRegister, UserLogin, AuthToken, UserResponse, UserProfileUpdate, BinderCreate, BinderUpdate, AdminPasswordSet, AdminUserUpdate, AdminCorrectionUpdate
 from services import identify_jobs
 from services import i18n as ui_i18n
+from services import scan_metrics
 from services.card_query import split_name_number
 from services.ptcg_client import get_client
 from services.collection import CollectionService
@@ -85,6 +86,9 @@ class _RateLimiter:
 _scan_limiter = _RateLimiter(60, 60)
 _login_limiter = _RateLimiter(10, 60)      # keyed by username
 _register_limiter = _RateLimiter(5, 3600)  # keyed by email
+
+
+_metrics_limiter = _RateLimiter(600, 60)  # one row per capture; a burst of taps is fine
 
 
 def _enforce(limiter: _RateLimiter, key: str, detail: str) -> None:
@@ -2150,6 +2154,30 @@ def list_misreads(limit: int = 100,
         return {"misreads": [dict(r) for r in rows], "count": len(rows)}
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------- scan metrics
+# One row per capture or page load from the browser scanner (src/static/js/
+# scan-metrics.js). The browser is the only place these timings exist — the
+# server sees an upload, not how long the device spent finding the card — so
+# storing them is what turns "slow on the tablet" into a measurement. Read them
+# with scripts/scan_metrics_report.py, which queries the table directly.
+@app.post("/api/scan-metrics")
+async def record_scan_metrics(payload: Dict[str, Any], request: Request):
+    """Store one row of scanner timings.
+
+    Telemetry must never disturb the scan that reported it, so nothing here
+    raises: a rate-limited or unwritable row is dropped with a 200.
+    """
+    key = request.client.host if request.client else "unknown"
+    if not _metrics_limiter.allow(key):
+        return {"status": "ignored", "reason": "rate limited"}
+    try:
+        row_id = scan_metrics.record(db_path, payload)
+    except Exception as e:
+        logger.warning("scan metrics: write failed: %s", e)
+        return {"status": "ignored", "reason": "write failed"}
+    return {"status": "ok", "id": row_id}
 
 
 # --------------------------------------------------- background identification

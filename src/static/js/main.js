@@ -1,3 +1,18 @@
+// Telemetry is optional and must never break scanning: if scan-metrics.js is
+// missing, blocked or fails to load, every call below is a no-op instead of a
+// ReferenceError. begin() returns an object rather than null because the scan
+// handler merges measured stages onto the handle.
+//
+// index.html loads scan-metrics.js first, so the real implementation is
+// normally already on window when this runs. When it is not, say so once: a
+// silent no-op is how timings go missing for weeks without anyone noticing.
+function noTelemetry() {
+  console.warn('[Scanner] scan-metrics.js did not load: capture and startup timings will not be recorded');
+  return { begin: () => ({}), report: () => {} };
+}
+
+const scanMetrics = window.scanMetrics || noTelemetry();
+
 // Inject SVG electric border filters IMMEDIATELY
 (function() {
     if (document.getElementById('electric-filters-injected')) return;
@@ -585,19 +600,44 @@ window.__cardScanner = {
 
   init() {
     if (this.loading) return this.loading;
+    // Startup is timed from navigation start: performance.now() already counts
+    // the document, the CSS and this script, so the row's boot_ms is the wait
+    // before the browser got here and total_ms is time-to-scanner-ready.
+    const startup = scanMetrics.begin();
     this.loading = (async () => {
       try {
+        const tModules = performance.now();
         const [detMod, hashMod] = await Promise.all([
           import('/static/js/card-quickdraw.js'),
           import('/static/js/perceptual-hash.js'),
         ]);
+        startup.modules_ms = performance.now() - tModules;
         this.detector = new detMod.PokemonCardDetector();
         this.matcher = new hashMod.PerceptualHashMatcher();
-        const [ids, meta, hashes] = await Promise.all([
-          fetch('/static/card-ids.json').then(r => r.json()),
-          fetch('/static/cards_meta.json').then(r => r.json()),
-          fetch('/static/card-hashes.json').then(r => r.json()).catch(() => ({})),
+        // Transfer and parse are timed apart: over a LAN the download can be
+        // quick while JSON.parse of ~12 MB blocks the main thread for hundreds
+        // of ms on a tablet, and only one of those is worth optimising.
+        const tFetch = performance.now();
+        const [idsRes, metaRes, hashesRes] = await Promise.all([
+          fetch('/static/card-ids.json'),
+          fetch('/static/cards_meta.json'),
+          // The hash index stays optional: without it the scanner still detects
+          // and crops, and the capture falls through to the cloud.
+          fetch('/static/card-hashes.json').catch(() => null),
         ]);
+        const [idsBody, metaBody, hashesBody] = await Promise.all([
+          idsRes.text(), metaRes.text(), hashesRes ? hashesRes.text() : '',
+        ]);
+        startup.json_fetch_ms = performance.now() - tFetch;
+        startup.bytes = [idsRes, metaRes, hashesRes].reduce(
+          (n, res) => n + (res ? (Number(res.headers.get('content-length')) || 0) : 0), 0)
+          || [idsBody, metaBody, hashesBody].reduce((n, body) => n + body.length, 0);
+        const tParse = performance.now();
+        const ids = JSON.parse(idsBody);
+        const meta = JSON.parse(metaBody);
+        let hashes = {};
+        try { hashes = JSON.parse(hashesBody); } catch (e) { hashes = {}; }
+        startup.json_parse_ms = performance.now() - tParse;
         // Hydrate by id, not by array position: card-ids.json and
         // cards_meta.json are the same length but not in the same order (and
         // disagree on set-code case, e.g. sv10 vs SV10), so zipping them by
@@ -608,6 +648,7 @@ window.__cardScanner = {
         // resolved to "Meditite" with the English artwork, and the German name
         // ("Meditie") never appeared anywhere in the UI. Keep them apart by the
         // image path the row was built from.
+        const tIndex = performance.now();
         const byKey = new Map();
         for (const m of meta) {
             const isGerman = /\/german_cards\//.test(m.image || '');
@@ -634,12 +675,19 @@ window.__cardScanner = {
         };
         });
         this.matcher.loadIndex(entries);
+        startup.index_ms = performance.now() - tIndex;
+        const tModel = performance.now();
         await this.detector.loadModel();
+        startup.model_ms = performance.now() - tModel;
         this.ready = true;
         console.log('[Scanner] Browser-side detector + hash index ready');
+        scanMetrics.report(startup, { kind: 'startup', outcome: 'ready' });
       } catch (e) {
         console.warn('[Scanner] Browser-side init failed; cloud-only mode:', e);
         this.ready = false;
+        // A device that never becomes ready is the most useful startup row
+        // there is: it explains a scanner that silently fell back to the cloud.
+        scanMetrics.report(startup, { kind: 'startup', outcome: 'failed' });
       }
     })();
     return this.loading;
@@ -662,6 +710,13 @@ window.__cardScanner = {
   // Returns a verdict ({ok, distance, id, name, crop, cropDataUrl}) rather than
   // a bare boolean so a refusal can be explained on screen instead of vanishing.
   async confirmWithServer(canvas) {
+    const started = performance.now();
+    const verdict = await this._serverGate(canvas);
+    verdict.ms = performance.now() - started;   // the burst sums it as gate_ms
+    return verdict;
+  },
+
+  async _serverGate(canvas) {
     try {
       const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
       const body = new FormData();
@@ -740,12 +795,21 @@ window.__cardScanner = {
     // lowered the card left the burst looking at an empty table: nothing was
     // shown and nothing reached the queue. Grabbing all three up front also
     // frees the card immediately — the analysis below runs from the stills.
+    // This burst's timings. The caller merges them into its capture handle and
+    // reports one row for the whole capture, cloud leg included.
+    const metrics = {
+      grab_ms: 0, detect_ms: 0, crop_ms: 0, hash_ms: 0, gate_ms: 0,
+      video: `${video.videoWidth}x${video.videoHeight}`,
+    };
     const seq = nextCapture();
     const shots = [];
+    const grabStarted = performance.now();
     for (let i = 0; i < CONSENSUS_FRAMES; i++) {
       shots.push(this._grabFrame(video));
       if (i < CONSENSUS_FRAMES - 1) await new Promise(r => setTimeout(r, CONSENSUS_GAP_MS));
     }
+    metrics.grab_ms = performance.now() - grabStarted;
+    metrics.frames = shots.length;
     showCaptureFeedback();
     // The capture is in hand; let the loop arm for the next card while this one
     // is read, instead of holding the shutter shut until the answer arrives.
@@ -761,6 +825,11 @@ window.__cardScanner = {
                                       { server: false, quad: i > 0 ? anchor : null });
       } catch (e) { res = null; }
       if (i === 0 && res && res.detection && res.detection.points) anchor = res.detection.points;
+      if (res && res.timings) {
+        metrics.detect_ms += res.timings.detect_ms;
+        metrics.crop_ms += res.timings.crop_ms;
+        metrics.hash_ms += res.timings.hash_ms;
+      }
       frames.push(res);
     }
 
@@ -798,11 +867,12 @@ window.__cardScanner = {
         const verdict = strong
           ? { ok: true }
           : await this.confirmWithServer(best.cropCanvas);
+        metrics.gate_ms += verdict.ms || 0;
         if (verdict.ok) {
           this._lastReject = null;
-          if (best.cropDataUrl) this._lastCropDataUrl = best.cropDataUrl;
-          if (best.cropThumb) this._lastCropThumb = best.cropThumb;
-          return { ...best, captureSeq: seq, agreement: agreeing.length, frames: frames.length };
+          const shot = this._acceptCrop(best);
+          return { ...best, ...shot, captureSeq: seq, agreement: agreeing.length,
+                   frames: frames.length, metrics };
         }
         this._lastReject = verdict;
       }
@@ -816,38 +886,63 @@ window.__cardScanner = {
     const single = hits.length === 1 ? hits[0] : null;
     if (single) {
       const verdict = await this.confirmWithServer(single.cropCanvas);
+      metrics.gate_ms += verdict.ms || 0;
       if (verdict.ok) {
         this._lastReject = null;
-        if (single.cropDataUrl) this._lastCropDataUrl = single.cropDataUrl;
-        if (single.cropThumb) this._lastCropThumb = single.cropThumb;
-        return { ...single, captureSeq: seq, agreement: 1, frames: frames.length };
+        const shot = this._acceptCrop(single);
+        return { ...single, ...shot, captureSeq: seq, agreement: 1,
+                 frames: frames.length, metrics };
       }
       this._lastReject = verdict;
     }
     this._lastCropDataUrl = null;
     this._lastCropThumb = null;
     return { noCard: true, captureSeq: seq, candidates: [], nearMiss: [],
-             bestSimilarity: (hits[0]?.bestSimilarity || 0), frames: frames.length };
+             bestSimilarity: (hits[0]?.bestSimilarity || 0), frames: frames.length,
+             metrics };
+  },
+
+  // Encode the winning still of a burst — the only one whose JPEGs are ever
+  // read — and remember it for the add form and the review queue. Called once
+  // per accepted capture instead of once per frame.
+  _acceptCrop(frame) {
+    const encoded = encodeCrop(frame.cropCanvas);
+    const cropDataUrl = encoded.dataUrl || frame.cropDataUrl || null;
+    const cropThumb = encoded.thumb || frame.cropThumb || null;
+    if (cropDataUrl) this._lastCropDataUrl = cropDataUrl;
+    if (cropThumb) this._lastCropThumb = cropThumb;
+    return { cropDataUrl, cropThumb };
   },
 
   // Detect + straighten-crop + hash-match in one shot. The consensus path calls
   // this once per frame; an uploaded image calls it once, with a server opinion.
   async analyseFrame(source, { server = true, quad = null } = {}) {
     if (!this.ready) return null;
+    const tStart = performance.now();
     // A burst's later frames pass the quad found by its first frame: the crop is
     // taken from that region without spending another detector pass.
     let det = quad ? { points: quad, confidence: 100 } : await this.detect(source);
+    const tDetect = performance.now();
     // 45, not 30: the corner model's own presence threshold is the sigmoid of
     // DET_LOGIT (~0.27), so 30% let almost any quad through.
-    if (!det || det.confidence < MIN_CARD_CONF) return { noCard: true };
+    if (!det || det.confidence < MIN_CARD_CONF) {
+      return { noCard: true,
+               timings: { detect_ms: tDetect - tStart, crop_ms: 0, hash_ms: 0 } };
+    }
     const { cropCardStraight } = await import('/static/js/card-quickdraw.js');
     const crop = cropCardStraight(source, det);
+    const tCrop = performance.now();
     // Gate at 78 (not 85): real photos score well below reference-image
     // similarity (~92), so the old cutoff silently dropped near-matches.
     // check() still requires >= THRESHOLD for the auto-capture toast.
     // bestSimilarity is returned even below the gate so the UI can show
     // how close the near-miss was instead of failing silently.
     const all = await this.matcher.match(crop, 0, 8);
+    const timings = {
+      detect_ms: tDetect - tStart,
+      crop_ms: tCrop - tDetect,
+      hash_ms: performance.now() - tCrop,
+    };
     // match() hashes the crop anyway and hands the hash back, so the burst can
     // compare frames without a second 24x24 DCT of the same canvas.
     const queryHash = all.queryHash || null;
@@ -886,7 +981,7 @@ window.__cardScanner = {
         this._lastCropDataUrl = null;
         this._lastCropThumb = null;
         return { noCard: true, bestSimilarity: (uniq[0]?.similarity || 0) / 100,
-                 candidates: [], nearMiss: [], reject: verdict };
+                 candidates: [], nearMiss: [], reject: verdict, timings };
       }
       this._lastReject = null;
     }
@@ -913,16 +1008,21 @@ window.__cardScanner = {
       if (twin && ![...matches, ...twins].some(x => x.id === twin.id)) twins.push(twin);
     }
     const bestSimilarity = all.length ? all[0].similarity / 100 : 0;
-    // Always produce the crop data URL — even on low local confidence — so the
-    // cloud /api/scan always receives the clean straightened card instead of a
-    // full webcam frame the numpy fallback misreads as a shoulder.
-    const cropDataUrl = crop.toDataURL('image/jpeg', 0.92);
-    // Cache the latest straightened crop so the scan button can ship it to
-    // /api/scan — the server stores it directly instead of re-detecting on
-    // the raw frame (which produced garbage 140x175 crops of table edges).
-    if (cropDataUrl) this._lastCropDataUrl = cropDataUrl;
-    const cropThumb = queueThumbnail(crop);
-    if (cropThumb) this._lastCropThumb = cropThumb;
+    // A single still (an uploaded image) is its own answer, so encode it here.
+    // A burst frame does not: a 3-frame capture used to make six JPEGs — the
+    // full crop and the queue thumb for every still — while only the accepted
+    // frame's are ever read. Consensus encodes once, in _acceptCrop().
+    let cropDataUrl = null, cropThumb = null;
+    if (server) {
+      const encoded = encodeCrop(crop);
+      cropDataUrl = encoded.dataUrl;
+      cropThumb = encoded.thumb;
+      // Cache the latest straightened crop so the scan button can ship it to
+      // /api/scan — the server stores it directly instead of re-detecting on
+      // the raw frame (which produced garbage 140x175 crops of table edges).
+      if (cropDataUrl) this._lastCropDataUrl = cropDataUrl;
+      if (cropThumb) this._lastCropThumb = cropThumb;
+    }
     return {
       detection: det,
       bestSimilarity,
@@ -930,6 +1030,7 @@ window.__cardScanner = {
       cropThumb,
       cropCanvas: crop,
       queryHash,
+      timings,
       // quickdraw never discards a near-miss: it stashes the best guesses so the
       // UI can offer them for one-tap confirmation. Ship the top guesses even
       // when the gate rejected all of them.
@@ -969,6 +1070,7 @@ if (document.readyState === 'loading') {
 
 if (scanBtn) {
     scanBtn.addEventListener('click', async function() {
+        const capture = scanMetrics.begin();
         const cameraOpen = !document.getElementById('camera-section').classList.contains('hidden');
 
         // Fast path (1vcian architecture): while the camera is open, detect +
@@ -989,6 +1091,7 @@ if (scanBtn) {
                     // the identity. `snap` remains the fallback image for the
                     // cloud path when there is nothing to send a crop of.
                     const res = await window.__cardScanner.identifyWithConsensus(video);
+                    if (res && res.metrics) Object.assign(capture, res.metrics);
                     if (res && res.noCard) {
                         // Nothing card-like in the frame. A face under the
                         // camera is the common case, and uploading its crop
@@ -1013,6 +1116,7 @@ if (scanBtn) {
                             if (ov) ov.innerHTML = rejectHtml(rej, true);
                         }
                         if (auto) window.__autoScan.miss();
+                        scanMetrics.report(capture, { kind: 'capture', outcome: 'no_card' });
                         return;
                     }
                     if (res && res.candidates.length) {
@@ -1034,6 +1138,7 @@ if (scanBtn) {
                             capture_seq: res.captureSeq,
                             meta: { source: 'browser_hash' },
                         }, document.getElementById('scan-result'));
+                        scanMetrics.report(capture, { kind: 'capture', outcome: 'match' });
                         return;
                     }
                     // Nothing matched locally — send the browser-detected card
@@ -1051,7 +1156,10 @@ if (scanBtn) {
             }
         }
 
-        if (!currentImage) return;
+        if (!currentImage) {
+            scanMetrics.report(capture, { kind: 'capture', outcome: 'no_image' });
+            return;
+        }
 
         // Whatever this upload is about to show belongs to the capture current
         // right now; a newer capture starting before the answer lands makes this
@@ -1093,6 +1201,7 @@ if (scanBtn) {
         
         try {
             const token = getAuthToken();
+            const cloudStarted = performance.now();
             const response = await fetch('/api/scan', {
                 method: 'POST',
                 headers: {
@@ -1112,7 +1221,12 @@ if (scanBtn) {
             // displayScanResult() records the frame of this result (scan_image_path
             // / crop_image_path) for the add form; nothing is kept globally here.
             result.capture_seq = myCapture;
+            capture.cloud_ms = performance.now() - cloudStarted;
             displayScanResult(result, resultDiv);
+            scanMetrics.report(capture, {
+                kind: 'capture',
+                outcome: result.decision === 'match' ? 'match' : 'no_match',
+            });
         } catch (error) {
             if (error.name === 'AbortError') {
                 resultDiv.innerHTML = '<p class="error">Scan timed out after 60 seconds. Please try again.</p>';
@@ -1121,6 +1235,7 @@ if (scanBtn) {
             } else {
                 resultDiv.innerHTML = '<p class="error">Error scanning card: ' + error.message + '</p>';
             }
+            scanMetrics.report(capture, { kind: 'capture', outcome: 'error' });
             // Keep the auto-scan loop alive across transient scan failures.
             if (window.__autoScan && window.__autoScan.active) window.__autoScan.retry(3000);
         }
@@ -1243,6 +1358,14 @@ function canvasJpeg(canvas, maxWidth, quality) {
 
 function queueThumbnail(canvas) {
   return canvasJpeg(canvas, QUEUE_THUMB_WIDTH, QUEUE_THUMB_QUALITY);
+}
+
+// The full crop JPEG and the review-queue thumb for one still. Split out so a
+// burst pays for them once, for its winner (see _acceptCrop).
+function encodeCrop(canvas) {
+  let dataUrl = null;
+  try { dataUrl = canvas.toDataURL('image/jpeg', 0.92); } catch (e) { /* stays null */ }
+  return { dataUrl, thumb: queueThumbnail(canvas) };
 }
 
 // A candidate can arrive with no `card.images` and no `image_url` at all — the

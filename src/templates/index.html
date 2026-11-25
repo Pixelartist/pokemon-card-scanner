@@ -825,6 +825,8 @@
          perceptual-hash match run locally on the phone/PC. -->
     <script type="module" src="/static/js/card-quickdraw.js?t={{ timestamp }}"></script>
     <script type="module" src="/static/js/perceptual-hash.js?t={{ timestamp }}"></script>
+    <!-- Capture/startup timings; defines window.scanMetrics, so load it first. -->
+    <script src="/static/js/scan-metrics.js?t={{ timestamp }}"></script>
     <script src="/static/js/main.js?t={{ timestamp }}"></script>
 </body>
 </html>
