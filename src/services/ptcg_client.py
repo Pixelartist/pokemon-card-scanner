@@ -18,6 +18,12 @@ def _get_api_key() -> str:
 
 PTCG_API_BASE = "https://api.pokemontcgapi.com/v1"
 
+# 403 codes that mean the credential was accepted and the plan was
+# not: the key is fine, so a key-shaped diagnosis would be wrong.
+_PLAN_ERROR_CODES = frozenset(
+    {"PLAN_REQUIRED", "TRIAL_EXPIRED", "SUBSCRIPTION_REQUIRED"}
+)
+
 
 class PokemonTCGClient:
     """Client for Pokemon TCG API - vision recognition and card database."""
@@ -99,7 +105,7 @@ class PokemonTCGClient:
                 error_code = error_data.get('error', {}).get('code', '') if isinstance(error_data.get('error'), dict) else ''
                 error_msg = error_data.get('error', {}).get('message', '') if isinstance(error_data.get('error'), dict) else str(error_data)
 
-                if error_code == 'PLAN_REQUIRED':
+                if error_code in _PLAN_ERROR_CODES:
                     if 'verify_email' in error_msg:
                         return {
                             "error": "Email verification required. Please verify your email at https://pokemontcgapi.com/account to unlock 5 free trial card recognitions. After verification, try again.",
@@ -108,8 +114,11 @@ class PokemonTCGClient:
                             "solution": "verify_email"
                         }
                     else:
-                        # Trial exhausted — try offline fallback
-                        logger.info("API trial exhausted, falling back to offline matcher")
+                        # Plan lapsed — try offline fallback
+                        logger.info(
+                            "PTCG plan/trial not active (%s), falling back to offline matcher",
+                            error_code,
+                        )
                         return self._identify_offline(image_bytes, top_k, lang=lang)
                 else:
                     # Invalid key — try offline fallback
