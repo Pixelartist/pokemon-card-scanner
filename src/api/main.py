@@ -2246,12 +2246,7 @@ def create_or_get_card(card_id: str):
         collection = CollectionService()
         
         # Try to get card details from TCGdex API
-        # TCGdex keeps printings per language and does not accept the
-        # "de_" prefix the app carries on its own ids: de_me04-010 is
-        # /v2/de/cards/me04-010, while the en path answers 404.
-        lang = "de" if card_id.startswith("de_") else "en"
-        api_card_id = card_id[3:] if card_id.startswith("de_") else card_id
-        r = requests.get(f"https://api.tcgdex.net/v2/{lang}/cards/{api_card_id}", timeout=10)
+        r = requests.get(_tcgdex_card_url(card_id), timeout=10)
         if r.status_code != 200:
             raise HTTPException(status_code=404, detail=f"Card {card_id} not found in TCGdex")
         
@@ -2439,16 +2434,22 @@ def _cache_set(card_id: str, data: Dict[str, Any]):
         logging.debug(f"Cache set failed for {card_id}: {e}")
 
 
+def _tcgdex_card_url(card_id: str) -> str:
+    """TCGdex address for one card, in the printing's own language.
+
+    TCGdex files printings per language and takes no "de_" prefix: the
+    app's de_me04-010 lives at /v2/de/cards/me04-010, and the /v2/en path
+    for it answers 404.
+    """
+    lang = "de" if card_id.startswith("de_") else "en"
+    return f"https://api.tcgdex.net/v2/{lang}/cards/{card_id.removeprefix('de_')}"
+
+
 def _fetch_card_metadata_from_tcgdex(card_id: str) -> Optional[Dict[str, Any]]:
     """Fetch and cache card metadata from TCGdex API."""
     try:
         import requests
-        lang = "de" if card_id.startswith("de_") else "en"
-        api_card_id = card_id[3:] if card_id.startswith("de_") else card_id
-        resp = requests.get(
-            f"https://api.tcgdex.net/v2/{lang}/cards/{api_card_id}",
-            timeout=10
-        )
+        resp = requests.get(_tcgdex_card_url(card_id), timeout=10)
         if resp.status_code == 200:
             d = resp.json()
             metadata = {

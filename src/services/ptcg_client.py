@@ -19,10 +19,9 @@ def _get_api_key() -> str:
 PTCG_API_BASE = "https://api.pokemontcgapi.com/v1"
 
 # 403 codes that mean the credential was accepted and the plan was
-# not: the key is fine, so a key-shaped diagnosis would be wrong.
-_PLAN_ERROR_CODES = frozenset(
-    {"PLAN_REQUIRED", "TRIAL_EXPIRED", "SUBSCRIPTION_REQUIRED"}
-)
+# not: the key is fine, so a key-shaped diagnosis would be wrong. The
+# docs fold a canceled or suspended subscription into PLAN_REQUIRED.
+_PLAN_ERROR_CODES = frozenset({"PLAN_REQUIRED", "TRIAL_EXPIRED"})
 
 
 class PokemonTCGClient:
@@ -113,17 +112,14 @@ class PokemonTCGClient:
                             "candidates": [],
                             "solution": "verify_email"
                         }
-                    else:
-                        # Plan lapsed — try offline fallback
-                        logger.info(
-                            "PTCG plan/trial not active (%s), falling back to offline matcher",
-                            error_code,
-                        )
-                        return self._identify_offline(image_bytes, top_k, lang=lang)
+                    # Plan lapsed, not a credential problem
+                    logger.info(
+                        "PTCG plan/trial not active (%s), falling back to offline matcher",
+                        error_code,
+                    )
                 else:
-                    # Invalid key — try offline fallback
                     logger.info("Invalid API key, falling back to offline matcher")
-                    return self._identify_offline(image_bytes, top_k, lang=lang)
+                return self._identify_offline(image_bytes, top_k, lang=lang)
             elif resp.status_code == 422 and is_json:
                 return {"error": "Invalid image", "decision": "no_match", "candidates": []}
             elif resp.status_code == 503 and is_json:
