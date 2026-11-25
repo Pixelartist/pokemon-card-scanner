@@ -15,13 +15,20 @@ import json, os, sys, time, urllib.request, hashlib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Configuration
-DATA_DIR = Path("/opt/data/pokemon-card-scanner/data")
+# scripts/ is sys.path[0] when this runs, so the packer that owns the blob
+# format imports directly (same as build_browser_hashes.py).
+from pack_hash_index import write_blob
+
+# Configuration: everything is relative to the checkout this script lives in,
+# so it runs from any working directory (same as build_browser_hashes.py).
+BASE = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE / "data"
+STATIC = BASE / "src" / "static"
 REPO_CARDS_PATH = DATA_DIR / "repo_cards.json"
 REPO_LOCALES_PATH = DATA_DIR / "repo_image_locales.json"
 IMAGE_DIR = DATA_DIR / "images" / "pocket"
-IDS_PATH = Path("/opt/data/pokemon-card-scanner/src/static/card-ids.json")
-META_PATH = Path("/opt/data/pokemon-card-scanner/src/static/cards_meta.json")
+IDS_PATH = STATIC / "card-ids.json"
+META_PATH = STATIC / "cards_meta.json"
 
 # GitHub raw base
 RAW_BASE = "https://raw.githubusercontent.com/marcelpanse/tcg-pocket-collection-tracker/main/frontend/public/images"
@@ -64,8 +71,10 @@ def main():
     with open(REPO_CARDS_PATH) as f:
         repo_cards = json.load(f)
     
-    with open(IDS_PATH) as f:
-        our_ids = set(json.load(f))
+    # The list, not just the set: the packed blob is written in card-ids.json
+    # order, so the packer needs the ordering.
+    our_id_list = json.loads(IDS_PATH.read_text())
+    our_ids = set(our_id_list)
     
     with open(META_PATH) as f:
         our_meta = json.load(f)
@@ -137,11 +146,15 @@ def main():
     
     print(f"Updated {updated} entries in cards_meta.json")
     
-    # Also update card-hashes.json if it exists
-    hashes_path = Path("/opt/data/pokemon-card-scanner/src/static/card-hashes.json")
+    # Re-pack the binary index the browser fetches. New images still need a
+    # hash rebuild, but until then this keeps the blob identical to the hash
+    # file instead of serving older bits.
+    hashes_path = STATIC / "card-hashes.json"
     if hashes_path.exists():
-        with open(hashes_path) as f:
-            hashes = json.load(f)
+        hashes = json.loads(hashes_path.read_text())
+        packed_path = write_blob(hashes, our_id_list, hashes_path.parent)
+        if packed_path:
+            print(f"Repacked {packed_path.name} from card-hashes.json")
         # Note: hash rebuild needed for new images
         print(f"\nNote: {len(hashes)} existing hashes; new images will need hash rebuild")
 

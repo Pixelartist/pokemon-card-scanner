@@ -11,9 +11,10 @@ Two kinds of row share the table:
   ended up (``outcome``, plus ``cloud_ms``/``gate_ms`` when it needed the
   server, which is what tells a local answer from a cloud one).
 * ``startup`` — one per page load: how long the scanner took to become ready,
-  split into module load, JSON transfer, JSON parse, index build and detector
-  model load. This is what separates "slow at scanning" from "slow before the
-  first capture".
+  split into module load, the transfer of the card index (card-ids.json,
+  cards_meta.json and the packed hash blob), the parse of the two JSON bodies,
+  the index build and the detector model load. This is what separates "slow at
+  scanning" from "slow before the first capture".
 
 ``summary()`` groups both by device; ``scripts/scan_metrics_report.py`` prints
 it. Nothing reads these rows at scan time, so this module is storage plus one
@@ -46,7 +47,7 @@ CREATE TABLE IF NOT EXISTS scan_metrics (
     cloud_ms REAL,
     boot_ms REAL,
     modules_ms REAL,
-    json_fetch_ms REAL,
+    index_fetch_ms REAL,
     json_parse_ms REAL,
     index_ms REAL,
     model_ms REAL,
@@ -55,11 +56,16 @@ CREATE TABLE IF NOT EXISTS scan_metrics (
 """
 INDEX = "CREATE INDEX IF NOT EXISTS idx_scan_metrics_created ON scan_metrics(created_at)"
 
+# Columns this table has carried under another name. json_fetch_ms dates from
+# when the transfer stage moved only JSON; it has carried the packed hash blob
+# since, so a database written before this rename still calls it that.
+RENAMED = (("json_fetch_ms", "index_fetch_ms"),)
+
 # Every stage is a duration in milliseconds. A capture sums its stages over the
 # frames of its burst; a startup measures each phase once.
 CAPTURE_STAGES = ("grab_ms", "detect_ms", "crop_ms", "hash_ms", "gate_ms",
                   "cloud_ms", "total_ms")
-STARTUP_STAGES = ("boot_ms", "modules_ms", "json_fetch_ms", "json_parse_ms",
+STARTUP_STAGES = ("boot_ms", "modules_ms", "index_fetch_ms", "json_parse_ms",
                   "index_ms", "model_ms", "total_ms")
 STAGES = tuple(dict.fromkeys(CAPTURE_STAGES + STARTUP_STAGES))  # total_ms is in both
 
@@ -106,19 +112,45 @@ def _declared_columns():
             yield name, ddl
 
 
+def _add_column(conn, column: str, ddl: str) -> None:
+    """Add one column, tolerating another worker adding it first."""
+    try:
+        conn.execute(f"ALTER TABLE scan_metrics ADD COLUMN {column} {ddl}")
+    except sqlite3.OperationalError as exc:
+        # Two workers can migrate the same file at once; losing that race is
+        # success, because the column is there either way.
+        if "duplicate column name" not in str(exc).lower():
+            raise
+
+
+def _rename_column(conn, old: str, new: str) -> None:
+    """Rename a column in place, keeping the rows in it."""
+    conn.execute(f"ALTER TABLE scan_metrics RENAME COLUMN {old} TO {new}")
+
+
 def _migrate(conn) -> None:
-    """Add the columns a database created by an earlier version is missing."""
+    """Bring a database created by an earlier version up to SCHEMA.
+
+    Renamed columns go first, so the rows already measured under the old name
+    survive under the new one; then the columns this version added.
+    """
     present = {row[1] for row in conn.execute("PRAGMA table_info(scan_metrics)")}
-    for column, ddl in _declared_columns():
-        if column in present:
+    for old, new in RENAMED:
+        if old not in present or new in present:
             continue
         try:
-            conn.execute(f"ALTER TABLE scan_metrics ADD COLUMN {column} {ddl}")
-        except sqlite3.OperationalError as exc:
-            # Two workers can migrate the same file at once; losing that race is
-            # success, because the column is there either way.
-            if "duplicate column name" not in str(exc).lower():
-                raise
+            _rename_column(conn, old, new)
+        except sqlite3.OperationalError:
+            # SQLite before 3.25 cannot rename a column. Add the new one and
+            # move the values across instead, leaving the old column unused;
+            # WHERE ... IS NULL makes a second run over the same file harmless.
+            _add_column(conn, new, "REAL")
+            conn.execute(f"UPDATE scan_metrics SET {new} = {old} WHERE {new} IS NULL")
+        present.discard(old)
+        present.add(new)
+    for column, ddl in _declared_columns():
+        if column not in present:
+            _add_column(conn, column, ddl)
 
 
 def _number(payload: Dict[str, Any], field: str, limit: float) -> Optional[float]:

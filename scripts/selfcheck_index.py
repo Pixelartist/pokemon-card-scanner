@@ -1,4 +1,4 @@
-#!/opt/data/pokemon-card-scanner/.venv/bin/python
+#!/usr/bin/env python3
 """Round-trip check: embed a card's own artwork and compare it with its index row.
 
 Each target is the artwork the index itself records for that row, mapped
@@ -12,13 +12,15 @@ rather than passed over. Finding nothing at all is a failure, not a pass.
 """
 import os
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/opt/data/pokemon-card-scanner/src")
+BASE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE / "src"))
 import numpy as np
 
 from services.clip_matcher import get_clip_matcher
 
-DATA = "/opt/data/pokemon-card-scanner/data"
+DATA = str(BASE / "data")
 # url prefix -> directory, as src/api/main.py mounts them
 MOUNTS = (
     ("/static/card_images/", "images"),

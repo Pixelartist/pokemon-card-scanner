@@ -20,7 +20,7 @@ from PIL import Image
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('imgdl')
 
-PROJECT = Path("/opt/data/pokemon-card-scanner")
+PROJECT = Path(__file__).resolve().parent.parent
 OUT_DIR = PROJECT / "data/clip_images"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 MAP_PATH = PROJECT / "data/image_url_map.json"

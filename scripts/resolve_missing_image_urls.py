@@ -13,7 +13,7 @@ from pathlib import Path
 
 import requests
 
-PROJECT = Path("/opt/data/pokemon-card-scanner")
+PROJECT = Path(__file__).resolve().parent.parent
 CACHE = PROJECT / "data/cache/tcgdex"
 CACHE.mkdir(parents=True, exist_ok=True)
 API = "https://api.tcgdex.net/v2"

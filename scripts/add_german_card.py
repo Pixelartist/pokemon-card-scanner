@@ -13,8 +13,9 @@ from pathlib import Path
 import numpy as np
 import requests
 
-sys.path.insert(0, "/opt/data/pokemon-card-scanner/src")
-DB = Path("/opt/data/pokemon-card-scanner/data")
+BASE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE / "src"))
+DB = BASE / "data"
 INDEX_PATH = DB / "clip_card_index.json"
 EMB_PATH = DB / "clip_embeddings.npz"
 DE_IMG_DIR = DB / "german_cards" / "images"

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -105,7 +106,7 @@ class ScanMetrics(unittest.TestCase):
         scan_metrics.record(self.db, {
             "kind": "startup", "device": "iPad · iOS", "device_class": "tablet",
             "browser": "Safari 17", "outcome": "ready",
-            "boot_ms": 900, "modules_ms": 120, "json_fetch_ms": 1500,
+            "boot_ms": 900, "modules_ms": 120, "index_fetch_ms": 1500,
             "json_parse_ms": 620, "index_ms": 380, "model_ms": 2100,
             "total_ms": 5600, "bytes": 12 * 1024 * 1024,
         })
@@ -128,6 +129,59 @@ class ScanMetrics(unittest.TestCase):
         self.assertEqual(startup["bytes_p50"], float(12 * 1024 * 1024))
         self.assertNotIn("detect_ms", startup["stages"])
         self.assertEqual(data["slowest_startups"][0]["total_ms"], 5600.0)
+
+    def test_the_renamed_transfer_column_keeps_its_rows(self):
+        # A database written before the rename calls the transfer json_fetch_ms.
+        # Renaming has to carry the rows already measured under that name.
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "CREATE TABLE scan_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, kind TEXT,"
+            " device TEXT, json_fetch_ms REAL, total_ms REAL)"
+        )
+        conn.execute("INSERT INTO scan_metrics (kind, device, json_fetch_ms, total_ms)"
+                     " VALUES ('startup', 'iPad · iOS', 1500, 5600)")
+        conn.commit()
+        conn.close()
+
+        self.row(kind="startup", device="iPad · iOS", index_fetch_ms=900, total_ms=5600)
+        conn = sqlite3.connect(self.db)
+        conn.row_factory = sqlite3.Row
+        try:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(scan_metrics)")}
+            old_row = conn.execute(
+                "SELECT index_fetch_ms FROM scan_metrics WHERE id = 1").fetchone()
+        finally:
+            conn.close()
+        self.assertNotIn("json_fetch_ms", columns)
+        self.assertEqual(old_row["index_fetch_ms"], 1500.0)
+
+    def test_a_rename_survives_sqlite_that_cannot_rename(self):
+        # SQLite before 3.25 has no RENAME COLUMN; the fallback has to copy the
+        # values rather than fail, or telemetry breaks on that host.
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "CREATE TABLE scan_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, kind TEXT,"
+            " json_fetch_ms REAL)"
+        )
+        conn.execute("INSERT INTO scan_metrics (kind, json_fetch_ms)"
+                     " VALUES ('startup', 1500)")
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(scan_metrics, "_rename_column",
+                               side_effect=sqlite3.OperationalError('near "COLUMN": syntax error')):
+            row = self.row(kind="startup", index_fetch_ms=900)
+
+        self.assertEqual(row["index_fetch_ms"], 900.0)
+        conn = sqlite3.connect(self.db)
+        try:
+            copied = conn.execute(
+                "SELECT index_fetch_ms FROM scan_metrics WHERE id = 1").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(copied, 1500.0)
 
     def test_a_kind_it_does_not_know_is_a_capture(self):
         self.assertEqual(self.row(kind="nonsense", total_ms=10)["kind"], "capture")

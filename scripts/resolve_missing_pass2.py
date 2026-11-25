@@ -8,15 +8,18 @@ Sources, in order:
 Appends to data/image_url_map.json.
 """
 import json
+import os
 import re
 import time
 import urllib.request
 from pathlib import Path
 
-PROJECT = Path("/opt/data/pokemon-card-scanner")
+PROJECT = Path(__file__).resolve().parent.parent
 CACHE = PROJECT / "data/cache/tcgdex"
 API = "https://api.tcgdex.net/v2"
-PTCG_ROOT = Path("/opt/data/cache/scratch/PTCG-database/data_jp")
+# The Japanese scans it reads live outside any checkout; point PTCG_JP_ROOT at
+# them when they are somewhere else.
+PTCG_ROOT = Path(os.environ.get("PTCG_JP_ROOT", "/opt/data/cache/scratch/PTCG-database/data_jp"))
 
 import glob
 

@@ -9,7 +9,8 @@ import urllib.request
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-DATA_DIR = Path('/opt/data/pokemon-card-scanner/data')
+BASE = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE / 'data'
 REPO_CARDS_PATH = DATA_DIR / 'repo_cards.json'
 IMAGE_DIR = DATA_DIR / 'images' / 'pocket' / 'en-US'
 RAW_BASE = "https://raw.githubusercontent.com/marcelpanse/tcg-pocket-collection-tracker/main/frontend/public/images"

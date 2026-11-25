@@ -1,14 +1,23 @@
-#!/opt/data/projects/finn-house-scraper/.venv/bin/python
-"""Debug: test hash matching with proper image loading."""
+#!/usr/bin/env python3
+"""Debug: test hash matching with proper image loading.
+
+The `stored`/`exact` fields only mean anything when the page fell back to
+card-hashes.json: the packed blob (card-hashes.bin) keeps no hash strings, so
+`stored` reads 'missing' and the comparison is false in the normal case.
+"""
 import json
+import os
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-CHROME = "/opt/data/playwright/chromium-1234/chrome-linux64/chrome"
+# Playwright's own Chromium is the default. Set CHROME_PATH only to pin a
+# different binary (a system Chrome, or a browser dir Playwright does not manage).
+CHROME = os.environ.get("CHROME_PATH") or None
 PAGE = "http://localhost:5005/"
 
 with sync_playwright() as p:
+    # executable_path=None is Playwright's default browser.
     b = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
     page = b.new_page()
     page.goto(PAGE, wait_until="load")
@@ -18,7 +27,7 @@ with sync_playwright() as p:
     # Test with proper async loading
     result = page.evaluate("""() => {
         const m = window.__cardScanner.matcher;
-        const storedHash = m.cardHashes.get('xy1-1') ? m.cardHashes.get('xy1-1').hash : 'missing';
+        const storedHash = (m.cardHashes.get('xy1-1') || {}).hash || 'missing';
         
         return new Promise((resolve) => {
             const img = new Image();
@@ -42,7 +51,7 @@ with sync_playwright() as p:
     # Test xy1-1
     result2 = page.evaluate("""() => {
         const m = window.__cardScanner.matcher;
-        const storedHash = m.cardHashes.get('xy1-1') ? m.cardHashes.get('xy1-1').hash : 'missing';
+        const storedHash = (m.cardHashes.get('xy1-1') || {}).hash || 'missing';
         
         return new Promise((resolve) => {
             const img = new Image();

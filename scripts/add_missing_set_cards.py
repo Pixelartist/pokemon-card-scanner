@@ -5,7 +5,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-PROJECT = Path("/opt/data/pokemon-card-scanner")
+PROJECT = Path(__file__).resolve().parent.parent
 CACHE = PROJECT / "data/cache/tcgdex"
 DB = PROJECT / "data/pokemon_cards.db"
 

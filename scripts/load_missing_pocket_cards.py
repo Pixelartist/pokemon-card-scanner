@@ -5,10 +5,12 @@ import json
 import sqlite3
 import time
 from collections import defaultdict
+from pathlib import Path
 
-DB_PATH = '/opt/data/pokemon-card-scanner/data/pokemon_cards.db'
-REPO_PATH = '/opt/data/pokemon-card-scanner/data/repo_cards.json'
-MISSING_PATH = '/opt/data/pokemon-card-scanner/data/missing_from_db.json'
+BASE = Path(__file__).resolve().parent.parent
+DB_PATH = BASE / 'data' / 'pokemon_cards.db'
+REPO_PATH = BASE / 'data' / 'repo_cards.json'
+MISSING_PATH = BASE / 'data' / 'missing_from_db.json'
 POCKET_IMG_BASE = 'http://localhost:5005/static/pocket/en-US'
 
 

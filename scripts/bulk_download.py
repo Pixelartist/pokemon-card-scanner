@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Paths
-PROJECT_DIR = Path("/opt/data/pokemon-card-scanner")
+PROJECT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_DIR / "data"
 INDEX_PATH = DATA_DIR / "clip_card_index.json"
 PROGRESS_PATH = DATA_DIR / "bulk_download_progress.json"

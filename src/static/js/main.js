@@ -614,29 +614,32 @@ window.__cardScanner = {
         startup.modules_ms = performance.now() - tModules;
         this.detector = new detMod.PokemonCardDetector();
         this.matcher = new hashMod.PerceptualHashMatcher();
-        // Transfer and parse are timed apart: over a LAN the download can be
-        // quick while JSON.parse of ~12 MB blocks the main thread for hundreds
-        // of ms on a tablet, and only one of those is worth optimising.
+        // Transfer and parse are timed apart: over a LAN the download of the
+        // index can be quick while JSON.parse of the two metadata bodies blocks
+        // the main thread for hundreds of ms on a tablet; only one is worth fixing.
         const tFetch = performance.now();
-        const [idsRes, metaRes, hashesRes] = await Promise.all([
+        const [idsRes, metaRes, packedRes] = await Promise.all([
           fetch('/static/card-ids.json'),
           fetch('/static/cards_meta.json'),
-          // The hash index stays optional: without it the scanner still detects
-          // and crops, and the capture falls through to the cloud.
-          fetch('/static/card-hashes.json').catch(() => null),
+          // The hash index as one binary blob, packed by scripts/
+          // pack_hash_index.py. It stays optional: without it the scanner still
+          // detects and crops, the capture falls through to the cloud, and the
+          // JSON index is read instead.
+          fetch('/static/card-hashes.bin').catch(() => null),
         ]);
-        const [idsBody, metaBody, hashesBody] = await Promise.all([
-          idsRes.text(), metaRes.text(), hashesRes ? hashesRes.text() : '',
-        ]);
-        startup.json_fetch_ms = performance.now() - tFetch;
-        startup.bytes = [idsRes, metaRes, hashesRes].reduce(
-          (n, res) => n + (res ? (Number(res.headers.get('content-length')) || 0) : 0), 0)
-          || [idsBody, metaBody, hashesBody].reduce((n, body) => n + body.length, 0);
+        const [idsBody, metaBody] = await Promise.all([idsRes.text(), metaRes.text()]);
+        const packedBody = packedRes && packedRes.ok ? await packedRes.arrayBuffer() : null;
+        startup.index_fetch_ms = performance.now() - tFetch;
+        // Per response, not one sum with an all-or-nothing fallback: the static
+        // server sends Content-Length, and a single response without it used to
+        // undercount the others instead of falling back just for itself.
+        const sizeOf = (res, fallback) => Number(res && res.headers.get('content-length')) || fallback;
+        startup.bytes = sizeOf(idsRes, idsBody.length)
+          + sizeOf(metaRes, metaBody.length)
+          + sizeOf(packedRes, packedBody ? packedBody.byteLength : 0);
         const tParse = performance.now();
         const ids = JSON.parse(idsBody);
         const meta = JSON.parse(metaBody);
-        let hashes = {};
-        try { hashes = JSON.parse(hashesBody); } catch (e) { hashes = {}; }
         startup.json_parse_ms = performance.now() - tParse;
         // Hydrate by id, not by array position: card-ids.json and
         // cards_meta.json are the same length but not in the same order (and
@@ -662,7 +665,24 @@ window.__cardScanner = {
             return byKey.get(id) || byKey.get(k) ||
                 (k.startsWith("de_") ? byKey.get(k.slice(3)) : undefined);
         };
-        const entries = ids.map((id) => {
+        let packedCards = 0;
+        if (packedBody) {
+          try { packedCards = this.matcher.loadPackedIndex(packedBody); }
+          catch (e) { console.warn('[Scanner] packed hash index unusable, reading the JSON index:', e); }
+        }
+        // Only the fallback has to read and pack 40k hash strings; the blob
+        // already carries the words and the ids in the same order.
+        let hashes = null;
+        if (!packedCards) {
+          const res = await fetch('/static/card-hashes.json').catch(() => null);
+          const body = res && res.ok ? await res.text().catch(() => '') : '';
+          // The fallback's 4.9 MB belongs in the same total: summing before this
+          // fetch made exactly the runs without a usable blob look 4.9 MB lighter.
+          startup.bytes += sizeOf(res, body.length);
+          try { hashes = body ? JSON.parse(body) : {}; }
+          catch (e) { hashes = {}; }
+        }
+        this.matcher.loadIndex(ids.map((id) => {
           const m = lookup(id);
           return {
           id,
@@ -671,10 +691,9 @@ window.__cardScanner = {
           number: m?.number,
           rarity: m?.rarity,
           image: m?.image,
-          hash: hashes[id] || null,
+          hash: hashes ? (hashes[id] || null) : null,
         };
-        });
-        this.matcher.loadIndex(entries);
+        }));
         startup.index_ms = performance.now() - tIndex;
         const tModel = performance.now();
         await this.detector.loadModel();

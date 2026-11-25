@@ -4,8 +4,9 @@
 Two sections, because they answer two different questions:
 
 * capturing — one row per scan: grab, detect, crop, hash, server gate, cloud.
-* startup   — one row per page load: modules, JSON transfer, JSON parse, index
-  build, detector model load, and the total time to scanner-ready.
+* startup   — one row per page load: modules, index transfer (JSON metadata
+  and the binary hash index), JSON parse, index build, detector model load, and
+  the total time to scanner-ready.
 
 Both are grouped per device, because that is the comparison that matters: the
 same pipeline takes very different times on a tablet with single-threaded WASM
@@ -42,7 +43,7 @@ CAPTURE_COLUMNS = (
 STARTUP_COLUMNS = (
     ("boot_ms", "boot"),
     ("modules_ms", "mods"),
-    ("json_fetch_ms", "json"),
+    ("index_fetch_ms", "fetch"),
     ("json_parse_ms", "parse"),
     ("index_ms", "index"),
     ("model_ms", "model"),
@@ -148,7 +149,7 @@ def main():
             for row in slowest:
                 print(f"  {row['created_at']}  {row['total_ms']:>7.0f} ms to ready  "
                       f"{row['device_class']}/{row['device']} {row['browser']}  "
-                      f"(modules {ms(row['modules_ms'])}, json {ms(row['json_fetch_ms'])}, "
+                      f"(modules {ms(row['modules_ms'])}, fetch {ms(row['index_fetch_ms'])}, "
                       f"parse {ms(row['json_parse_ms'])}, index {ms(row['index_ms'])}, "
                       f"model {ms(row['model_ms'])})")
     else:

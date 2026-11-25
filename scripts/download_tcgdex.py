@@ -18,7 +18,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-DATA_DIR = Path("/opt/data/pokemon-card-scanner/data")
+BASE = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE / "data"
 CARD_CATALOG_PATH = DATA_DIR / "card_catalog.json"
 IMAGE_DIR = DATA_DIR / "images"
 TCGDEX_DIR = IMAGE_DIR / "tcgdex"

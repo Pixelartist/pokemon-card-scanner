@@ -1,8 +1,8 @@
-#!/opt/data/projects/finn-house-scraper/.venv/bin/python
+#!/usr/bin/env python3
 """Load de_* German cards from cards_meta.json into the SQLite DB."""
 import json, sqlite3, os
 
-ROOT = '/opt/data/pokemon-card-scanner'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = os.path.join(ROOT, 'data', 'pokemon_cards.db')
 META = os.path.join(ROOT, 'src', 'static', 'cards_meta.json')
 

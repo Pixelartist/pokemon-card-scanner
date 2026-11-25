@@ -1,4 +1,4 @@
-#!/opt/data/pokemon-card-scanner/.venv/bin/python
+#!/usr/bin/env python3
 """Fill missing card images from TCGdex assets (en).
 
 Covers vintage/intl sets our DB never got images for: base*, gym*, neo*,
@@ -13,7 +13,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import requests
 
-ROOT = Path('/opt/data/pokemon-card-scanner')
+ROOT = Path(__file__).resolve().parent.parent
 IMG_DIR = ROOT / 'data' / 'images' / 'tcgdex' / 'en'
 DB = ROOT / 'data' / 'pokemon_cards.db'
 API = 'https://api.tcgdex.net/v2/en/sets/{}'

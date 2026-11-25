@@ -24,7 +24,7 @@ os.dup2(log_fd, 2)
 devnull = os.open(os.devnull, os.O_RDONLY)
 os.dup2(devnull, 0)
 
-os.execv(
-    "/opt/data/pokemon-card-scanner/.venv/bin/python",
-    ["/opt/data/pokemon-card-scanner/.venv/bin/python", "/opt/data/pokemon-card-scanner/daemon.py"],
-)
+# Run the daemon with the interpreter that started this launcher, from the
+# checkout this script lives in.
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.execv(sys.executable, [sys.executable, os.path.join(BASE, "daemon.py")])

@@ -1,4 +1,4 @@
-#!/opt/data/projects/finn-house-scraper/.venv/bin/python
+#!/usr/bin/env python3
 """Build card hashes in the browser to match the scanner exactly.
 
 The scanner hashes images with Chromium's canvas resampling, which differs
@@ -7,14 +7,21 @@ Uses each card's `image` URL from cards_meta.json (English official sets +
 German index + clip images; cards without an image URL are skipped).
 
 Output: src/static/card-hashes.json  (id -> 105-bit hash string)
+        src/static/card-hashes.bin   (the same hashes packed for the browser;
+                                      see scripts/pack_hash_index.py)
 """
 import json
+import os
 import time
 from pathlib import Path
 
+from pack_hash_index import write_blob
 from playwright.sync_api import sync_playwright
 
-CHROME = "/opt/data/playwright/chromium-1234/chrome-linux64/chrome"
+# Playwright's own Chromium is the default, so this runs from a checkout with
+# only `playwright install chromium` behind it. Set CHROME_PATH only to pin a
+# different binary (a system Chrome, or a browser dir Playwright does not manage).
+CHROME = os.environ.get("CHROME_PATH") or None
 BASE = Path(__file__).resolve().parent.parent
 OUT = BASE / "src" / "static" / "card-hashes.json"
 PARTIAL = BASE / "data" / "card-hashes.partial.json"
@@ -165,6 +172,7 @@ todo = [(i, u) for i in ids if (u := resolve(i))]
 print(f"{len(ids)} card ids, {len(todo)} with an image file on disk")
 
 with sync_playwright() as p:
+    # executable_path=None is Playwright's default browser.
     b = p.chromium.launch(executable_path=CHROME, args=["--no-sandbox"])
     page = b.new_page()
     page.set_default_navigation_timeout(120000)
@@ -272,5 +280,10 @@ if bad:
     print(f"dropped {len(bad)} ids whose image failed to load (not written to index)")
 
 OUT.write_text(json.dumps(hashes))
+# The blob the browser actually fetches: the same bits, already packed, so a
+# page load pays one transfer instead of a 4.9 MB parse and 4.2M bit tests.
+PACKED = write_blob(hashes, ids, OUT.parent)
+if PACKED:
+    print(f"packed {PACKED.stat().st_size / 1048576:.2f} MB -> {PACKED}")
 PARTIAL.unlink(missing_ok=True)
 print(f"Done: {len(hashes)} hashes -> {OUT}")

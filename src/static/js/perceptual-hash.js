@@ -21,25 +21,34 @@ export class PerceptualHashMatcher {
 
   /**
    * Load the card index with precomputed hashes
+   *
+   * A card may carry `hash: null` when loadPackedIndex() already supplied the
+   * hashes: its metadata is kept so match results can name the card, and
+   * nothing is packed from strings.
    * @param {Array} cards - Array of { id, name, set, number, rarity, image, hash }
    */
   loadIndex(cards) {
     this.cardHashes.clear();
+    let hashed = 0;
     for (const card of cards) {
-      if (card.hash) {
-        this.cardHashes.set(card.id, {
-          hash: card.hash,
-          name: card.name,
-          set: card.set,
-          number: card.number,
-          rarity: card.rarity,
-          image: card.image,
-        });
-      }
+      this.cardHashes.set(card.id, {
+        hash: card.hash || null,
+        name: card.name,
+        set: card.set,
+        number: card.number,
+        rarity: card.rarity,
+        image: card.image,
+      });
+      if (card.hash) hashed += 1;
     }
     this.indexLoaded = true;
-    this._buildPackedIndex();
-    console.log(`[PerceptualHash] Loaded ${this.cardHashes.size} card hashes`);
+    // A blob index arrives through loadPackedIndex(), which main.js calls
+    // first, so this call usually carries no hashes at all, and packing then
+    // would replace the blob's words with an empty index: the guard is
+    // load-order protection, not an optimisation. Building from strings is
+    // what a page served without card-hashes.bin still does.
+    if (hashed) this._buildPackedIndex();
+    console.log(`[PerceptualHash] Loaded ${this.cardHashes.size} cards, ${hashed} hashes`);
   }
 
   /**
@@ -51,11 +60,15 @@ export class PerceptualHashMatcher {
    * length difference to the count, and that must not silently change.
    */
   _buildPackedIndex() {
-    const count = this.cardHashes.size;
+    let count = 0;
     let hashLength = 0;
     for (const card of this.cardHashes.values()) {
-      hashLength = card.hash.length;
-      break;
+      if (!card.hash) continue;
+      // The longest hash sizes the words, the rule pack_hash_index.py applies;
+      // the first card's length would truncate a longer hash and stop a JSON
+      // build matching the blob bit for bit.
+      if (card.hash.length > hashLength) hashLength = card.hash.length;
+      count += 1;
     }
     const words = Math.max(1, Math.ceil(hashLength / 32));
     const packed = new Uint32Array(count * words);
@@ -63,6 +76,7 @@ export class PerceptualHashMatcher {
     const lens = new Uint16Array(count);
     let i = 0;
     for (const [id, card] of this.cardHashes) {
+      if (!card.hash) continue;
       const hash = card.hash;
       const row = i * words;
       const bits = Math.min(hash.length, words * 32);
@@ -77,6 +91,41 @@ export class PerceptualHashMatcher {
     this._packedIds = ids;
     this._packedLens = lens;
     this._words = words;
+  }
+
+  /**
+   * Load the packed index the build step ships (card-hashes.bin). The format
+   * is defined, and only defined, in scripts/pack_hash_index.py.
+   *
+   * These are the same words _buildPackedIndex() derives from 40k hash
+   * strings, already packed: four typed-array views over the fetched bytes, no
+   * per-bit work and no strings to keep alive. Returns the number of cards so
+   * a caller can fall back to the JSON index when this throws.
+   */
+  loadPackedIndex(buffer) {
+    const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 4));
+    if (magic !== 'PHX1') throw new Error(`packed hash index: bad magic ${magic}`);
+    const view = new DataView(buffer);
+    const count = view.getUint32(4, true);
+    const words = view.getUint32(8, true);
+    const bits = view.getUint32(12, true);
+    if (words !== Math.max(1, Math.ceil(bits / 32))) {
+      throw new Error(`packed hash index: ${words} words for ${bits} bits`);
+    }
+    let offset = 16;
+    const packed = new Uint32Array(buffer, offset, count * words);
+    offset += count * words * 4;
+    const lens = new Uint16Array(buffer, offset, count);
+    offset += count * 2;
+    const ids = new TextDecoder().decode(new Uint8Array(buffer, offset)).split('\n');
+    if (ids.length !== count) {
+      throw new Error(`packed hash index: ${ids.length} ids for ${count} cards`);
+    }
+    this._packed = packed;
+    this._packedIds = ids;
+    this._packedLens = lens;
+    this._words = words;
+    return count;
   }
 
   /**
