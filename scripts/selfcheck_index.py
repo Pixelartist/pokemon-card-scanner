@@ -10,7 +10,6 @@ One target is taken from the first, middle and last third of the rows so a
 rotation anywhere shows up, and a third with no artwork in reach is reported
 rather than passed over. Finding nothing at all is a failure, not a pass.
 """
-import os
 import sys
 from pathlib import Path
 
@@ -20,7 +19,7 @@ import numpy as np
 
 from services.clip_matcher import get_clip_matcher
 
-DATA = str(BASE / "data")
+DATA = BASE / "data"
 # url prefix -> directory, as src/api/main.py mounts them
 MOUNTS = (
     ("/static/card_images/", "images"),
@@ -35,8 +34,8 @@ def image_path(url):
     """The file behind a served card image URL, or None when there is none."""
     for prefix, sub in MOUNTS:
         if url and url.startswith(prefix):
-            path = os.path.join(DATA, sub, url[len(prefix):])
-            return path if os.path.isfile(path) else None
+            path = DATA / sub / url[len(prefix):]
+            return path if path.is_file() else None
     return None
 
 

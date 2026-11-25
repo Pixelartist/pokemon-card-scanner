@@ -11,7 +11,7 @@ Strategy:
 Images available per locale:
   en-US: 4317, fr-FR: 2488, de-DE: 2196, es-ES: 1778, it-IT: 1778, pt-BR: 1778
 """
-import json, os, sys, time, urllib.request, hashlib
+import json, urllib.request
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 

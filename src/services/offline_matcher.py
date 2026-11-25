@@ -21,7 +21,7 @@ import requests
 from dotenv import load_dotenv
 
 # Load .env from project root
-load_dotenv('/opt/data/pokemon-card-scanner/.env')
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 logger = logging.getLogger(__name__)
 

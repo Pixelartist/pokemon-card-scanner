@@ -8,7 +8,7 @@ Japanese-only vintage (PMCG/E/VS/web/PCG/ADV) have no TCGdex scans — skipped.
 Writes to data/images/tcgdex/en/{ptcg_id}.webp, URL /static/card_images/tcgdex/en/{ptcg_id}.webp.
 Overrides existing images so we can replace placeholder/german with TCGdex webps.
 """
-import json, sqlite3, sys, time
+import json, sqlite3, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import requests

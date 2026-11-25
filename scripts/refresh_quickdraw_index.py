@@ -7,8 +7,8 @@ fallback swapped for the German scan) the stale row has to be recomputed, or the
 scanner keeps comparing photos against artwork it no longer serves.
 
 This mirrors QuickdrawMatcher.build() exactly (same ART_CROPS["standard"]
-region, same int8 layout) — scripts/rebuild_index.py fingerprints the full frame
-instead, which produces rows the matcher was not built around.
+region, same int8 layout) — the older rebuild scripts fingerprinted the full
+frame instead, which produces rows the matcher was not built around.
 
   python scripts/refresh_quickdraw_index.py --manifest data/german_art_sources.json
   python scripts/refresh_quickdraw_index.py --all

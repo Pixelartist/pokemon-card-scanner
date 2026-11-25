@@ -11,7 +11,7 @@ from PIL import Image
 import requests
 from dotenv import load_dotenv
 
-load_dotenv('/opt/data/pokemon-card-scanner/.env')
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 logger = logging.getLogger(__name__)
 

@@ -7,6 +7,7 @@ Sources, in order:
      (XY01 -> 1, BW01 -> 1, SV001 -> 1, ...)
 Appends to data/image_url_map.json.
 """
+import glob
 import json
 import os
 import re
@@ -21,7 +22,6 @@ API = "https://api.tcgdex.net/v2"
 # them when they are somewhere else.
 PTCG_ROOT = Path(os.environ.get("PTCG_JP_ROOT", "/opt/data/cache/scratch/PTCG-database/data_jp"))
 
-import glob
 
 def norm_num(n):
     n = re.sub(r'/(SET|UC|GR|R|U)\b.*', '', str(n).strip())

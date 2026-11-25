@@ -2,8 +2,6 @@
 """Bulk card downloader for offline CLIP matcher.
 Downloads card images from pokemontcg.io CDN and extracts features.
 """
-import os
-import sys
 import json
 import time
 import logging

@@ -2,8 +2,6 @@
 """Download missing TCG Pocket images from the repo."""
 
 import json
-import os
-import sys
 import time
 import urllib.request
 from pathlib import Path

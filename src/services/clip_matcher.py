@@ -25,7 +25,7 @@ from PIL import Image
 from io import BytesIO
 from dotenv import load_dotenv
 
-load_dotenv('/opt/data/pokemon-card-scanner/.env')
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 try:  # the app imports this module as services.clip_matcher
     from services.misread_training import load_confusers

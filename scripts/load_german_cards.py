@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Load de_* German cards from cards_meta.json into the SQLite DB."""
-import json, sqlite3, os
+import json, sqlite3
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB = os.path.join(ROOT, 'data', 'pokemon_cards.db')
-META = os.path.join(ROOT, 'src', 'static', 'cards_meta.json')
+# Everything is relative to the checkout this script lives in.
+ROOT = Path(__file__).resolve().parent.parent
+DB = ROOT / 'data' / 'pokemon_cards.db'
+META = ROOT / 'src' / 'static' / 'cards_meta.json'
 
 with open(META) as f:
     meta = json.load(f)
