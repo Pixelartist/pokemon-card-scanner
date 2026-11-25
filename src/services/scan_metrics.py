@@ -229,7 +229,6 @@ def _group(rows: List[sqlite3.Row], stages) -> List[Dict[str, Any]]:
                 "cores": [],
                 "memory": [],
                 "bytes": [],
-                "last_seen": None,
             }
         group["rows"] += 1
         outcome = row["outcome"] or "unknown"
@@ -242,8 +241,6 @@ def _group(rows: List[sqlite3.Row], stages) -> List[Dict[str, Any]]:
                                ("bytes", "bytes")):
             if row[column] is not None:
                 group[bucket].append(float(row[column]))
-        if not group["last_seen"] or (row["created_at"] or "") > group["last_seen"]:
-            group["last_seen"] = row["created_at"]
 
     devices = []
     for (device_class, device, browser), group in groups.items():
@@ -252,7 +249,6 @@ def _group(rows: List[sqlite3.Row], stages) -> List[Dict[str, Any]]:
             "device": device,
             "browser": browser,
             "rows": group["rows"],
-            "last_seen": group["last_seen"],
             "outcomes": dict(sorted(group["outcomes"].items(), key=lambda kv: -kv[1])),
             "cores_p50": _percentile(group["cores"], 50),
             "memory_p50": _percentile(group["memory"], 50),
@@ -271,7 +267,7 @@ def _group(rows: List[sqlite3.Row], stages) -> List[Dict[str, Any]]:
     return devices
 
 
-def _slowest(rows: List[sqlite3.Row], stages, limit: int = 10) -> List[Dict[str, Any]]:
+def _slowest(rows: List[sqlite3.Row], stages, limit: int = 5) -> List[Dict[str, Any]]:
     return [
         {
             "id": row["id"], "created_at": row["created_at"],

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Report the timings the browser scanner posts to /api/scan-metrics.
 
-Two tables, because they answer two different questions:
+Two sections, because they answer two different questions:
 
 * capturing — one row per scan: grab, detect, crop, hash, server gate, cloud.
 * startup   — one row per page load: modules, JSON transfer, JSON parse, index
@@ -68,43 +68,36 @@ def hardware(device):
     return " · ".join(parts)
 
 
-def table(devices, columns, with_bytes=False):
-    header = f"{'device':<34}{'browser':<14}{'n':>5}"
-    if with_bytes:
-        header += f"{'load':>9}"
-    header += "".join(f"{label:>8}" for _, label in columns)
-    print(header)
-    print("-" * len(header))
+def report(devices, columns, with_bytes=False):
+    """One block per device: who it is, then median [p90] per stage.
+
+    A block per device rather than one wide table, because the question is
+    always "which device, and in which stage": this keeps the name, the
+    hardware, the stages and the outcomes together. The medians used to be
+    printed twice, once as a table and once as a per-device line.
+    """
     for device in devices:
         label = f"{device['device_class']} · {device['device']}"
-        row = f"{label[:33]:<34}{device['browser'][:13]:<14}{device['rows']:>5}"
-        if with_bytes:
-            row += f"{mb(device['bytes_p50']):>9}"
-        for stage, _ in columns:
-            row += f"{ms(device['stages'][stage]['p50']):>8}"
-        print(row)
-
-
-def breakdown(devices, columns):
-    for device in devices:
-        label = f"{device['device_class']} · {device['device']} · {device['browser']}"
+        line = f"{label[:32]:<34}{device['browser'][:13]:<14}{device['rows']:>4} rows"
         hw = hardware(device)
+        if hw:
+            line += f"   {hw}"
+        if with_bytes and device["bytes_p50"]:
+            line += f"   {mb(device['bytes_p50'])}"
+        print(line)
         parts = []
         for stage, name in columns:
             stats = device["stages"][stage]
-            if stats["p50"] is None:
-                continue
-            parts.append(f"{name} {ms(stats['p50'])} [{ms(stats['p90'])}]")
+            if stats["p50"] is not None:
+                parts.append(f"{name} {ms(stats['p50'])} [{ms(stats['p90'])}]")
+        print("  " + "  ".join(parts))
         outcomes = ", ".join(f"{key} {count}" for key, count in device["outcomes"].items())
-        print(f"  {label}" + (f"  ({hw})" if hw else ""))
-        print(f"    {'  '.join(parts)}")
-        print(f"    outcomes: {outcomes}")
+        print(f"  outcomes: {outcomes}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Report browser capture and startup timings.")
     parser.add_argument("--days", type=int, default=7, help="window in days (default: 7)")
-    parser.add_argument("--limit", type=int, default=20000, help="rows to read (default: 20000)")
     parser.add_argument("--db", default=os.environ.get("DATA_DIR", str(ROOT / "data")))
     parser.add_argument("--json", action="store_true", help="print the raw summary as JSON")
     args = parser.parse_args()
@@ -116,7 +109,7 @@ def main():
         print(f"No database at {db_path}.")
         return 1
 
-    data = scan_metrics.summary(str(db_path), days=args.days, limit=args.limit)
+    data = scan_metrics.summary(str(db_path), days=args.days)
     if args.json:
         print(json.dumps(data, indent=2))
         return 0
@@ -129,14 +122,13 @@ def main():
         return 0
 
     if data["captures"]:
-        table(data["devices"], CAPTURE_COLUMNS)
-        print("\nCapturing - median ms per stage, p90 in brackets")
-        breakdown(data["devices"], CAPTURE_COLUMNS)
+        print("Capturing - median ms per stage, p90 in brackets")
+        report(data["devices"], CAPTURE_COLUMNS)
 
         slowest = [row for row in data["slowest"] if row["total_ms"]]
         if slowest:
             print("\nSlowest captures:")
-            for row in slowest[:5]:
+            for row in slowest:
                 print(f"  {row['created_at']}  {row['total_ms']:>7.0f} ms  "
                       f"{row['device_class']}/{row['device']} {row['browser']}  "
                       f"{row['video'] or '-'}, {row['frames'] or '?'} frames  "
@@ -147,15 +139,13 @@ def main():
         print("No captures in the window.\n")
 
     if data["startup_devices"]:
-        print("\nLoading the scanner - median ms to ready")
-        table(data["startup_devices"], STARTUP_COLUMNS, with_bytes=True)
-        print()
-        breakdown(data["startup_devices"], STARTUP_COLUMNS)
+        print("\nLoading the scanner - median ms per stage, p90 in brackets")
+        report(data["startup_devices"], STARTUP_COLUMNS, with_bytes=True)
 
         slowest = [row for row in data["slowest_startups"] if row["total_ms"]]
         if slowest:
             print("\nSlowest page loads:")
-            for row in slowest[:5]:
+            for row in slowest:
                 print(f"  {row['created_at']}  {row['total_ms']:>7.0f} ms to ready  "
                       f"{row['device_class']}/{row['device']} {row['browser']}  "
                       f"(modules {ms(row['modules_ms'])}, json {ms(row['json_fetch_ms'])}, "

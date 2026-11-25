@@ -47,8 +47,8 @@ export class PerceptualHashMatcher {
    *
    * 105 bits is four words, so a comparison is four XOR+popcounts against
    * integers instead of 105 one-character string reads. The per-card hash
-   * length is kept as well: calculateHammingDistance() used to add the length
-   * difference to the count, and that must not silently change.
+   * length is kept as well: the string comparison this replaces added the
+   * length difference to the count, and that must not silently change.
    */
   _buildPackedIndex() {
     const count = this.cardHashes.size;
@@ -216,18 +216,6 @@ export class PerceptualHashMatcher {
     }
 
     return result;
-  }
-
-  calculateHammingDistance(hash1, hash2) {
-    let distance = 0;
-    const minLength = Math.min(hash1.length, hash2.length);
-
-    for (let i = 0; i < minLength; i++) {
-      if (hash1[i] !== hash2[i]) distance++;
-    }
-
-    distance += Math.abs(hash1.length - hash2.length);
-    return distance;
   }
 
   /**
