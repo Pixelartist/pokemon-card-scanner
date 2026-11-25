@@ -66,3 +66,15 @@ jobs:
             if curl -sf http://localhost:5005/health; then echo; echo SMOKE_OK; break; fi
             if [ "$i" = 24 ]; then docker logs smoke; exit 1; fi
           done
+          # /health only proves the process answers. One published image had
+          # main.py calling a matcher method that image did not contain, so
+          # /api/status answered 500 while /health stayed 200 and the build
+          # went green; the container on the NAS then crashed on that route.
+          # Ask the endpoint that touches the app's own wiring, not just the
+          # one that touches it.
+          if ! curl -sf http://localhost:5005/api/status; then
+            echo "SMOKE_FAIL: /api/status did not answer"
+            docker logs smoke
+            exit 1
+          fi
+          echo; echo SMOKE_STATUS_OK
