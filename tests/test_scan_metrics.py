@@ -65,6 +65,32 @@ class ScanMetrics(unittest.TestCase):
         self.assertEqual(len(row["device"]), 120)
         self.assertEqual(len(row["user_agent"]), 400)
 
+    def test_the_hash_gate_decision_is_kept_with_the_capture(self):
+        row = self.row(top_sim=88.57, lead=3.81, gate_used=0)
+        self.assertEqual(row["top_sim"], 88.6)
+        self.assertEqual(row["lead"], 3.8)
+        self.assertEqual(row["gate_used"], 0)
+        # Numbers outside their range are dropped, not stored as measurements.
+        row = self.row(top_sim=101, lead=-1, gate_used=2)
+        self.assertIsNone(row["top_sim"])
+        self.assertIsNone(row["lead"])
+        self.assertIsNone(row["gate_used"])
+
+    def test_the_gate_rate_is_summarised_from_hash_rows(self):
+        # Only captures that got a hash answer can say whether the threshold
+        # paid the gate; a frame with no hash is not a zero-similarity capture.
+        scan_metrics.record(self.db, {"outcome": "match", "top_sim": 88.6,
+                                      "lead": 3.8, "gate_used": 0})
+        scan_metrics.record(self.db, {"outcome": "match", "top_sim": 84.9,
+                                      "lead": 1.9, "gate_used": 1})
+        scan_metrics.record(self.db, {"outcome": "no_card", "top_sim": 79.0,
+                                      "gate_used": 1})
+        scan_metrics.record(self.db, {"outcome": "no_card"})
+
+        data = scan_metrics.summary(self.db)
+        self.assertEqual(data["gate"], {"rows": 3, "gated": 2,
+                                        "accepted": 2, "accepted_gated": 1})
+
     def test_summary_groups_by_device(self):
         for total in (100, 200, 300, 400):
             scan_metrics.record(self.db, {

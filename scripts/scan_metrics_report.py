@@ -126,6 +126,17 @@ def main():
         print("Capturing - median ms per stage, p90 in brackets")
         report(data["devices"], CAPTURE_COLUMNS)
 
+        gate = data["gate"]
+        if gate["rows"]:
+            rate = 100 * gate["gated"] / gate["rows"]
+            print(f"\nHash gate: {gate['rows']} capture(s) with a hash answer; "
+                  f"{gate['gated']} paid the server gate ({rate:.0f}%), "
+                  f"{gate['rows'] - gate['gated']} skipped it.")
+            if gate["accepted"]:
+                acc = 100 * gate["accepted_gated"] / gate["accepted"]
+                print(f"  accepted matches: {gate['accepted']}, "
+                      f"{gate['accepted_gated']} of them paid the gate ({acc:.0f}%).")
+
         slowest = [row for row in data["slowest"] if row["total_ms"]]
         if slowest:
             print("\nSlowest captures:")

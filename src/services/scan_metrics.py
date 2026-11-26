@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS scan_metrics (
     crop_ms REAL,
     hash_ms REAL,
     gate_ms REAL,
+    gate_used INTEGER,
+    top_sim REAL,
+    lead REAL,
     cloud_ms REAL,
     boot_ms REAL,
     modules_ms REAL,
@@ -190,6 +193,9 @@ def record(db_path, payload: Dict[str, Any]) -> int:
     for field in STAGES:
         values[field] = _number(payload, field, _MAX_MS)
 
+    values["top_sim"] = _number(payload, "top_sim", 100)
+    values["lead"] = _number(payload, "lead", 100)
+    values["gate_used"] = _int(payload.get("gate_used"), 1)
     values["frames"] = _int(payload.get("frames"), 100)
     values["hardware_concurrency"] = _int(payload.get("hardware_concurrency"), 256)
     values["device_memory"] = _number(payload, "device_memory", 1024)
@@ -322,9 +328,22 @@ def summary(db_path, days: int = 7, limit: int = 20000) -> Dict[str, Any]:
     captures = [row for row in rows if (row["kind"] or "capture") == "capture"]
     startups = [row for row in rows if row["kind"] == "startup"]
 
+    # Captures that got a hash answer carry the gate's inputs. The server gate
+    # is only paid when that answer is not strong enough, so this is the rate
+    # normal (non-fallback) captures actually pay, and how many paid despite
+    # ending in an accepted match.
+    hash_rows = [row for row in captures if row["top_sim"] is not None]
+    accepted = [row for row in hash_rows if (row["outcome"] or "") == "match"]
+
     return {
         "window_days": days,
         "captures": len(captures),
+        "gate": {
+            "rows": len(hash_rows),
+            "gated": sum(1 for row in hash_rows if row["gate_used"]),
+            "accepted": len(accepted),
+            "accepted_gated": sum(1 for row in accepted if row["gate_used"]),
+        },
         "startups": len(startups),
         "devices": _group(captures, CAPTURE_STAGES),
         "startup_devices": _group(startups, STARTUP_STAGES),
