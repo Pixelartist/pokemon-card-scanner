@@ -140,18 +140,47 @@ function readRGBA(el) {
  */
 let _cropCanvas = null, _cropCtx = null;
 
+// An all-zero read is all-zero everywhere, so a sparse walk says whether the
+// readback carries any colour at all. Full-frame scans here would cost more
+// than the read they are checking.
+function hasColour(data) {
+  const step = 4 * 251;
+  for (let i = 0; i < data.length; i += step) {
+    if (data[i] || data[i + 1] || data[i + 2]) return true;
+  }
+  return false;
+}
+
 function readOwnPixels(el) {
   const w = el.videoWidth || el.naturalWidth || el.width;
   const h = el.videoHeight || el.naturalHeight || el.height;
   if (!w || !h) return null;
+  const read = () => {
+    _cropCtx.drawImage(el, 0, 0);
+    return _cropCtx.getImageData(0, 0, w, h).data;
+  };
   if (!_cropCanvas) {
     _cropCanvas = document.createElement('canvas');
     _cropCtx = _cropCanvas.getContext('2d', { willReadFrequently: true });
   }
   if (_cropCanvas.width !== w) _cropCanvas.width = w;
   if (_cropCanvas.height !== h) _cropCanvas.height = h;
-  _cropCtx.drawImage(el, 0, 0);
-  return { rgba: _cropCtx.getImageData(0, 0, w, h).data, w, h };
+  let data = read();
+  // The reuse itself is safe (synchronous through here), but a readback from
+  // this canvas has come back all-zero while the same source cropped cleanly
+  // minutes later: a 600x825 still with a card in it produced a 500x704 crop of
+  // pure black (alpha set, RGB zero), and the server gate then refused that
+  // crop at distance 0.294. Do not believe a blank read from the reused canvas;
+  // rebuild it and read once more before calling the frame black.
+  if (!hasColour(data)) {
+    _cropCanvas = document.createElement('canvas');
+    _cropCanvas.width = w;
+    _cropCanvas.height = h;
+    _cropCtx = _cropCanvas.getContext('2d', { willReadFrequently: true });
+    data = read();
+    if (!hasColour(data)) return null;
+  }
+  return { rgba: data, w, h };
 }
 
 class PokemonCardDetector {
@@ -280,7 +309,10 @@ export function cropCardStraight(imageEl, detection) {
   if (eh >= ew) { outH = LONG_EDGE; outW = Math.max(32, Math.round(LONG_EDGE * ew / eh)); }
   else { outW = LONG_EDGE; outH = Math.max(32, Math.round(LONG_EDGE * eh / ew)); }
   const H = solveHomography([[0, 0], [1, 0], [1, 1], [0, 1]], quad);
-  if (!H) { canvas.width = canvas.height = 1; return canvas; }
+  // A degenerate quad can solve to a finite-looking array with a NaN in it;
+  // the pixel loop then writes NaN -> 0 for every channel, which is the same
+  // black crop a failed read gives.
+  if (!H || !H.every(Number.isFinite)) { canvas.width = canvas.height = 1; return canvas; }
   canvas.width = outW; canvas.height = outH;
   const ctx = canvas.getContext('2d');
   const img = ctx.createImageData(outW, outH), o = img.data;

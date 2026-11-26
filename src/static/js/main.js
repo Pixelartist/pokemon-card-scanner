@@ -592,6 +592,27 @@ const scanBtn = document.getElementById('scan-btn');
 //                                 match.
 // Both return { detection, candidates, cropCanvas, nearMiss } or { noCard: true };
 // the caller falls back to the cloud /api/scan when the local index has no match.
+
+// A camera stream that has not produced a decoded frame yet paints black. At
+// best that hashes to nonsense and at worst the server gate refuses the black
+// crop at distance 0.294, which reads as "not a card" for a card that is right
+// there. A 16x16 probe is enough to tell a blank frame from a dark photo.
+function isBlankFrame(canvas) {
+  try {
+    const probe = document.createElement('canvas');
+    probe.width = 16; probe.height = 16;
+    const ctx = probe.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(canvas, 0, 0, 16, 16);
+    const data = ctx.getImageData(0, 0, 16, 16).data;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] || data[i + 1] || data[i + 2]) return false;
+    }
+    return true;
+  } catch (e) {
+    return false;   // a probe must never break a scan
+  }
+}
+
 window.__cardScanner = {
   detector: null,
   matcher: null,
@@ -736,6 +757,9 @@ window.__cardScanner = {
   },
 
   async _serverGate(canvas) {
+    // Never upload a blank crop: the server can only answer with a far distance,
+    // and that refusal says nothing about whether a card was there.
+    if (isBlankFrame(canvas)) return { ok: false, reason: 'blank-crop' };
     try {
       const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
       const body = new FormData();
@@ -824,7 +848,15 @@ window.__cardScanner = {
     const shots = [];
     const grabStarted = performance.now();
     for (let i = 0; i < CONSENSUS_FRAMES; i++) {
-      shots.push(this._grabFrame(video));
+      let shot = this._grabFrame(video);
+      // The first frame after a stream starts, resumes, or comes back from a
+      // throttled tab can be blank while the camera itself is fine. One retry
+      // costs 60 ms and keeps a black still out of the hash and the gate.
+      if (isBlankFrame(shot)) {
+        await new Promise(r => setTimeout(r, 60));
+        shot = this._grabFrame(video);
+      }
+      shots.push(shot);
       if (i < CONSENSUS_FRAMES - 1) await new Promise(r => setTimeout(r, CONSENSUS_GAP_MS));
     }
     metrics.grab_ms = performance.now() - grabStarted;
@@ -882,15 +914,24 @@ window.__cardScanner = {
         // itself frame after frame (measured: 80.95 similarity, three in a row).
         // Consensus therefore gates presence, and the identity sources still
         // decide whether a card is there: a strong hash, or the server fingerprint.
-        const strong = best.bestSimilarity * 100 >= MIN_TRUSTED_SIM;
+        // A frame whose margin dropped every hit has no candidate to show, so
+        // it cannot skip the gate that supplies one.
+        const strong = best.candidates && best.candidates.length > 0 &&
+                       best.bestSimilarity * 100 >= MIN_TRUSTED_SIM;
+        // What that decision was made from. `gate_used` is the measurement:
+        // a local accept without it skipped the server entirely.
+        metrics.top_sim = best.topSimilarity ?? null;
+        metrics.lead = best.lead ?? null;
+        metrics.gate_used = strong ? 0 : 1;
         const verdict = strong
           ? { ok: true }
           : await this.confirmWithServer(best.cropCanvas);
         metrics.gate_ms += verdict.ms || 0;
         if (verdict.ok) {
           this._lastReject = null;
-          const shot = this._acceptCrop(best);
-          return { ...best, ...shot, captureSeq: seq, agreement: agreeing.length,
+          const accepted = this._gateCandidate(best, verdict);
+          const shot = this._acceptCrop(accepted);
+          return { ...accepted, ...shot, captureSeq: seq, agreement: agreeing.length,
                    frames: frames.length, metrics };
         }
         this._lastReject = verdict;
@@ -904,12 +945,16 @@ window.__cardScanner = {
     // past, and no amount of server confirmation makes that one card.
     const single = hits.length === 1 ? hits[0] : null;
     if (single) {
+      metrics.top_sim = single.topSimilarity ?? null;
+      metrics.lead = single.lead ?? null;
+      metrics.gate_used = 1;
       const verdict = await this.confirmWithServer(single.cropCanvas);
       metrics.gate_ms += verdict.ms || 0;
       if (verdict.ok) {
         this._lastReject = null;
-        const shot = this._acceptCrop(single);
-        return { ...single, ...shot, captureSeq: seq, agreement: 1,
+        const accepted = this._gateCandidate(single, verdict);
+        const shot = this._acceptCrop(accepted);
+        return { ...accepted, ...shot, captureSeq: seq, agreement: 1,
                  frames: frames.length, metrics };
       }
       this._lastReject = verdict;
@@ -933,6 +978,39 @@ window.__cardScanner = {
     return { cropDataUrl, cropThumb };
   },
 
+  // The gate answers with an id, while the hash list can be empty for a card it
+  // read correctly (the margin drops coin-flip leads). Without this the accept
+  // path had no identity and the caller re-sent the crop to /api/scan. When the
+  // gate accepted, its id is the answer and its distance the confidence.
+  _gateCandidate(frame, verdict) {
+    if (!verdict || !verdict.ok || !verdict.id) return frame;
+    if (frame.candidates && frame.candidates.length) return frame;
+    const row = this.matcher.cardHashes.get(verdict.id)
+             || this.matcher.cardHashes.get(String(verdict.id).replace(/^de_/, ''))
+             || {};
+    const name = verdict.name || row.name || verdict.id;
+    const image = row.image || '';
+    const distance = Number(verdict.distance);
+    return {
+      ...frame,
+      candidates: [{
+        id: verdict.id,
+        name,
+        number: row.number,
+        rarity: row.rarity,
+        set: row.set,
+        image_url: image,
+        // The 0..1 scale the hash candidates use, read off the fingerprint
+        // distance instead: 0.005 is near-exact, 0.20 is the accept limit.
+        similarity: isFinite(distance) ? Math.max(0, 1 - distance) : 1,
+        card: {
+          id: verdict.id, name, number: row.number, rarity: row.rarity,
+          set: { name: row.set }, images: { small: image, large: image },
+        },
+      }],
+    };
+  },
+
   // Detect + straighten-crop + hash-match in one shot. The consensus path calls
   // this once per frame; an uploaded image calls it once, with a server opinion.
   async analyseFrame(source, { server = true, quad = null } = {}) {
@@ -951,6 +1029,13 @@ window.__cardScanner = {
     const { cropCardStraight } = await import('/static/js/card-quickdraw.js');
     const crop = cropCardStraight(source, det);
     const tCrop = performance.now();
+    // cropCardStraight() reports a crop it could not read as 1x1. Hashing that
+    // would invent a match and sending it to the gate would spend a call on a
+    // blank image, so treat it as no card here.
+    if (!crop || crop.width < 32 || crop.height < 32) {
+      return { noCard: true,
+               timings: { detect_ms: tDetect - tStart, crop_ms: tCrop - tDetect, hash_ms: 0 } };
+    }
     // Gate at 78 (not 85): real photos score well below reference-image
     // similarity (~92), so the old cutoff silently dropped near-matches.
     // check() still requires >= THRESHOLD for the auto-capture toast.
@@ -974,18 +1059,22 @@ window.__cardScanner = {
     for (const m of all) {
         if (!uniq.some(u => baseId(u.id) === baseId(m.id))) uniq.push(m);
     }
-    // A corner model answers "where are the four corners?", not "is this a
-    // card?": a head with headphones gives it a plausible quad. Measured on the
-    // face captures in data/scans it scored 0.61 where real cards score
-    // 0.75-1.0 at the same resolution, and geometry cannot separate them (that
-    // quad's ratio was 0.75, a card's 0.71).
-    //
-    // The hash cannot either. Measured in the browser against card-hashes.json
-    // (40,401 cards), the face crops score 76.2, 77.1 and 81.0 - above the 78
-    // accept gate - while real captures score 81.9 to 96.2. So similarity is
-    // never used as a card-presence floor; it only decides whether a match is
-    // strong enough to need no second opinion.
-    const strong = uniq.length > 0 && uniq[0].similarity >= MIN_TRUSTED_SIM;
+    // The model answers "where are the four corners?", not "is this a card?":
+    // a head gives it a plausible quad. The hash cannot separate one either -
+    // measured face crops score 76.2-81.0, real captures 81.9-96.2 - so
+    // similarity is not a presence floor; it only decides whether a match needs
+    // a second opinion.
+    // A flat 78 cutoff passes crowded matches, and a lead of 8 was measured
+    // unreachable (a real card led by ~3). On 597 crop-geometry samples a tie
+    // names the right card 34% of the time, a 0.95-point lead 55%, 1.9 points
+    // 86% and 3.8+ points 93%. 1.5 drops only the coin-flip bands; the gate
+    // names whatever it drops.
+    const matches = uniq.filter(m =>
+        m.similarity >= 78 &&
+        (uniq.length < 2 || m.similarity - uniq[1].similarity >= MARGIN));
+    // A hit the margin dropped has no candidate to show, so it cannot skip the
+    // gate that would name the card.
+    const strong = matches.length > 0 && matches[0].similarity >= MIN_TRUSTED_SIM;
     // A single frame must be corroborated here; a frame inside a burst must not,
     // or a card that is merely hard to read would be dropped before the burst
     // and the consensus layer could see it at all.
@@ -1004,19 +1093,6 @@ window.__cardScanner = {
       }
       this._lastReject = null;
     }
-    // A flat 78 cutoff passes a crowded band, so a near-threshold hit is a coin
-    // flip. Requiring the top hit to lead the nearest *different* card by >= 8
-    // points rejects those: real cards score ~90 and clear it; a 75-vs-74 pair
-    // does not. (Whole-card hash is frame-edge sensitive — 5% skew alone drops
-    // a clean image's self-similarity 92 -> 57.)
-    // A lead of 8 was unreachable: measured on a clean, full-frame scan of a
-    // real card the true hit leads the next card by ~3 points (82.9 vs 80.0),
-    // so every capture failed the gate and dropped to "unidentified". 2 still
-    // rejects the crowded 75-vs-74 coin flips while letting real cards through.
-    const MARGIN = 2;
-    const matches = uniq.filter(m =>
-        m.similarity >= 78 &&
-        (uniq.length < 2 || m.similarity - uniq[1].similarity >= MARGIN));
     // EN and DE prints of one card hash identically, so `uniq` keeps a single
     // entry and the other language silently disappears. Offer the twin of an
     // accepted hit as a second option — scanning a German card must be able to
@@ -1027,6 +1103,12 @@ window.__cardScanner = {
       if (twin && ![...matches, ...twins].some(x => x.id === twin.id)) twins.push(twin);
     }
     const bestSimilarity = all.length ? all[0].similarity / 100 : 0;
+    // The gate's own inputs on the 0-100 scale it compares: the top unique hit
+    // and its lead over the nearest different card. Recorded with the capture
+    // so the threshold's real-world rate can be read back without another run.
+    const topSimilarity = uniq.length ? +uniq[0].similarity.toFixed(1) : null;
+    const lead = uniq.length > 1
+      ? +(uniq[0].similarity - uniq[1].similarity).toFixed(1) : null;
     // A single still (an uploaded image) is its own answer, so encode it here.
     // A burst frame does not: a 3-frame capture used to make six JPEGs — the
     // full crop and the queue thumb for every still — while only the accepted
@@ -1045,6 +1127,8 @@ window.__cardScanner = {
     return {
       detection: det,
       bestSimilarity,
+      topSimilarity,
+      lead,
       cropDataUrl,
       cropThumb,
       cropCanvas: crop,
@@ -1091,6 +1175,9 @@ if (scanBtn) {
     scanBtn.addEventListener('click', async function() {
         const capture = scanMetrics.begin();
         const cameraOpen = !document.getElementById('camera-section').classList.contains('hidden');
+        // The straightened crop of THIS scan, for the server fallback. Never a
+        // cached one: that belongs to whichever card was matched last.
+        let browserCrop = null;
 
         // Fast path (1vcian architecture): while the camera is open, detect +
         // hash-match the live frame right here in the browser — YOLO11 OBB
@@ -1168,6 +1255,14 @@ if (scanBtn) {
                     lastBrowserBest = res ? (res.bestSimilarity || 0) : 0;
                     lastNearMiss = (res && res.nearMiss) || [];
                     const uploadSrc = (res && res.cropCanvas) || snap;
+                    // Hand the server the crop the browser just straightened. With
+                    // it, /api/scan stores and matches that crop; without it, the
+                    // server re-detects and keeps its axis-aligned bbox crop, with
+                    // the background the browser already removed. A frame the
+                    // browser could not cut (no detection) has no crop to send.
+                    if (res && res.cropCanvas) {
+                        browserCrop = await new Promise(r => res.cropCanvas.toBlob(r, 'image/jpeg', 0.92));
+                    }
                     currentImage = await new Promise(r => uploadSrc.toBlob(r, 'image/jpeg', 0.9));
                 } catch (e) {
                     console.warn('[Scanner] browser identify failed, using cloud:', e);
@@ -1194,12 +1289,12 @@ if (scanBtn) {
         
         const formData = new FormData();
         formData.append('image', currentImage);
-        // Send the straightened card crop the browser already computed — the
-        // server stores it directly instead of re-detecting on the raw frame
-        // (which produced garbage 140x175 crops of table edges).
-        if (window.__cardScanner && window.__cardScanner._lastCropDataUrl) {
-            const blob = await (await fetch(window.__cardScanner._lastCropDataUrl)).blob();
-            formData.append('browser_crop', blob, 'crop.jpg');
+        // The server stores this crop directly instead of re-detecting on the
+        // upload (which produced garbage 140x175 crops of table edges). Only a
+        // crop cut from this scan's frame is ever attached; an uploaded file is
+        // not run through the browser detector, so it has none.
+        if (browserCrop) {
+            formData.append('browser_crop', browserCrop, 'crop.jpg');
         }
         
         const setHint = document.getElementById('set-hint').value;
@@ -1276,11 +1371,13 @@ const MIN_NEAR_MISS_SIM = 0.75;
 // candidate at all. The corner model fires at 0.61 on a face in front of the
 // camera and at 0.75-1.0 on real cards at native resolution.
 const MIN_CARD_CONF = 45;
-// Hash similarity (0-100) that needs no second opinion. Measured in the browser
-// against card-hashes.json: clean card crops 95-96, webcam crops 81.9-96.2, and
-// face crops 76.2-81.0 — overlapping, which is why this is a trust threshold
-// and not a card-presence floor.
-const MIN_TRUSTED_SIM = 90;
+// Hash similarity (0-100) that needs no second opinion; a trust threshold, not
+// a card-presence floor (measured non-card ceiling 81.0). On 597 crop-geometry
+// samples, correct tops score a median of 88.6 and 79.7% clear 85, which cuts
+// gate calls from 65% (at 90) to 37%.
+const MIN_TRUSTED_SIM = 85;
+// The lead the top hit needs over the nearest *different* card; see analyseFrame.
+const MARGIN = 1.5;
 // Server fingerprint distance that still counts as a card: real cards measured
 // 0.06-0.12, face crops 0.30-0.33, so 0.20 sits between them.
 const MAX_SERVER_DISTANCE = 0.20;
@@ -1289,6 +1386,7 @@ const MAX_SERVER_DISTANCE = 0.20;
 // instead of a bare "no card in frame" after a 95%-confidence detection.
 function rejectReason(r) {
   if (!r) return null;
+  if (r.reason === 'blank-crop') return 'the camera frame came back blank';
   if (r.distance == null || !isFinite(r.distance)) {
     return r.reason === 'no-hash' ? 'nothing local to confirm it against'
                                   : 'the server could not read the crop';
